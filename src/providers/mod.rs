@@ -1,4 +1,5 @@
 //! Provider registry: build provider impls from config.
+pub mod go;
 pub mod openai;
 pub mod anthropic;
 #[cfg(test)]
