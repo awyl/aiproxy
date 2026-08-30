@@ -113,3 +113,19 @@ mcp:
     - name: github
       url: https://api.githubcopilot.com/mcp/
       api_key_env: GITHUB_TOKEN
+
+# Local CPU embeddings — fake provider "embeddings-local". Each model is a
+# llama-server child, spawned ON DEMAND on its first request and killed after
+# idle_ttl_secs without traffic. Installed GGUF files must exist on disk.
+# Grab them with e.g.: huggingface-cli download nomic-ai/nomic-embed-text-v1.5-GGUF --local-dir /models
+embeddings:
+  llama_bin: llama-server          # path or bare name on PATH (llama.cpp build)
+  idle_ttl_secs: 3600              # kill child after 1h idle (seconds)
+  models:
+    - id: nomic-embed-text-v1.5    # proxied id: embeddings-local/nomic-embed-text-v1.5
+      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
+      port: 18081                  # loopback port for the child (omitted -> 18081 + index)
+    - id: all-MiniLM-L6-v2
+      model_file: /models/all-MiniLM-L6-v2.Q8_0.gguf
+    - id: bge-small-en-v1.5
+      model_file: /models/bge-small-en-v1.5.Q8_0.gguf

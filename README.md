@@ -47,6 +47,37 @@ One cadence for everything: surfaces ride the same discovery pass. A go
 (startup + each `model_refresh_secs` tick) — no independent TTL, no special
 treatment. Failures keep the last-known map and log a warning.
 
+## Local embeddings (fake provider)
+
+`POST /v1/embeddings` relays to on-demand local llama-server children behind the
+fake provider `embeddings-local` — no API key, no cloud:
+
+```yaml
+embeddings:
+  llama_bin: llama-server   # llama.cpp binary (install: https://github.com/ggml-org/llama.cpp)
+  idle_ttl_secs: 3600       # kill a child after 1h with no traffic (spawn on first request)
+  models:
+    - { id: nomic-embed-text-v1.5, model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf }
+    - { id: all-MiniLM-L6-v2,       model_file: /models/all-MiniLM-L6-v2.Q8_0.gguf }
+    - { id: bge-small-en-v1.5,      model_file: /models/bge-small-en-v1.5.Q8_0.gguf }
+```
+
+Each model runs as its own child process on 127.0.0.1 (default ports 18081+,
+override per model with `port:`). Only the requested model loads into RAM, so
+the configured ones fit well under 1GB each (nomic Q8 ≈ 150MB weights,
+MiniLM ≈ 30MB, bge-small ≈ 40MB — single-resident tops out ~450MB). GGUF
+files: download from Hugging Face (e.g. `nomic-ai/nomic-embed-text-v1.5-GGUF`).
+
+Call it OpenAI-style:
+
+```bash
+curl http://localhost:8080/v1/embeddings -H "Authorization: Bearer $AIPROXY_TOKEN" \
+  -d '{"model": "embeddings-local/nomic-embed-text-v1.5", "input": "some text"}'
+```
+
+Catalog: `/v1/models` lists `embeddings-local/*` (surface `embedding`) — chat
+routers reject these ids with a surface hint.
+
 ## Quickstart
 
 ```bash

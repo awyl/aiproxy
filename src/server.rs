@@ -80,6 +80,16 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
         subscriptions,
     };
 
+    // Embedding children: idle reaper (kill + release after idle_ttl_secs).
+    let emb = state.embeddings.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            emb.reaper_round().await;
+        }
+    });
+
     let mcp_router = crate::mcp::mcp_router(&config.mcp.servers, token.clone()).map_err(ServerError::Mcp)?;
 
     let app = Router::new()
