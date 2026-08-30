@@ -40,6 +40,8 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
+    pub discover: bool,
+    #[serde(default)]
     pub endpoint_by_model: HashMap<String, String>,
     #[serde(default)]
     pub surface_map_url: Option<String>,
@@ -265,6 +267,7 @@ mcp:
         assert_eq!(cfg.port, 9090);
         assert_eq!(cfg.effective_token(), Some("secret-literal".into()));
         assert_eq!(cfg.upstreams[0].models, vec!["gpt-4o", "gpt-4o-mini"]);
+        assert!(!cfg.upstreams[0].discover, "discover defaults to false");
         assert_eq!(
             cfg.upstreams[1].effective_base_url(),
             "https://opencode.ai/zen/go/v1"
@@ -312,6 +315,16 @@ upstreams:
         let yaml = "upstreams:\n  - { name: go, kind: opencode-go, endpoint_by_model: { x: bogus } }\n";
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("endpoint_by_model"));
+    }
+
+    #[test]
+    fn discover_flag_parses() {
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai, discover: true }
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        assert!(cfg.upstreams[0].discover);
     }
 
     #[test]

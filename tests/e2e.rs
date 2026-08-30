@@ -41,7 +41,7 @@ async fn spawn_daemon() -> (String, tokio::task::JoinHandle<()>) {
     tokio::spawn(async move { axum::serve(upstream, mock_upstream::app()).await.unwrap() });
 
     let yaml = format!(
-        "port: 0\ntoken: e2e-tok\nupstreams:\n  - name: mock\n    kind: openai\n    base_url: http://{uaddr}/v1\n"
+        "port: 0\ntoken: e2e-tok\nupstreams:\n  - name: mock\n    kind: openai\n    base_url: http://{uaddr}/v1\n    discover: true\n"
     );
     let path = std::env::temp_dir().join(format!("aiproxy-e2e-{}.yaml", std::process::id()));
     std::fs::write(&path, yaml).unwrap();

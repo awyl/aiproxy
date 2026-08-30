@@ -1,3 +1,11 @@
 /target
 .env
 .llm-wiki/
+# local dev environment
+.direnv/
+.envrc
+flake.nix
+flake.lock
+
+# project wiki vault (local knowledge base)
+.llm-wiki/

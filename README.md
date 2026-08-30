@@ -24,6 +24,21 @@ Model ids are always `{upstream name}/{model id}` — e.g. `opencode-go/kimi-k3`
 upstream, checks the model's wire surface, and relays upstream SSE bytes
 verbatim.
 
+## Discovery
+
+Only OpenCode Go auto-discovers unconditionally (its catalog fetch is public,
+keyless). Every other upstream is catalog-only unless you opt in:
+
+| Config | Behavior |
+|---|---|
+| `models: [a, b]` | static catalog, never probed (recommended) |
+| `discover: true` | probes `GET <base_url>/models` at startup + each refresh |
+| neither | empty catalog — requests still route, agents see no models |
+
+`discover: true` needs a reachable, keyed upstream — otherwise expect
+per-refresh warnings in the log (e.g. `401` against `api.openai.com` or
+`Transport` against an idle `localhost:11434` Ollama).
+
 ## Quickstart
 
 ```bash

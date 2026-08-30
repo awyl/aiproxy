@@ -83,19 +83,145 @@ impl Provider for StaticProvider {
     }
 }
 
+/// Upstream whose discovery is disabled or whose `models:` list is static.
+/// "Static" providers serve discovery only; `NoDiscoveryProvider` keeps the
+/// real streaming impl but never probes the upstream `list_models` endpoint.
+pub struct NoDiscoveryProvider {
+    inner: Arc<dyn Provider>,
+}
+
+impl std::fmt::Debug for NoDiscoveryProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoDiscoveryProvider")
+            .field("inner", &self.inner.id())
+            .finish()
+    }
+}
+impl NoDiscoveryProvider {
+    pub fn new(inner: Arc<dyn Provider>) -> Arc<dyn Provider> {
+        Arc::new(NoDiscoveryProvider { inner })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for NoDiscoveryProvider {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn surface_of(&self, model: &str) -> ModelSurface {
+        self.inner.surface_of(model)
+    }
+    async fn list_models(&self) -> Result<Vec<Model>, ProviderError> {
+        // Discovery opt-out: no catalog probing, no warnings.
+        Ok(Vec::new())
+    }
+    async fn chat_completions(
+        &self,
+        req: Value,
+        ctx: &RequestContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.inner.chat_completions(req, ctx).await
+    }
+    async fn messages(
+        &self,
+        req: Value,
+        ctx: &RequestContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.inner.messages(req, ctx).await
+    }
+    async fn responses(
+        &self,
+        req: Value,
+        ctx: &RequestContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.inner.responses(req, ctx).await
+    }
+}
+
 pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
     cfg.upstreams
         .iter()
-        .map(|u| match u.kind {
+        .enumerate()
+        .map(|(i, u)| match u.kind {
             UpstreamKind::Openai => {
-                StaticProvider::from_cfg(u).unwrap_or_else(|| Arc::new(OpenAiProvider::new(u)))
+                if let Some(p) = StaticProvider::from_cfg(u) {
+                    p
+                } else if u.discover {
+                    Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>
+                } else {
+                    NoDiscoveryProvider::new(Arc::new(OpenAiProvider::new(u)))
+                }
             }
             UpstreamKind::Anthropic => {
-                StaticProvider::from_cfg(u).unwrap_or_else(|| Arc::new(AnthropicProvider::new(u)))
+                if let Some(p) = StaticProvider::from_cfg(u) {
+                    p
+                } else if u.discover {
+                    Arc::new(AnthropicProvider::new(u)) as Arc<dyn Provider>
+                } else {
+                    NoDiscoveryProvider::new(Arc::new(AnthropicProvider::new(u)))
+                }
             }
             UpstreamKind::OpencodeGo => {
                 StaticProvider::from_cfg(u).unwrap_or_else(|| Arc::new(OpencodeGoProvider::new(u)))
             }
         })
         .collect()
+}#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::testutil::MockProvider;
+
+    #[tokio::test]
+    async fn no_discovery_wrapper_passes_through_routing_but_not_probing() {
+        let inner = Arc::new(MockProvider::with_surface(
+            "openai",
+            vec!["gpt-4o".into()],
+            crate::provider::ModelSurface::ChatCompletions,
+        ));
+        let wrapped = NoDiscoveryProvider::new(inner);
+        assert_eq!(wrapped.id(), "openai");
+        assert_eq!(
+            wrapped.surface_of("gpt-4o"),
+            crate::provider::ModelSurface::ChatCompletions
+        );
+        // no probing: empty catalog, no network
+        assert!(wrapped.list_models().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_providers_respects_discover_opt_in() {
+        let cfg = Config::from_yaml(
+            r#"
+upstreams:
+  - { name: skipped, kind: openai }
+  - { name: pinned, kind: anthropic, models: [claude-x] }
+  - { name: go, kind: opencode-go }
+"#,
+        )
+        .unwrap();
+
+        let providers = build_providers(&cfg);
+        assert_eq!(providers.len(), 3);
+
+        // openai without models and without discover -> exists, but catalog empty
+        let skipped = providers
+            .iter()
+            .find(|p| p.id() == "skipped")
+            .expect("provider present");
+        assert!(skipped.list_models().await.unwrap().is_empty());
+
+        // static models list -> catalog-only upstream
+        let pinned = providers
+            .iter()
+            .find(|p| p.id() == "pinned")
+            .unwrap();
+        let ids: Vec<String> = pinned
+            .list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["claude-x"]);
+    }
 }

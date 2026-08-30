@@ -9,9 +9,9 @@ token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disab
 model_refresh_secs: 1800           # discovery interval; 0 = fetch once at startup
 
 upstreams:
-  # OpenCode Go — flagship upstream. Models + wire surfaces auto-discovered:
-  # ids from https://opencode.ai/zen/go/v1/models, surfaces parsed from
-  # surface_map_url on refresh (builtin snapshot fallback).
+  # OpenCode Go — flagship upstream. Models + wire surfaces auto-discovered
+  # unconditionally: ids from https://opencode.ai/zen/go/v1/models (public),
+  # surfaces parsed from surface_map_url on refresh (builtin snapshot fallback).
   - name: opencode-go
     kind: opencode-go
     api_key_env: OPENCODE_GO_API_KEY
@@ -19,20 +19,31 @@ upstreams:
     #   qwen3.9-x: messages
     # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
 
-  # Any OpenAI-compatible gateway on a custom base URL.
+  # Any other upstream is catalog-only unless you opt in:
+  #   - `models: [...]`   -> static list, never probed (recommended)
+  #   - `discover: true`  -> probe GET <base_url>/models at startup/refresh.
+  #                          Requires the upstream to be reachable AND keyed;
+  #                          otherwise expect per-refresh warnings (401 etc).
+  # Omitting both declarations a provider with an EMPTY catalog: requests
+  # still route to it, but agents won't see models in /v1/models.
+
+  # OpenAI-compatible gateway with a pinned model list (no probing):
   - name: openai
     kind: openai
     api_key_env: OPENAI_API_KEY
+    models: [gpt-4o, gpt-4o-mini]
 
-  # Anthropic-compatible gateway.
+  # Anthropic-compatible gateway, discovery enabled:
   - name: anthropic
     kind: anthropic
     api_key_env: ANTHROPIC_API_KEY
+    discover: true
 
-  # Keyless local server speaking the OpenAI surface.
+  # Keyless local server (e.g. Ollama) speaking the OpenAI surface:
   - name: local
     kind: openai
     base_url: http://localhost:11434/v1
+    discover: true
 
 mcp:
   servers:

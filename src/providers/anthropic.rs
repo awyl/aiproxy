@@ -189,6 +189,7 @@ mod tests {
 
     fn provider(base: &str) -> AnthropicProvider {
         let cfg = crate::config::UpstreamConfig {
+            discover: false,
             name: "anthropic".into(),
             kind: crate::config::UpstreamKind::Anthropic,
             base_url: Some(base.into()),
