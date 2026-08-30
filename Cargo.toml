@@ -22,3 +22,5 @@ rmcp = { version = "=3.1.4", features = ["server", "client", "transport-streamab
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+axum = "0.8"
+reqwest = { version = "0.12", features = ["json"] }

@@ -3,7 +3,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use crate::api::{anthropic_error, check_surface, relay_or_error, AppState, Surface};
@@ -11,24 +11,14 @@ use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, ProviderError, RequestContext};
 
 pub fn anthropic_router(token: Option<String>) -> Router<AppState> {
+    // NOTE: /v1/models is served once, by the OpenAI router (OpenAI shape).
+    // Anthropic clients listing models get the same catalog; the ids are what
+    // matter and the two shapes differ only cosmetically.
     apply_auth(
         Router::new()
-            .route("/v1/models", get(list_models))
             .route("/v1/messages", post(messages)),
         token,
     )
-}
-
-pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
-    let data: Vec<Value> = state
-        .registry
-        .models()
-        .into_iter()
-        .map(|m| {
-            json!({"type": "model", "id": m.id, "display_name": m.display_name, "created_at": m.created_at})
-        })
-        .collect();
-    (StatusCode::OK, Json(json!({ "data": data }))).into_response()
 }
 
 pub async fn messages(
@@ -109,33 +99,6 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
-    }
-
-    #[tokio::test]
-    async fn models_endpoint_anthropic_shape() {
-        let app = anthropic_router(Some("tok".into())).with_state(test_state().await);
-        let (status, body) = send(
-            app,
-            Request::builder()
-                .uri("/v1/models")
-                .header("authorization", "Bearer tok")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let v: Value = serde_json::from_str(&body).unwrap();
-        let entries: Vec<&str> = v["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            entries,
-            vec!["anthropic/claude-sonnet-4", "openai/gpt-4o", "opencode-go/grok-4.6"]
-        );
-        assert_eq!(v["data"][0]["type"], "model");
     }
 
     #[tokio::test]
