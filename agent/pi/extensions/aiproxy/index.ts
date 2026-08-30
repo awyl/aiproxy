@@ -11,8 +11,12 @@
  *   surface "responses" -> openai-responses
  *
  * Setup:
- *   AIPROXY_URL=https://host:8080/v1   (default http://localhost:8080/v1)
+ *   AIPROXY_URL=http://host:8080/v1   (default http://localhost:8080/v1)
  *   AIPROXY_TOKEN=<shared token>       (default: nothing -> proxy runs auth-disabled)
+ *   AIPROXY_THINKING=high              (default "high"; off|low|medium|high|max)
+ *     default thinking level for every model. "off" registers models as
+ *     non-reasoning; otherwise all models get a thinkingLevelMap where the
+ *     chosen level is enabled and the rest are hidden.
  *
  * Enable via `pi -e ./extensions/aiproxy` or add the path to settings.
  */
@@ -67,10 +71,31 @@ function apiForSurface(surface: Surface | undefined): "openai-completions" | "an
   }
 }
 
-function reasoningFor(id: string): boolean {
-  // Known extended-thinking Go models. Anything else stays non-reasoning;
-  // override via models.json if needed.
-  return /\b(qwen3\.\d+(?:-\S+)?|glm-4\.\d|deepseek-r1)/.test(id);
+type ThinkingLevel = "off" | "low" | "medium" | "high" | "max";
+
+/**
+ * Build a thinkingLevelMap for all models from one default level.
+ * The chosen level maps to itself (pi level name == provider effort value for
+ * openai-completions); everything else is hidden (null). "off" disables
+ * thinking entirely (reasoning: false, no map).
+ */
+function thinkingFor(level: ThinkingLevel): {
+  reasoning: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+} {
+  if (level === "off") {
+    return { reasoning: false };
+  }
+  const map: Record<string, string | null> = {
+    minimal: null,
+    low: null,
+    medium: null,
+    high: null,
+    xhigh: null,
+    max: null,
+  };
+  map[level] = level;
+  return { reasoning: true, thinkingLevelMap: map };
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -78,6 +103,17 @@ export default async function (pi: ExtensionAPI) {
   const tokenEnv = process.env.AIPROXY_TOKEN_ENV ?? "AIPROXY_TOKEN";
   const token = process.env[tokenEnv]?.trim();
   const apiKey = token ? `$${tokenEnv}` : "$AIPROXY_TOKEN";
+
+  const requested = (process.env.AIPROXY_THINKING ?? "high").trim().toLowerCase();
+  const thinkingLevel: ThinkingLevel =
+    requested === "off" || requested === "low" || requested === "medium" || requested === "high" || requested === "max"
+      ? requested
+      : "high";
+  if (requested !== thinkingLevel) {
+    console.warn(
+      `[aiproxy] AIPROXY_THINKING='${requested}' invalid (off|low|medium|high|max); using 'high'`,
+    );
+  }
 
   let models: ProxyModel[] = [];
   try {
@@ -95,16 +131,20 @@ export default async function (pi: ExtensionAPI) {
     apiKey,
     authHeader: true,
     api: "openai-completions", // provider default; per-model api below wins
-    models: models.map((m) => ({
-      id: m.id,
-      name: m.display_name ?? m.id,
-      api: apiForSurface(m.surface),
-      reasoning: reasoningFor(m.id),
-      input: ["text"],
+    models: models.map((m) => {
+      const { reasoning, thinkingLevelMap } = thinkingFor(thinkingLevel);
+      return {
+        id: m.id,
+        name: m.display_name ?? m.id,
+        api: apiForSurface(m.surface),
+        reasoning,
+        thinkingLevelMap,
+        input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 16384,
-    })),
+        contextWindow: 128000,
+        maxTokens: 16384,
+      };
+    }),
   });
 
   if (models.length > 0) {

@@ -14,4 +14,4 @@ flake.lock
 aiproxy.yaml
 
 # extension deps
-extensions/aiproxy/node_modules/
+agent/pi/extensions/aiproxy/node_modules/

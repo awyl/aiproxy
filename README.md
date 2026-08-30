@@ -104,8 +104,34 @@ remote streamable-HTTP server.
 
 Binds `0.0.0.0` (all interfaces). No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything beyond a trusted LAN.
 
-## Security
+## Multi-subscription routing
 
+Give each upstream its own `token_env`; that token both authenticates and pins
+the requester to that subscription:
+
+```yaml
+upstreams:
+  - name: go-alice
+    kind: opencode-go
+    api_key_env: GO_ALICE_KEY
+    token_env: GO_ALICE_TOKEN    # alice's bearer token
+    discover: true
+  - name: go-bob
+    kind: opencode-go
+    api_key_env: GO_BOB_KEY
+    token_env: GO_BOB_TOKEN
+    discover: true
+```
+
+Global auth accepts the global token **or** any subscription token. Requests
+for a model prefix you don't own → `401`. Model ids are `go-alice/mimo-v2.5`,
+`go-bob/mimo-v2.5` — pick a subscription by prefix. Proxy-level keys stay
+per-upstream (`api_key_env`), so each subscription's quota is separate.
+
+## Network & Security
+
+- Binds the address in `bind` (default `127.0.0.1:8080`); use
+  `bind: 0.0.0.0:8080` for LAN/containers.
 - No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything public.
 - Upstream keys live in env vars only (`api_key_env`); never in the YAML.
 - No token configured = auth disabled (the proxy warns at startup).
@@ -115,8 +141,8 @@ Binds `0.0.0.0` (all interfaces). No TLS in v1 — put a reverse proxy (e.g. Cad
 Single crate, small modules, module boundaries as traits:
 
 ```
-config.rs       YAML schema + validation + env-key resolution
-auth.rs         shared bearer-token middleware (constant-time compare)
+config.rs       YAML schema + validation + env-key resolution (bind, token_env)
+auth.rs         token middleware: global OR subscription tokens, constant-time
 provider.rs     Provider trait + Model/ModelSurface/Event — the core interface
 providers/
   openai.rs     OpenAI-compatible gateway (kind "openai")
