@@ -413,6 +413,7 @@ use bytes::Bytes;
         let cfg = crate::config::UpstreamConfig {
             discover: false,
             token_env: None,
+            surface: None,
             name: "opencode-go".into(),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some(base.into()),
@@ -462,6 +463,7 @@ use bytes::Bytes;
         let cfg = crate::config::UpstreamConfig {
             discover: false,
             token_env: None,
+            surface: None,
             name: "opencode-go".into(),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some("http://x/v1".into()),

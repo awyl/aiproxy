@@ -29,6 +29,15 @@ thinking: high                     # pi extension: default thinking level for al
 #
 # Model ids become go-alice/mimo-v2.5 and go-bob/mimo-v2.5.
 
+  # MiniMax (international) — OpenAI-compatible wire (api.minimax.io/v1).
+  # Token Plan (Subscription Key, sk-cp-...) and pay-as-you-go API keys both
+  # go in the same env var; the proxy relays your Bearer as-is.
+  - name: minimax
+    kind: minimax
+    api_key_env: MINIMAX_API_KEY
+    models: [MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed]   # streams; surface = chat
+    # discover: true   # instead, probe GET /v1/models at startup (needs the key)
+
 upstreams:
   # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
   # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's

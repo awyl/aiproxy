@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::env as std_env;
 use std::path::Path;
+use crate::provider::ModelSurface;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -16,6 +17,10 @@ use thiserror::Error;
 pub enum UpstreamKind {
     Openai,
     Anthropic,
+            /// MiniMax (international) — OpenAI-compatible wire at
+            /// api.minimax.io/v1. Token Plan / pay-as-you-go both use the same
+            /// bearer key (MINIMAX_API_KEY).
+            Minimax,
     OpencodeGo,
 }
 
@@ -24,6 +29,7 @@ impl UpstreamKind {
         match self {
             UpstreamKind::Openai => "https://api.openai.com/v1",
             UpstreamKind::Anthropic => "https://api.anthropic.com/v1",
+            UpstreamKind::Minimax => "https://api.minimax.io/v1",
             UpstreamKind::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
@@ -41,6 +47,11 @@ pub struct UpstreamConfig {
     /// upstream must carry this token as Bearer — per-subscription routing.
     #[serde(default)]
     pub token_env: Option<String>,
+    /// Wire surface for static `models:` entries (chat|messages|responses).
+    /// Falls back to the upstream kind's default (minimax -> chat). Static
+    /// entries without a known surface are catalog-only (not streamable).
+    #[serde(default)]
+    pub surface: Option<ModelSurface>,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -358,6 +369,21 @@ upstreams:
             let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
             assert!(cfg.is_err(), "expected reject: {bad}");
         }
+    }
+
+    #[test]
+    fn minimax_kind_defaults_to_anthropic_gateway_url() {
+        assert_eq!(
+            UpstreamKind::Minimax.default_base_url(),
+            "https://api.minimax.io/v1"
+        );
+
+        let ok = Config::from_yaml(
+            "upstreams:\n  - { name: minimax, kind: minimax, models: [MiniMax-M3] }\n",
+        )
+        .unwrap();
+        assert_eq!(ok.upstreams[0].kind, UpstreamKind::Minimax);
+        assert_eq!(ok.upstreams[0].models, vec!["MiniMax-M3".to_string()]);
     }
 
     #[test]

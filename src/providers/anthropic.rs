@@ -191,6 +191,7 @@ mod tests {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
             token_env: None,
+            surface: None,
             name: "anthropic".into(),
             kind: crate::config::UpstreamKind::Anthropic,
             base_url: Some(base.into()),

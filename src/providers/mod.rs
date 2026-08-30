@@ -15,21 +15,25 @@ use crate::providers::go::OpencodeGoProvider;
 use crate::providers::openai::OpenAiProvider;
 use serde_json::Value;
 
-/// Upstream whose `models:` list is static: serves discovery, never streams.
+/// Upstream whose `models:` list is static: serves discovery; streams when a
+/// default surface is known (e.g. minimax -> chat) or `surface:` is set.
 #[derive(Debug, Clone)]
 pub struct StaticProvider {
     id: String,
     models: Vec<String>,
+    surface: Option<ModelSurface>,
 }
 
 impl StaticProvider {
-    pub fn from_cfg(cfg: &UpstreamConfig) -> Option<Arc<dyn Provider>> {
+    pub fn from_cfg(cfg: &UpstreamConfig, default_surface: Option<ModelSurface>) -> Option<Arc<dyn Provider>> {
         if cfg.models.is_empty() {
             return None;
         }
+        let surface = cfg.surface.or(default_surface);
         Some(Arc::new(StaticProvider {
             id: cfg.name.clone(),
             models: cfg.models.clone(),
+            surface,
         }))
     }
 }
@@ -40,7 +44,7 @@ impl Provider for StaticProvider {
         &self.id
     }
     fn surface_of(&self, _model: &str) -> ModelSurface {
-        ModelSurface::Unknown
+        self.surface.unwrap_or(ModelSurface::Unknown)
     }
     async fn list_models(&self) -> Result<Vec<Model>, ProviderError> {
         Ok(self
@@ -88,6 +92,7 @@ impl Provider for StaticProvider {
 /// real streaming impl but never probes the upstream `list_models` endpoint.
 pub struct NoDiscoveryProvider {
     inner: Arc<dyn Provider>,
+    fallback: Vec<Model>,
 }
 
 impl std::fmt::Debug for NoDiscoveryProvider {
@@ -99,7 +104,12 @@ impl std::fmt::Debug for NoDiscoveryProvider {
 }
 impl NoDiscoveryProvider {
     pub fn new(inner: Arc<dyn Provider>) -> Arc<dyn Provider> {
-        Arc::new(NoDiscoveryProvider { inner })
+        NoDiscoveryProvider::with_models(inner, Vec::new())
+    }
+
+    /// Opt-out wrapper that still serves a static `models:` catalog.
+    pub fn with_models(inner: Arc<dyn Provider>, fallback: Vec<Model>) -> Arc<dyn Provider> {
+        Arc::new(NoDiscoveryProvider { inner, fallback })
     }
 }
 
@@ -112,8 +122,7 @@ impl Provider for NoDiscoveryProvider {
         self.inner.surface_of(model)
     }
     async fn list_models(&self) -> Result<Vec<Model>, ProviderError> {
-        // Discovery opt-out: no catalog probing, no warnings.
-        Ok(Vec::new())
+        Ok(self.fallback.clone())
     }
     async fn chat_completions(
         &self,
@@ -143,7 +152,7 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
         .iter()
         .map(|u| match u.kind {
             UpstreamKind::Openai => {
-                if let Some(p) = StaticProvider::from_cfg(u) {
+                if let Some(p) = StaticProvider::from_cfg(u, None) {
                     p
                 } else if u.discover {
                     Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>
@@ -152,7 +161,7 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                 }
             }
             UpstreamKind::Anthropic => {
-                if let Some(p) = StaticProvider::from_cfg(u) {
+                if let Some(p) = StaticProvider::from_cfg(u, None) {
                     p
                 } else if u.discover {
                     Arc::new(AnthropicProvider::new(u)) as Arc<dyn Provider>
@@ -160,8 +169,31 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                     NoDiscoveryProvider::new(Arc::new(AnthropicProvider::new(u)))
                 }
             }
+            UpstreamKind::Minimax => {
+                // MiniMax (international) — OpenAI-compatible wire at
+                // api.minimax.io/v1 (chat/completions surface); Token Plan and
+                // pay-as-you-go both use the same bearer key (MINIMAX_API_KEY).
+                let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
+                if u.discover {
+                    provider
+                } else {
+                    // Static `models:` act as the catalog; the gateway still
+                    // streams (surface = chat for the whole kind).
+                    let catalog = u
+                        .models
+                        .iter()
+                        .map(|m| Model {
+                            id: m.clone(),
+                            display_name: None,
+                            created_at: None,
+                            surface: ModelSurface::ChatCompletions,
+                        })
+                        .collect();
+                    NoDiscoveryProvider::with_models(provider, catalog)
+                }
+            }
             UpstreamKind::OpencodeGo => {
-                if let Some(p) = StaticProvider::from_cfg(u) {
+                if let Some(p) = StaticProvider::from_cfg(u, None) {
                     p
                 } else if u.discover {
                     Arc::new(OpencodeGoProvider::new(u)) as Arc<dyn Provider>

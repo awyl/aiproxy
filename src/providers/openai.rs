@@ -153,6 +153,7 @@ mod tests {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
             token_env: None,
+            surface: None,
             name: "mock".into(),
             kind: crate::config::UpstreamKind::Openai,
             base_url: Some(base.into()),
