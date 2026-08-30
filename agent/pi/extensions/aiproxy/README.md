@@ -31,16 +31,23 @@ No extension env vars. Everything comes from the proxy's `aiproxy.yaml`
 The env file holds only secrets (API keys, tokens); the yaml holds all
 configuration.
 
-## Enable
+## Install
+
+Persistent (adds to project settings, `.pi/settings.json`):
 
 ```bash
-pi -e ./extensions/aiproxy
+pi install ./agent/pi/extensions/aiproxy -l
+pi list          # should show it under project packages
 ```
 
-or add to your pi settings' extension list. Restart not required if added
-via `/extensions` live UI.
+Ephemeral (this session only):
 
-Then `/models` → select `aiproxy/opencode-go/mimo-v2.5` (the full prefixed id).
+```bash
+pi -e ./agent/pi/extensions/aiproxy
+```
+
+Or add `./agent/pi/extensions/aiproxy` to your settings' `packages` list
+manually. Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
 
 ## Notes
 
