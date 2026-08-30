@@ -169,12 +169,15 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                     NoDiscoveryProvider::new(Arc::new(AnthropicProvider::new(u)))
                 }
             }
-            UpstreamKind::Minimax | UpstreamKind::Zai => {
+            UpstreamKind::Minimax | UpstreamKind::Zai | UpstreamKind::Openrouter => {
                 // OpenAI-compatible gateways with a fixed chat surface:
                 //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go,
                 //             MINIMAX_API_KEY)
                 //   Z.AI GLM Coding Plan — api.z.ai/api/coding/paas/v4
                 //             (subscription key, ZAI_API_KEY)
+                //   OpenRouter — openrouter.ai/api/v1 (aggregator, id
+                //             `provider/model`, catalog public/keyless,
+                //             OPENROUTER_API_KEY)
                 let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
                 if u.discover {
                     provider

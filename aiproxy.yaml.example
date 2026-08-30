@@ -38,6 +38,14 @@ thinking: high                     # pi extension: default thinking level for al
     models: [MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed]   # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
 
+  # OpenRouter — OpenAI-compatible aggregator (openrouter.ai/api/v1).
+  # Model ids are `provider/model`; the catalog is PUBLIC/keyless, only chat
+  # calls need OPENROUTER_API_KEY.
+  - name: openrouter
+    kind: openrouter
+    api_key_env: OPENROUTER_API_KEY
+    discover: true          # safe: GET /v1/models is keyless (396 models)
+
   # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
   # The coding-plan API key (individual or team) goes in ZAI_API_KEY.
   - name: zai

@@ -27,6 +27,12 @@ pub enum UpstreamKind {
     /// endpoint is the standard OpenAI-compatible one. Bearer key from the
     /// coding plan (individual or team; ZAI_API_KEY).
     Zai,
+    /// OpenRouter — OpenAI-compatible aggregator at openrouter.ai/api/v1
+    /// (chat). Model ids are `provider/model` (e.g. `anthropic/claude-sonnet-4.5`).
+    /// The model catalog at GET /models is public (keyless); chat requests
+    /// need the bearer key (OPENROUTER_API_KEY). Optional HTTP-Referer /
+    /// X-Title attribution headers are not forwarded in v1.
+    Openrouter,
     OpencodeGo,
 }
 
@@ -37,6 +43,7 @@ impl UpstreamKind {
             UpstreamKind::Anthropic => "https://api.anthropic.com/v1",
             UpstreamKind::Minimax => "https://api.minimax.io/v1",
             UpstreamKind::Zai => "https://api.z.ai/api/coding/paas/v4",
+            UpstreamKind::Openrouter => "https://openrouter.ai/api/v1",
             UpstreamKind::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
@@ -376,6 +383,21 @@ upstreams:
             let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
             assert!(cfg.is_err(), "expected reject: {bad}");
         }
+    }
+
+    #[test]
+    fn openrouter_kind_defaults_to_chat_gateway_url() {
+        assert_eq!(
+            UpstreamKind::Openrouter.default_base_url(),
+            "https://openrouter.ai/api/v1"
+        );
+
+        let ok = Config::from_yaml(
+            "upstreams:\n  - { name: openrouter, kind: openrouter, models: [anthropic/claude-sonnet-4.5] }\n",
+        )
+        .unwrap();
+        assert_eq!(ok.upstreams[0].kind, UpstreamKind::Openrouter);
+        assert_eq!(ok.upstreams[0].models, vec!["anthropic/claude-sonnet-4.5".to_string()]);
     }
 
     #[test]
