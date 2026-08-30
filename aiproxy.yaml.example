@@ -38,6 +38,14 @@ thinking: high                     # pi extension: default thinking level for al
     models: [MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed]   # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
 
+  # NVIDIA NIM cloud — OpenAI-compatible (integrate.api.nvidia.com/v1).
+  # Ids are `org/model`; catalog is PUBLIC/keyless, chat needs NVIDIA_API_KEY.
+  # Self-hosted NIM = same kind, custom base_url.
+  - name: nvidia
+    kind: nvidia
+    api_key_env: NVIDIA_API_KEY
+    discover: true          # safe: GET /v1/models is keyless (83 models)
+
   # OpenRouter — OpenAI-compatible aggregator (openrouter.ai/api/v1).
   # Model ids are `provider/model`; the catalog is PUBLIC/keyless, only chat
   # calls need OPENROUTER_API_KEY.

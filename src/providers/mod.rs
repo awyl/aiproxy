@@ -169,7 +169,7 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                     NoDiscoveryProvider::new(Arc::new(AnthropicProvider::new(u)))
                 }
             }
-            UpstreamKind::Minimax | UpstreamKind::Zai | UpstreamKind::Openrouter => {
+            UpstreamKind::Minimax | UpstreamKind::Zai | UpstreamKind::Openrouter | UpstreamKind::Nvidia => {
                 // OpenAI-compatible gateways with a fixed chat surface:
                 //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go,
                 //             MINIMAX_API_KEY)
@@ -178,6 +178,9 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                 //   OpenRouter — openrouter.ai/api/v1 (aggregator, id
                 //             `provider/model`, catalog public/keyless,
                 //             OPENROUTER_API_KEY)
+                //   NVIDIA NIM — integrate.api.nvidia.com/v1 (id `org/model`,
+                //             catalog public/keyless, NVIDIA_API_KEY);
+                //             self-hosted NIM = custom base_url
                 let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
                 if u.discover {
                     provider

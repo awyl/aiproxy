@@ -33,6 +33,11 @@ pub enum UpstreamKind {
     /// need the bearer key (OPENROUTER_API_KEY). Optional HTTP-Referer /
     /// X-Title attribution headers are not forwarded in v1.
     Openrouter,
+    /// NVIDIA NIM cloud — OpenAI-compatible at integrate.api.nvidia.com/v1
+    /// (chat). Model ids are `org/model` (e.g. `nvidia/llama-3.3-nemotron-super-49b-v1`).
+    /// Catalog is public/keyless; chat needs the bearer key (NVIDIA_API_KEY,
+    /// nvapi-...). Self-hosted NIMs use a custom base_url (kind still nvidia).
+    Nvidia,
     OpencodeGo,
 }
 
@@ -44,6 +49,7 @@ impl UpstreamKind {
             UpstreamKind::Minimax => "https://api.minimax.io/v1",
             UpstreamKind::Zai => "https://api.z.ai/api/coding/paas/v4",
             UpstreamKind::Openrouter => "https://openrouter.ai/api/v1",
+            UpstreamKind::Nvidia => "https://integrate.api.nvidia.com/v1",
             UpstreamKind::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
@@ -383,6 +389,24 @@ upstreams:
             let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
             assert!(cfg.is_err(), "expected reject: {bad}");
         }
+    }
+
+    #[test]
+    fn nvidia_kind_defaults_to_chat_gateway_url() {
+        assert_eq!(
+            UpstreamKind::Nvidia.default_base_url(),
+            "https://integrate.api.nvidia.com/v1"
+        );
+
+        let ok = Config::from_yaml(
+            "upstreams:\n  - { name: nvidia, kind: nvidia, models: [nvidia/llama-3.3-nemotron-super-49b-v1] }\n",
+        )
+        .unwrap();
+        assert_eq!(ok.upstreams[0].kind, UpstreamKind::Nvidia);
+        assert_eq!(
+            ok.upstreams[0].models,
+            vec!["nvidia/llama-3.3-nemotron-super-49b-v1".to_string()]
+        );
     }
 
     #[test]
