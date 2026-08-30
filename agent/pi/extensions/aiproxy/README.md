@@ -19,11 +19,17 @@ and strips it. `api` is derived per model from the proxy's `surface` field:
 npm install          # pull pi-ai + pi-coding-agent for types
 ```
 
-Environment:
+No extension env vars. Everything comes from the proxy's `aiproxy.yaml`
+(next to where you run pi, or a symlink to it):
 
-- `AIPROXY_URL` — gateway base URL, e.g. `http://host.containers.internal:8080/v1` (default `http://localhost:8080/v1`; trailing `/` stripped)
-- `AIPROXY_TOKEN` — shared gateway token (default: unset → gateway likely auth-disabled)
-- `AIPROXY_THINKING` — default thinking level for **all** models: `off|low|medium|high|max` (default `high`). `off` registers models as non-reasoning; otherwise every model gets a `thinkingLevelMap` with only the chosen level enabled.
+- `bind` → base URL (`http://host:port/v1`, default `127.0.0.1:8080`)
+- `token` / `token_env` → the bearer token (secret still lives in env, the
+  yaml only names it)
+- `thinking` → default thinking level for all models (`off|low|medium|high|max`,
+  default `high`)
+
+The env file holds only secrets (API keys, tokens); the yaml holds all
+configuration.
 
 ## Enable
 
@@ -41,10 +47,10 @@ Then `/models` → select `aiproxy/opencode-go/mimo-v2.5` (the full prefixed id)
 - Cost/contextWindow/maxTokens are conservative defaults (`0` cost, 128K /
   16K). Override per model in your `models.json` / provider `models` config —
   pi composes those above registered models.
-- Thinking default is `high` for every model (`AIPROXY_THINKING`); only that
-  level is enabled in each model's `thinkingLevelMap`. Override per model via
-  models.json. Chat-surface models receive `reasoning_effort` — models that
-  reject it need `AIPROXY_THINKING=off` or a per-model override.
+- Thinking default is `high` for every model (`thinking:` in aiproxy.yaml);
+  only that level is enabled in each model's `thinkingLevelMap`. Chat-surface
+  models receive `reasoning_effort` — models that reject it need
+  `thinking: off` or a per-model override.
 - `Input` is limited to `["text"]` by default — Go multi-modal models exist
   (`mimo-v2-omni`); flipping to include `"image"` per model is safe if you
   tested it.

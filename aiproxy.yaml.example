@@ -8,6 +8,8 @@ bind: 127.0.0.1:8080          # listen "host:port"; 0.0.0.0:8080 = all interface
                                # (reverse proxy recommended for anything public)
 token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disabled.
 model_refresh_secs: 0              # discovery interval; 0 = fetch once at startup (default)
+thinking: high                     # pi extension: default thinking level for all models
+                                   # (off|low|medium|high|max); ignored by the proxy itself
 
 # Multi-subscription: give each upstream its own bearer token. The token both
 # authenticates the request AND locks it to that subscription's models; requests
