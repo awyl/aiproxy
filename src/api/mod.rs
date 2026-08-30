@@ -88,7 +88,7 @@ use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use crate::discovery::ModelRegistry;
-use crate::provider::{Event, ModelSurface, Provider, ProviderError, ProviderStream};
+use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
 
 pub mod anthropic;
 pub mod openai;
