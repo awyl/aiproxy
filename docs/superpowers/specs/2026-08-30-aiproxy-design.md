@@ -143,11 +143,13 @@ Shared types (`provider.rs`):
   `anthropic-version` headers), default base `https://api.anthropic.com/v1`. Serves
   messages only (`surface_of` → `Messages`).
 - `OpencodeGoProvider` (kind `opencode-go`): OpenCode Go, default base
-  `https://opencode.ai/zen/go/v1`. `surface_of` resolves per model: config
-  `endpoint_by_model` overrides first, then a built-in table, defaulting to
-  `ChatCompletions` for unknown models. Auth: `Authorization: Bearer <key>` on
-  `/chat/completions` and `/responses`; `x-api-key` + `anthropic-version` on
-  `/messages` (Go's Anthropic surface).
+  `https://opencode.ai/zen/go/v1`. `surface_of` resolves per model, priority:
+  (1) config `endpoint_by_model` overrides, (2) a runtime surface map parsed on
+  refresh from `surface_map_url` (default `https://opencode.ai/docs/go` —
+  the endpoints table, so new models are picked up automatically), (3) a built-in
+  snapshot table for offline fallback, (4) `ChatCompletions` for unknown models.
+  Auth: `Authorization: Bearer <key>` on `/chat/completions` and `/responses`;
+  `x-api-key` + `anthropic-version` on `/messages` (Go's Anthropic surface).
 
 ### OpenCode Go surface table (built-in, from opencode.ai/docs/go, 2026-08-30)
 
@@ -172,7 +174,8 @@ upstreams:
     kind: opencode-go           # opencode-go | openai | anthropic
     api_key_env: OPENCODE_GO_API_KEY
     # endpoint_by_model:          # optional overrides for models outside the
-    #   qwen3.9-x: messages       # built-in surface table (default: chat/completions)
+    #   qwen3.9-x: messages       # surface table (default: chat/completions)
+    # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
 
   - name: openai                # becomes id + model prefix "openai/..."
     kind: openai                # any OpenAI-compatible gateway (custom base_url)
@@ -272,8 +275,8 @@ method for it. Add later if a client requires it.
   changes when upstreams are added/removed.
 - Anthropic upstream discovery uses `GET /v1/models`; OpenAI-compatible and
   opencode-go use `GET /v1/models` too (Go's catalog is public: standard OpenAI
-  `{data:[{id,object,created,owned_by}]}` shape — no per-model surface field, hence
-  the built-in table).
+  `{data:[{id,object,created,owned_by}]}` shape — no per-model surface field, so
+  surfaces come from the runtime `surface_map_url` fetch with builtin-table fallback).
 - Upstreams with a static `models:` list in config skip discovery entirely and serve
   that list prefixed (for gateways without a listing endpoint); their surface is
   `Unknown`, so they serve catalog only, never streams.
