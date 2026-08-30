@@ -12,3 +12,6 @@ flake.lock
 
 # local runtime config
 aiproxy.yaml
+
+# extension deps
+extensions/aiproxy/node_modules/
