@@ -141,8 +141,7 @@ impl Provider for NoDiscoveryProvider {
 pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
     cfg.upstreams
         .iter()
-        .enumerate()
-        .map(|(i, u)| match u.kind {
+        .map(|u| match u.kind {
             UpstreamKind::Openai => {
                 if let Some(p) = StaticProvider::from_cfg(u) {
                     p
@@ -162,7 +161,13 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
                 }
             }
             UpstreamKind::OpencodeGo => {
-                StaticProvider::from_cfg(u).unwrap_or_else(|| Arc::new(OpencodeGoProvider::new(u)))
+                if let Some(p) = StaticProvider::from_cfg(u) {
+                    p
+                } else if u.discover {
+                    Arc::new(OpencodeGoProvider::new(u)) as Arc<dyn Provider>
+                } else {
+                    NoDiscoveryProvider::new(Arc::new(OpencodeGoProvider::new(u)))
+                }
             }
         })
         .collect()
@@ -223,5 +228,40 @@ upstreams:
             .map(|m| m.id)
             .collect();
         assert_eq!(ids, vec!["claude-x"]);
+    }
+
+    #[tokio::test]
+    async fn opencode_go_discovery_is_also_opt_in() {
+        // opt out via static list
+        let cfg = Config::from_yaml(
+            r#"
+upstreams:
+  - { name: go, kind: opencode-go, models: [kimi-k3] }
+"#,
+        )
+        .unwrap();
+        let p = build_providers(&cfg);
+        let ids: Vec<String> = p[0]
+            .list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["kimi-k3"]);
+
+        // opt out via missing discover flag
+        let cfg = Config::from_yaml(
+            r#"
+upstreams:
+  - { name: go, kind: opencode-go }
+"#,
+        )
+        .unwrap();
+        let p = build_providers(&cfg);
+        assert!(
+            p[0].list_models().await.unwrap().is_empty(),
+            "go without discover: true must not probe"
+        );
     }
 }

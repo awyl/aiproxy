@@ -6,20 +6,22 @@
 
 port: 8080
 token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disabled.
-model_refresh_secs: 1800           # discovery interval; 0 = fetch once at startup
+model_refresh_secs: 0              # discovery interval; 0 = fetch once at startup (default)
 
 upstreams:
-  # OpenCode Go — flagship upstream. Models + wire surfaces auto-discovered
-  # unconditionally: ids from https://opencode.ai/zen/go/v1/models (public),
-  # surfaces parsed from surface_map_url on refresh (builtin snapshot fallback).
+  # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
+  # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's
+  # why this is safe to enable), surfaces parsed from surface_map_url on
+  # refresh (builtin snapshot fallback).
   - name: opencode-go
     kind: opencode-go
     api_key_env: OPENCODE_GO_API_KEY
+    discover: true
     # endpoint_by_model:            # overrides for new models (chat | messages | responses)
     #   qwen3.9-x: messages
     # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
 
-  # Any other upstream is catalog-only unless you opt in:
+  # Every upstream is catalog-only unless you opt in:
   #   - `models: [...]`   -> static list, never probed (recommended)
   #   - `discover: true`  -> probe GET <base_url>/models at startup/refresh.
   #                          Requires the upstream to be reachable AND keyed;

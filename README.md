@@ -26,8 +26,9 @@ verbatim.
 
 ## Discovery
 
-Only OpenCode Go auto-discovers unconditionally (its catalog fetch is public,
-keyless). Every other upstream is catalog-only unless you opt in:
+Discovery is opt-in for every upstream, OpenCode Go included. Its catalog
+fetch is keyless/public, so enabling it there is low-risk — that's the
+standard setup.
 
 | Config | Behavior |
 |---|---|
@@ -37,7 +38,9 @@ keyless). Every other upstream is catalog-only unless you opt in:
 
 `discover: true` needs a reachable, keyed upstream — otherwise expect
 per-refresh warnings in the log (e.g. `401` against `api.openai.com` or
-`Transport` against an idle `localhost:11434` Ollama).
+`Transport` against an idle `localhost:11434` Ollama). With the default
+`model_refresh_secs: 0` the fetch happens once at startup; set it to a
+positive value (e.g. `1800`) for periodic re-discovery.
 
 ## Quickstart
 

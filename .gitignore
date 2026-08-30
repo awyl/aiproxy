@@ -9,3 +9,6 @@ flake.lock
 
 # project wiki vault (local knowledge base)
 .llm-wiki/
+
+# local runtime config
+aiproxy.yaml

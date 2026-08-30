@@ -117,7 +117,7 @@ fn default_port() -> u16 {
     8080
 }
 fn default_refresh() -> u64 {
-    1800
+    0 // fetch once at startup; set > 0 for periodic refresh
 }
 
 #[derive(Debug, Error)]
@@ -255,7 +255,7 @@ mcp:
     fn defaults_applied() {
         let cfg = Config::from_yaml(MINIMAL).unwrap();
         assert_eq!(cfg.port, 8080);
-        assert_eq!(cfg.model_refresh_secs, 1800);
+        assert_eq!(cfg.model_refresh_secs, 0, "no auto-refresh by default");
         assert_eq!(cfg.upstreams.len(), 1);
         assert_eq!(cfg.upstreams[0].effective_base_url(), "https://api.openai.com/v1");
         assert!(cfg.mcp.servers.is_empty());
