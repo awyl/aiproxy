@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
-use crate::provider::{Model, Provider, ProviderError};
+use crate::provider::{Model, Provider};
 
 pub struct ModelRegistry {
     providers: Vec<Arc<dyn Provider>>,
