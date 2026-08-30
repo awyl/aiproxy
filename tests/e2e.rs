@@ -2,9 +2,7 @@
 //! upstream. healthz, models catalog, chat streaming relay, auth rejection.
 
 mod mock_upstream {
-    use axum::body::Body;
-use bytes::Bytes;
-    use axum::http::header;
+        use axum::http::header;
     use axum::http::HeaderValue;
     use axum::response::Response;
     use axum::routing::{get, post};
@@ -32,8 +30,6 @@ use bytes::Bytes;
 
 use aiproxy::config::Config;
 use aiproxy::server;
-use axum::body::Body;
-use bytes::Bytes;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
