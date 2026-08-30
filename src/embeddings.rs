@@ -226,16 +226,19 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Write the fake llama-server into `dir`: a bash wrapper that parses
-    /// `-m <file>` and `--port <N>` from the manager's args, then execs a
-    /// python3 backend bound to that port. The backend serves /health 200 +
-    /// a fixed /v1/embeddings echo, appends one 'x' to `<id>.count` per spawn
-    /// and records its pid in `<id>.pid` (both in `dir`). No env vars needed.
-    fn fake_llama_bin(dir: &std::path::Path) -> String {
-        let py = dir.join("fake_llama.py");
-        fs::write(
-            &py,
-            r#"import http.server, json, sys, os
+    /// One fake llama-server bin for the whole test binary: written + chmod'd
+    /// ONCE (executing a just-written script races overlayfs copy-up ->
+    /// ETXTBSY). Per-test output files derive from the `-m` file path
+    /// (`<model_dir>/<id>.pid|.count`), so parallel tests keep separate state.
+    fn fake_llama_bin() -> &'static str {
+        static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        BIN.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("aiproxy-fake-llama-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let py = dir.join("fake_llama.py");
+            fs::write(
+                &py,
+                r#"import http.server, json, sys, os
 port=int(sys.argv[1]); pidf=sys.argv[2]; cntf=sys.argv[3]
 open(pidf,"w").write(str(os.getpid()))
 open(cntf,"a").write("x")
@@ -250,12 +253,12 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self,*a): pass
 http.server.HTTPServer(("127.0.0.1",port),H).serve_forever()
 "#,
-        )
-        .unwrap();
-        let sh = dir.join("fake_llama.sh");
-        fs::write(
-            &sh,
-            r#"#!/bin/bash
+            )
+            .unwrap();
+            let sh = dir.join("fake_llama.sh");
+            fs::write(
+                &sh,
+                r#"#!/bin/bash
 # fake llama-server: parse -m <file> and --port <N> from manager args
 MODEL=""; PORT=""
 while [ $# -gt 0 ]; do
@@ -266,37 +269,39 @@ while [ $# -gt 0 ]; do
   esac
 done
 ID=$(basename "$MODEL" .gguf)
+OUT=$(dirname "$MODEL")
 SDIR=$(dirname "$0")
-exec python3 "$SDIR/fake_llama.py" "$PORT" "$SDIR/$ID.pid" "$SDIR/$ID.count"
+exec python3 "$SDIR/fake_llama.py" "$PORT" "$OUT/$ID.pid" "$OUT/$ID.count"
 "#,
-        )
-        .unwrap();
-        // mark executable
-        let mut perm = fs::metadata(&sh).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perm.set_mode(0o755);
-        fs::set_permissions(&sh, perm).unwrap();
-        sh.to_str().unwrap().to_string()
+            )
+            .unwrap();
+            let mut perm = fs::metadata(&sh).unwrap().permissions();
+            use std::os::unix::fs::PermissionsExt;
+            perm.set_mode(0o755);
+            fs::set_permissions(&sh, perm).unwrap();
+            sh.to_str().unwrap().to_string()
+        })
     }
 
-    /// Manager over the fake bin; one model per `id` (unique ports, files in
-    /// `dir`, derived from the `-m` file path — no env vars).
+    /// Manager over the fake bin; one model per `id`. Model file paths live in
+    /// `dir` (need not exist) so pid/count files land in the test's dir.
     fn manager_with_fake(
         dir: &std::path::Path,
         port_cell: Arc<AtomicUsize>,
+        ttl_secs: u64,
         ids: &[&str],
     ) -> EmbeddingManager {
         let models: Vec<EmbeddingModelConfig> = ids
             .iter()
             .map(|id| EmbeddingModelConfig {
                 id: (*id).to_string(),
-                model_file: format!("/models/{id}.gguf"),
+                model_file: dir.join(format!("{id}.gguf")).to_str().unwrap().to_string(),
                 port: Some(port_cell.fetch_add(1, Ordering::SeqCst) as u16),
             })
             .collect();
         let cfg = EmbeddingsConfig {
-            llama_bin: fake_llama_bin(dir),
-            idle_ttl_secs: 3600,
+            llama_bin: fake_llama_bin().to_string(),
+            idle_ttl_secs: ttl_secs,
             models,
         };
         EmbeddingManager::new(&cfg)
@@ -311,7 +316,7 @@ exec python3 "$SDIR/fake_llama.py" "$PORT" "$SDIR/$ID.pid" "$SDIR/$ID.count"
     #[tokio::test]
     async fn spawns_on_demand_once_and_relays() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19010)), &["nomic"]);
+        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19010)), 3600, &["nomic"]);
         let req = serde_json::json!({ "model": "nomic", "input": "hello" });
         let out = mgr.embed("nomic", &req).await.expect("embed ok");
         assert_eq!(out["data"][0]["embedding"], serde_json::json!([0.1, 0.2]));
@@ -326,6 +331,54 @@ exec python3 "$SDIR/fake_llama.py" "$PORT" "$SDIR/$ID.pid" "$SDIR/$ID.count"
             first_pid
         );
         mgr.shutdown_all().await; // cleanup — never leave orphans behind
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_kills_and_frees_the_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19030)), 1, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+        let _ = mgr.embed("nomic", &req).await.expect("embed ok");
+        let first_pid = fs::read_to_string(dir.path().join("nomic.pid")).unwrap();
+        assert_eq!(spawn_count(dir.path(), "nomic"), 1);
+
+        // reaper pass until the child is gone (bounded wait — robust under load)
+        let mut killed = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            mgr.reaper_round().await;
+            if !std::path::Path::new(&format!("/proc/{first_pid}")).exists() {
+                killed = true;
+                break;
+            }
+        }
+        assert!(killed, "idle child must be killed by the reaper");
+
+        // port freed -> next request respawns (count increments, new pid)
+        let _ = mgr.embed("nomic", &req).await.expect("embed ok 2");
+        assert_eq!(spawn_count(dir.path(), "nomic"), 2, "child must be respawned after reap");
+        assert_ne!(
+            fs::read_to_string(dir.path().join("nomic.pid")).unwrap(),
+            first_pid
+        );
+        mgr.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn traffic_within_ttl_keeps_child_alive() {
+        // generous ttl; traffic at ~600ms keeps last_used well inside it
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19040)), 10, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+        let _ = mgr.embed("nomic", &req).await.expect("embed 1");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let _ = mgr.embed("nomic", &req).await.expect("embed 2"); // refreshes last_used
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        mgr.reaper_round().await;
+
+        let _ = mgr.embed("nomic", &req).await.expect("embed 3");
+        assert_eq!(spawn_count(dir.path(), "nomic"), 1, "recent traffic must keep the child");
+        mgr.shutdown_all().await;
     }
 
     #[tokio::test]
