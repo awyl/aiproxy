@@ -2,7 +2,7 @@
 //! surface gating. Handlers resolve the prefixed model, strip the prefix,
 //! verify the wire surface, then relay the provider's SSE stream.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -16,12 +16,17 @@ use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
 
 pub fn openai_router(token: Option<String>) -> Router<AppState> {
+    openai_router_with_subs(token, &[])
+}
+
+/// Router builder that additionally accepts subscription tokens for auth.
+pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router<AppState> {
     apply_auth(
         Router::new()
             .route("/v1/models", get(list_models))
             .route("/v1/chat/completions", post(chat_completions))
             .route("/v1/responses", post(responses)),
-        token,
+        crate::auth::auth_state(token, subs),
     )
 }
 
@@ -50,6 +55,7 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
 async fn route_one(
     state: &AppState,
     req: Value,
+    token: Option<String>,
     required: ModelSurface,
     surface: Surface,
     call: impl FnOnce(
@@ -76,6 +82,18 @@ async fn route_one(
             "invalid_request_error",
         ));
     };
+    // Per-upstream subscription gate: subscription tokens (token_env) lock
+    // each upstream to the holder. Global auth already accepted this request;
+    // this checks the subscription-scoped token.
+    if crate::api::check_subscription(state, &pid, token.as_deref()).is_err() {
+        return Err(openai_error(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "upstream '{pid}' is subscription-gated; this token does not own it (or its token_env is not set)"
+            ),
+            "authentication_error",
+        ));
+    }
     let provider = state.registry.provider(&pid).unwrap();
     if let Err(resp) = check_surface(provider.as_ref(), &mid, required, surface) {
         return Err(resp);
@@ -109,11 +127,13 @@ fn relay_error(e: ProviderError, surface: Surface) -> axum::response::Response {
 
 async fn chat_completions(
     State(state): State<AppState>,
+    Extension(token): Extension<Option<String>>,
     Json(req): Json<Value>,
 ) -> axum::response::Response {
     match route_one(
         &state,
         req,
+        token,
         ModelSurface::ChatCompletions,
         Surface::Openai,
         |p, body, model| {
@@ -129,11 +149,13 @@ async fn chat_completions(
 
 async fn responses(
     State(state): State<AppState>,
+    Extension(token): Extension<Option<String>>,
     Json(req): Json<Value>,
 ) -> axum::response::Response {
     match route_one(
         &state,
         req,
+        token,
         ModelSurface::Responses,
         Surface::Openai,
         |p, body, model| {
@@ -168,6 +190,7 @@ mod tests {
         AppState {
             registry: std::sync::Arc::new(reg),
             token: Some("tok".into()),
+            subscriptions: Default::default(),
         }
     }
 
@@ -186,6 +209,25 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn post_with_token(path: &str, body: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn state_with_subscriptions(subs: Vec<(&str, Option<String>)>) -> AppState {
+        let mut state = test_state().await;
+        state.subscriptions = subs
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        state
     }
 
     #[tokio::test]
@@ -237,6 +279,57 @@ mod tests {
         let (status, body) = send(app, post("/v1/chat/completions", &req.to_string())).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("data: {\"ok\":true}\n\n"));
+    }
+
+    #[tokio::test]
+    async fn subscription_gate_accepts_owner_and_rejects_others() {
+        let state = state_with_subscriptions(vec![("openai", Some("alice-tok".into()))]).await;
+        let app = openai_router_with_subs(Some("tok".into()), &["alice-tok".into()]).with_state(state);
+        let req = json!({"model": "openai/gpt-4o", "messages": [{"role":"user","content":"hi"}]});
+
+        // owner token -> relayed to mock upstream (200)
+        let (status, body) = send(app.clone(), post_with_token("/v1/chat/completions", &req.to_string(), "alice-tok")).await;
+        assert_eq!(status, StatusCode::OK, "owner token must pass: {body}");
+
+        // global token but NOT the subscription token -> 401
+        let (status, body) = send(app.clone(), post("/v1/chat/completions", &req.to_string())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("subscription"), "{body}");
+
+        // no bearer token at all -> 401
+        let (status, _) = send(
+            app.clone(),
+            Request::builder()
+                .uri("/v1/chat/completions")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(req.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn subscription_gate_without_token_env_is_deny_all() {
+        let state = state_with_subscriptions(vec![("openai", None)]).await;
+        let app = openai_router_with_subs(Some("tok".into()), &[]).with_state(state);
+        let req = json!({"model": "openai/gpt-4o", "messages": []});
+        let (status, body) = send(
+            app,
+            post_with_token("/v1/chat/completions", &req.to_string(), "anything"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "misconfig must deny: {body}");
+    }
+
+    #[tokio::test]
+    async fn un_gated_upstream_ignores_subscription() {
+        let state = test_state().await; // no subscriptions
+        let app = openai_router(Some("tok".into())).with_state(state);
+        let req = json!({"model": "openai/gpt-4o", "messages": [{"role":"user","content":"hi"}]});
+        let (status, body) = send(app, post("/v1/chat/completions", &req.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "no gate = global token suffices: {body}");
     }
 
     #[tokio::test]

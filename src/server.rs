@@ -6,8 +6,8 @@ use axum::routing::get;
 use axum::Router;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use crate::api::anthropic::anthropic_router;
-use crate::api::openai::openai_router;
+use crate::api::anthropic::anthropic_router_with_subs;
+use crate::api::openai::openai_router_with_subs;
 use crate::api::AppState;
 use crate::config::Config;
 use crate::discovery::ModelRegistry;
@@ -45,21 +45,46 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
         });
     }
 
+    let mut subscriptions = std::collections::HashMap::new();
+    for u in &config.upstreams {
+        match u.subscription_token() {
+            Some(Some(tok)) => {
+                subscriptions.insert(u.name.clone(), Some(tok));
+                tracing::info!(upstream = %u.name, "subscription-gated upstream enabled");
+            }
+            Some(None) => {
+                tracing::error!(
+                    upstream = %u.name,
+                    token_env = u.token_env.as_deref().unwrap_or(""),
+                    "upstream subscription token_env set but env var missing/empty — upstream is deny-all"
+                );
+                subscriptions.insert(u.name.clone(), None);
+            }
+            None => {}
+        }
+    }
+    let subscription_values: Vec<String> = subscriptions
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+
     let token = config.effective_token();
-    if token.is_none() {
+    if token.is_none() && subscription_values.is_empty() {
         tracing::warn!("no auth token configured — API is unauthenticated");
     }
     let state = AppState {
         registry,
         token: token.clone(),
+        subscriptions,
     };
 
     let mcp_router = crate::mcp::mcp_router(&config.mcp.servers, token.clone()).map_err(ServerError::Mcp)?;
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .merge(openai_router(token.clone()))
-        .merge(anthropic_router(token.clone()))
+        .merge(openai_router_with_subs(token.clone(), &subscription_values))
+        .merge(anthropic_router_with_subs(token.clone(), &subscription_values))
         .merge(mcp_router)
         .with_state(state);
 

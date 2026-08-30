@@ -21,24 +21,60 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Wrap a router with bearer-token auth. `None` disables auth entirely.
-/// Generic over the router's state type: the middleware carries its own
-/// `Option<String>` state and leaves the router state untouched.
-pub fn apply_auth<S: Clone + Send + Sync + 'static>(router: Router<S>, expected: Option<String>) -> Router<S> {
-    router.layer(from_fn_with_state(expected, auth_check))
+/// Auth state carried by the middleware: the global token (if any) plus every
+/// subscription token. A request passes when its bearer token matches any of
+/// them — so one token both authenticates and identifies a subscription.
+#[derive(Debug, Clone, Default)]
+pub struct AuthState {
+    pub global: Option<String>,
+    pub subscription_tokens: Vec<String>,
 }
 
-async fn auth_check(State(expected): State<Option<String>>, req: Request, next: Next) -> Response {
-    let Some(expected) = expected else {
-        return next.run(req).await;
-    };
-    let header = req
+impl AuthState {
+    pub fn accepts(&self, provided: &str) -> bool {
+        self.global
+            .as_deref()
+            .is_some_and(|g| constant_time_eq(provided, g))
+            || self
+                .subscription_tokens
+                .iter()
+                .any(|s| constant_time_eq(provided, s))
+    }
+}
+
+/// Wrap a router with bearer-token auth. `global: None` + no subscription
+/// tokens disables auth entirely. The request's bearer token (if any) is
+/// exposed to handlers via `Extension<Option<String>>`.
+pub fn apply_auth<S: Clone + Send + Sync + 'static>(
+    router: Router<S>,
+    state: AuthState,
+) -> Router<S> {
+    router.layer(from_fn_with_state(state, auth_check))
+}
+
+pub fn auth_state(global: Option<String>, subscription_tokens: &[String]) -> AuthState {
+    AuthState {
+        global,
+        subscription_tokens: subscription_tokens.to_vec(),
+    }
+}
+
+async fn auth_check(State(state): State<AuthState>, mut req: Request, next: Next) -> Response {
+    // Capture the request's bearer token so downstream handlers can apply
+    // per-upstream subscription gates.
+    let provided = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match header {
-        Some(provided) if constant_time_eq(provided, &expected) => next.run(req).await,
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.to_string());
+    req.extensions_mut().insert(provided.clone());
+
+    if state.global.is_none() && state.subscription_tokens.is_empty() {
+        return next.run(req).await; // auth disabled
+    }
+    match provided.as_deref() {
+        Some(provided) if state.accepts(provided) => next.run(req).await,
         _ => Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body(Body::from("unauthorized"))
@@ -56,7 +92,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn router_with(expected: Option<String>) -> Router {
-        apply_auth(Router::new().route("/ok", get(|| async { "ok" })), expected)
+        apply_auth(
+            Router::new().route("/ok", get(|| async { "ok" })),
+            auth_state(expected, &[]),
+        )
     }
 
     #[test]
@@ -113,5 +152,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_exposes_bearer_token_to_handlers() {
+        use axum::extract::Extension;
+        let app = apply_auth(
+            Router::new().route("/tok", get(|Extension(t): Extension<Option<String>>| async move {
+                t.unwrap_or_default()
+            })),
+            auth_state(Some("sekrit".into()), &[]),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tok")
+                    .header("authorization", "Bearer sekrit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"sekrit");
     }
 }

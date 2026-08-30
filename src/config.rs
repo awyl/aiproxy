@@ -37,6 +37,10 @@ pub struct UpstreamConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Subscription token (env var name). When set, requests for THIS
+    /// upstream must carry this token as Bearer — per-subscription routing.
+    #[serde(default)]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -65,6 +69,14 @@ impl UpstreamConfig {
             .as_ref()
             .and_then(|k| std_env::var(k).ok())
             .filter(|v| !v.is_empty())
+    }
+
+    /// Subscription token for this upstream, from `token_env`. `None` when
+    /// the field is unset. When the env var is set but missing/empty, returns
+    /// `Some(None)` — callers treat that as deny-all (misconfig).
+    pub fn subscription_token(&self) -> Option<Option<String>> {
+        let name = self.token_env.as_ref()?;
+        Some(std_env::var(name).ok().filter(|v| !v.is_empty()))
     }
 }
 
@@ -310,6 +322,22 @@ mcp:
         );
         assert_eq!(cfg.mcp.servers[0].command.as_deref(), Some("npx"));
         assert_eq!(cfg.mcp.servers[1].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+    }
+
+    #[test]
+    fn subscription_token_reads_env() {
+        let _g1 = set_env_guarded("T_SUB_ALICE", "alice-tok");
+        let _g2 = set_env_guarded("T_SUB_UNSET", "");
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+  - { name: b, kind: openai, token_env: T_SUB_ALICE }
+  - { name: c, kind: openai, token_env: T_SUB_UNSET  }
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        assert_eq!(cfg.upstreams[0].subscription_token(), None);
+        assert_eq!(cfg.upstreams[1].subscription_token(), Some(Some("alice-tok".into())));
+        assert_eq!(cfg.upstreams[2].subscription_token(), Some(None), "set-but-empty env = deny-all");
     }
 
     #[test]

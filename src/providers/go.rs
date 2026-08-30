@@ -412,6 +412,7 @@ use bytes::Bytes;
     fn provider(base: &str, docs_url: Option<&str>, overrides: &[(&str, &str)]) -> OpencodeGoProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            token_env: None,
             name: "opencode-go".into(),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some(base.into()),
@@ -460,6 +461,7 @@ use bytes::Bytes;
     fn config_override_beats_runtime_and_builtin() {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            token_env: None,
             name: "opencode-go".into(),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some("http://x/v1".into()),

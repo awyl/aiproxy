@@ -1,6 +1,6 @@
 //! Anthropic API routes (/v1/models, /v1/messages) with surface gating.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -10,18 +10,23 @@ use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, ProviderError, RequestContext};
 
 pub fn anthropic_router(token: Option<String>) -> Router<AppState> {
+    anthropic_router_with_subs(token, &[])
+}
+
+/// Router builder that additionally accepts subscription tokens for auth.
+pub fn anthropic_router_with_subs(token: Option<String>, subs: &[String]) -> Router<AppState> {
     // NOTE: /v1/models is served once, by the OpenAI router (OpenAI shape).
     // Anthropic clients listing models get the same catalog; the ids are what
     // matter and the two shapes differ only cosmetically.
     apply_auth(
-        Router::new()
-            .route("/v1/messages", post(messages)),
-        token,
+        Router::new().route("/v1/messages", post(messages)),
+        crate::auth::auth_state(token, subs),
     )
 }
 
 pub async fn messages(
     State(state): State<AppState>,
+    Extension(token): Extension<Option<String>>,
     Json(req): Json<Value>,
 ) -> axum::response::Response {
     let Some(model) = req.get("model").and_then(Value::as_str) else {
@@ -42,6 +47,16 @@ pub async fn messages(
             "invalid_request_error",
         );
     };
+    // Per-upstream subscription gate (see api::check_subscription).
+    if crate::api::check_subscription(&state, &pid, token.as_deref()).is_err() {
+        return anthropic_error(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "upstream '{pid}' is subscription-gated; this token does not own it (or its token_env is not set)"
+            ),
+            "authentication_error",
+        );
+    }
     let provider = state.registry.provider(&pid).unwrap();
     if let Err(resp) = check_surface(provider.as_ref(), &mid, ModelSurface::Messages, Surface::Anthropic) {
         return resp;
@@ -80,6 +95,7 @@ mod tests {
         AppState {
             registry: std::sync::Arc::new(reg),
             token: Some("tok".into()),
+            subscriptions: Default::default(),
         }
     }
 

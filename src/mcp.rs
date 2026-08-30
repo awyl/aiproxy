@@ -23,7 +23,7 @@ use crate::config::McpServerConfig;
 type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
 pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>) -> Result<Router<AppState>, String> {
-    let mut router = apply_auth(Router::<AppState>::new(), token);
+    let mut router = apply_auth(Router::<AppState>::new(), crate::auth::auth_state(token, &[]));
     for server in servers {
         let name = server.clone();
         let service: StreamableHttpService<ProxyHandler, _> = StreamableHttpService::new(

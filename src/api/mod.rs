@@ -121,10 +121,36 @@ pub fn check_surface(
     })
 }
 
+/// Gate a route on a per-upstream subscription token. Returns `Ok` when the
+/// upstream has no subscription gate, `Err` when the request token does not
+/// match the upstream's subscription token (or the gate is misconfigured).
+pub fn check_subscription(
+    state: &AppState,
+    prefix: &str,
+    token: Option<&str>,
+) -> Result<(), ()> {
+    let Some(gate) = state.subscriptions.get(prefix) else {
+        return Ok(()); // no gate for this upstream
+    };
+    match gate {
+        None => Err(()), // token_env set but env missing -> deny all
+        Some(sub) => {
+            if token.is_some_and(|t| crate::auth::constant_time_eq(t, sub)) {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub registry: Arc<ModelRegistry>,
     pub token: Option<String>,
+    /// Upstream prefix -> subscription token (from `token_env`).
+    /// Missing entry: no gate. `Some(None)`: deny-all (misconfig).
+    pub subscriptions: std::collections::HashMap<String, Option<String>>,
 }
 
 /// Which agent-facing error schema to speak when translating failures.
