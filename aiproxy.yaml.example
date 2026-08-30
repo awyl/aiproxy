@@ -38,6 +38,14 @@ thinking: high                     # pi extension: default thinking level for al
     models: [MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed]   # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
 
+  # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
+  # The coding-plan API key (individual or team) goes in ZAI_API_KEY.
+  - name: zai
+    kind: zai
+    api_key_env: ZAI_API_KEY
+    models: [glm-5.3, glm-5.3-flash]                            # streams; surface = chat
+    # discover: true   # instead, probe GET /v1/models at startup (needs the key)
+
 upstreams:
   # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
   # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's

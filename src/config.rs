@@ -17,10 +17,16 @@ use thiserror::Error;
 pub enum UpstreamKind {
     Openai,
     Anthropic,
-            /// MiniMax (international) — OpenAI-compatible wire at
-            /// api.minimax.io/v1. Token Plan / pay-as-you-go both use the same
-            /// bearer key (MINIMAX_API_KEY).
-            Minimax,
+    /// MiniMax (international) — OpenAI-compatible wire at
+    /// api.minimax.io/v1. Token Plan / pay-as-you-go both use the same
+    /// bearer key (MINIMAX_API_KEY).
+    Minimax,
+    /// Z.AI GLM Coding Plan — OpenAI-compatible wire at
+    /// api.z.ai/api/coding/paas/v4 (chat). Anthropic Messages
+    /// (/api/anthropic) and OpenAI Responses (/api/v1) also exist; the chat
+    /// endpoint is the standard OpenAI-compatible one. Bearer key from the
+    /// coding plan (individual or team; ZAI_API_KEY).
+    Zai,
     OpencodeGo,
 }
 
@@ -30,6 +36,7 @@ impl UpstreamKind {
             UpstreamKind::Openai => "https://api.openai.com/v1",
             UpstreamKind::Anthropic => "https://api.anthropic.com/v1",
             UpstreamKind::Minimax => "https://api.minimax.io/v1",
+            UpstreamKind::Zai => "https://api.z.ai/api/coding/paas/v4",
             UpstreamKind::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
@@ -369,6 +376,21 @@ upstreams:
             let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
             assert!(cfg.is_err(), "expected reject: {bad}");
         }
+    }
+
+    #[test]
+    fn zai_kind_defaults_to_coding_plan_chat_gateway_url() {
+        assert_eq!(
+            UpstreamKind::Zai.default_base_url(),
+            "https://api.z.ai/api/coding/paas/v4"
+        );
+
+        let ok = Config::from_yaml(
+            "upstreams:\n  - { name: zai, kind: zai, models: [glm-5.3, glm-5.3-flash] }\n",
+        )
+        .unwrap();
+        assert_eq!(ok.upstreams[0].kind, UpstreamKind::Zai);
+        assert_eq!(ok.upstreams[0].models, vec!["glm-5.3".to_string(), "glm-5.3-flash".to_string()]);
     }
 
     #[test]
