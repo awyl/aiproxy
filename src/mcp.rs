@@ -66,8 +66,13 @@ impl ProxyHandler {
         if let Some(cmd) = &self.cfg.command {
             let mut command = Command::new(cmd);
             command.args(&self.cfg.args).envs(&self.cfg.env);
-            let transport = TokioChildProcess::new(command)
-                .map_err(|e| ErrorData::internal_error(format!("stdio spawn failed: {e}"), None))?;
+            // stderr -> null: children must not inherit the daemon's stderr
+            // (a long-lived child would otherwise hold the terminal pipe open).
+            let transport = TokioChildProcess::builder(command)
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| ErrorData::internal_error(format!("stdio spawn failed: {e}"), None))?
+                .0;
             rmcp::serve_client(info, transport)
                 .await
                 .map_err(|e| ErrorData::internal_error(format!("stdio backend: {e}"), None))

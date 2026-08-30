@@ -2,11 +2,13 @@
 //! upstream. healthz, models catalog, chat streaming relay, auth rejection.
 
 mod mock_upstream {
-        use axum::http::header;
+    use axum::body::Body;
+    use axum::http::header;
     use axum::http::HeaderValue;
     use axum::response::Response;
     use axum::routing::{get, post};
     use axum::Router;
+    use bytes::Bytes;
 
     pub const MODELS: &str = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model","created":1720000000,"owned_by":"openai"}]}"#;
 

@@ -1,0 +1,47 @@
+# aiproxy example configuration.
+#
+# Upstream keys live in env vars ONLY, referenced by `api_key_env` name.
+# Agent-facing model ids are always `{upstream name}/{model id}`, e.g.
+# `opencode-go/kimi-k3`.
+
+port: 8080
+token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disabled.
+model_refresh_secs: 1800           # discovery interval; 0 = fetch once at startup
+
+upstreams:
+  # OpenCode Go — flagship upstream. Models + wire surfaces auto-discovered:
+  # ids from https://opencode.ai/zen/go/v1/models, surfaces parsed from
+  # surface_map_url on refresh (builtin snapshot fallback).
+  - name: opencode-go
+    kind: opencode-go
+    api_key_env: OPENCODE_GO_API_KEY
+    # endpoint_by_model:            # overrides for new models (chat | messages | responses)
+    #   qwen3.9-x: messages
+    # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
+
+  # Any OpenAI-compatible gateway on a custom base URL.
+  - name: openai
+    kind: openai
+    api_key_env: OPENAI_API_KEY
+
+  # Anthropic-compatible gateway.
+  - name: anthropic
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+
+  # Keyless local server speaking the OpenAI surface.
+  - name: local
+    kind: openai
+    base_url: http://localhost:11434/v1
+
+mcp:
+  servers:
+    # stdio backend: proxy spawns the child and re-exposes it at /mcp/filesystem
+    - name: filesystem
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+    # remote streamable-HTTP backend
+    - name: github
+      url: https://api.githubcopilot.com/mcp/
+      api_key_env: GITHUB_TOKEN
