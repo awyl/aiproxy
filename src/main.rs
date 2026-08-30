@@ -23,11 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     let cli = Cli::parse();
-    let mut config =
+    let config =
         aiproxy::config::Config::load(&cli.config).map_err(|e| format!("config error: {e}"))?;
-    if let Some(port) = cli.port {
-        config.port = port;
-    }
-    tracing::info!(port = config.port, "starting aiproxy");
-    aiproxy::server::run(config).await.map_err(Into::into)
+    let (host, port) = config
+        .bind_host_port()
+        .map_err(|e| format!("config error: {e}"))?;
+    let port = cli.port.unwrap_or(port);
+    tracing::info!(host = %host, port, "starting aiproxy");
+    aiproxy::server::run_with_port(config, cli.port).await.map_err(Into::into)
 }

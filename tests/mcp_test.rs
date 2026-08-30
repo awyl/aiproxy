@@ -11,7 +11,7 @@ use serde_json::json;
 
 fn echo_cfg(exe: &str) -> Config {
     let yaml = format!(
-        "port: 0\ntoken: mcp-tok\nupstreams:\n  - name: mock\n    kind: openai\n    models: [gpt-4o]\nmcp:\n  servers:\n    - name: echo\n      command: {exe}\n"
+        "bind: 127.0.0.1:0\ntoken: mcp-tok\nupstreams:\n  - name: mock\n    kind: openai\n    models: [gpt-4o]\nmcp:\n  servers:\n    - name: echo\n      command: {exe}\n"
     );
     let path = std::env::temp_dir().join(format!("aiproxy-mcp-{}.yaml", std::process::id()));
     std::fs::write(&path, yaml).unwrap();

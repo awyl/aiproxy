@@ -98,10 +98,15 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+/// Listen address as "host:port". Defaults to loopback.
+fn default_bind() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_port")]
-    pub port: u16,
+    #[serde(default = "default_bind")]
+    pub bind: String,
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]
@@ -113,11 +118,30 @@ pub struct Config {
     pub mcp: McpConfig,
 }
 
-fn default_port() -> u16 {
-    8080
+impl Config {
+    /// Split `bind` into (host, port).
+    pub fn bind_host_port(&self) -> Result<(String, u16), ConfigError> {
+        parse_bind(&self.bind)
+    }
 }
 fn default_refresh() -> u64 {
     0 // fetch once at startup; set > 0 for periodic refresh
+}
+
+/// Parse "host:port" into (host, port). Port 0 (ephemeral) is allowed.
+pub fn parse_bind(raw: &str) -> Result<(String, u16), ConfigError> {
+    let Some((host, port)) = raw.rsplit_once(':') else {
+        return Err(ConfigError::Invalid(format!(
+            "bind must be 'host:port', got '{raw}'"
+        )));
+    };
+    let port: u16 = port.parse().map_err(|_| {
+        ConfigError::Invalid(format!("bind port must be 0-65535, got '{port}'"))
+    })?;
+    if host.is_empty() {
+        return Err(ConfigError::Invalid("bind host must not be empty".into()));
+    }
+    Ok((host.to_string(), port))
 }
 
 #[derive(Debug, Error)]
@@ -142,6 +166,8 @@ impl Config {
 
     fn validate(&self) -> Result<(), ConfigError> {
         let bad = |msg: String| Err(ConfigError::Invalid(msg));
+
+        self.bind_host_port()?;
 
         let mut seen = std::collections::HashSet::new();
         for u in &self.upstreams {
@@ -224,7 +250,7 @@ upstreams:
 "#;
 
     const FULL: &str = r#"
-port: 9090
+bind: 127.0.0.1:9090
 token: secret-literal
 model_refresh_secs: 60
 upstreams:
@@ -254,7 +280,8 @@ mcp:
     #[test]
     fn defaults_applied() {
         let cfg = Config::from_yaml(MINIMAL).unwrap();
-        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.bind, "127.0.0.1:8080", "default bind = loopback:8080");
+        assert_eq!(cfg.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 8080));
         assert_eq!(cfg.model_refresh_secs, 0, "no auto-refresh by default");
         assert_eq!(cfg.upstreams.len(), 1);
         assert_eq!(cfg.upstreams[0].effective_base_url(), "https://api.openai.com/v1");
@@ -264,7 +291,7 @@ mcp:
     #[test]
     fn full_config_parses() {
         let cfg = Config::from_yaml(FULL).unwrap();
-        assert_eq!(cfg.port, 9090);
+        assert_eq!(cfg.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 9090));
         assert_eq!(cfg.effective_token(), Some("secret-literal".into()));
         assert_eq!(cfg.upstreams[0].models, vec!["gpt-4o", "gpt-4o-mini"]);
         assert!(!cfg.upstreams[0].discover, "discover defaults to false");
@@ -283,6 +310,26 @@ mcp:
         );
         assert_eq!(cfg.mcp.servers[0].command.as_deref(), Some("npx"));
         assert_eq!(cfg.mcp.servers[1].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+    }
+
+    #[test]
+    fn bind_parsing_cases() {
+        let ok = Config::from_yaml("upstreams:\n  - { name: a, kind: openai }\n").unwrap();
+        assert_eq!(ok.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 8080));
+
+        for (yaml, expect) in [
+            ("bind: 0.0.0.0:9000", ("0.0.0.0".to_string(), 9000u16)),
+            ("bind: 127.0.0.1:0", ("127.0.0.1".to_string(), 0u16)),
+        ] {
+            let cfg = Config::from_yaml(&format!("{yaml}\nupstreams:\n  - {{ name: a, kind: openai }}\n"))
+                .unwrap();
+            assert_eq!(cfg.bind_host_port().unwrap(), expect, "{yaml}");
+        }
+
+        for bad in ["bind: noslash", "bind: host:70000", "bind: :abc", "bind: :8081", "bind: "] {
+            let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
+            assert!(cfg.is_err(), "expected reject: {bad}");
+        }
     }
 
     #[test]
