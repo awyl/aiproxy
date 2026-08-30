@@ -22,7 +22,9 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Wrap a router with bearer-token auth. `None` disables auth entirely.
-pub fn apply_auth(router: Router, expected: Option<String>) -> Router {
+/// Generic over the router's state type: the middleware carries its own
+/// `Option<String>` state and leaves the router state untouched.
+pub fn apply_auth<S: Clone + Send + Sync + 'static>(router: Router<S>, expected: Option<String>) -> Router<S> {
     router.layer(from_fn_with_state(expected, auth_check))
 }
 

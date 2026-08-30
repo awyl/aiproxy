@@ -88,7 +88,38 @@ use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use crate::discovery::ModelRegistry;
-use crate::provider::{Event, ProviderError, ProviderStream};
+use crate::provider::{Event, ModelSurface, Provider, ProviderError, ProviderStream};
+
+pub mod anthropic;
+pub mod openai;
+
+/// Gate a route on the model's wire surface. Returns a 400 naming the
+/// model's actual surface on mismatch (Unknown -> cannot stream).
+pub fn check_surface(
+    provider: &dyn Provider,
+    model: &str,
+    required: ModelSurface,
+    surface: Surface,
+) -> Result<(), Response> {
+    let got = provider.surface_of(model);
+    if got == required {
+        return Ok(());
+    }
+    let msg = match got {
+        ModelSurface::Unknown => format!(
+            "model '{model}' on upstream '{}' has no known wire surface (static catalog entry); it cannot be streamed",
+            provider.id()
+        ),
+        other => format!(
+            "model '{model}' on upstream '{}' is served via the {other:?} surface; use the matching route",
+            provider.id()
+        ),
+    };
+    Err(match surface {
+        Surface::Openai => openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
+        Surface::Anthropic => anthropic_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct AppState {
