@@ -30,7 +30,16 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
         .registry
         .models()
         .into_iter()
-        .map(|m| json!({"id": m.id, "object": "model", "created": m.created_at, "owned_by": ""}))
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "object": "model",
+                "created": m.created_at,
+                "owned_by": "",
+                "display_name": m.display_name,
+                "surface": m.surface.as_str(),
+            })
+        })
         .collect();
     (StatusCode::OK, Json(json!({"object": "list", "data": data}))).into_response()
 }
@@ -228,6 +237,25 @@ mod tests {
         let (status, body) = send(app, post("/v1/chat/completions", &req.to_string())).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("data: {\"ok\":true}\n\n"));
+    }
+
+    #[tokio::test]
+    async fn list_models_emits_surface_and_display_name() {
+        let app = openai_router(Some("tok".into())).with_state(test_state().await);
+        let (status, body) = send(
+            app,
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer tok")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"surface\":\"responses\""), "go grok model surface");
+        assert!(body.contains("\"surface\":\"chat\""), "openai model surface");
+        assert!(body.contains("\"surface\":\"messages\""), "anthropic model surface");
+        assert!(body.contains("\"display_name\":null"), "display_name present");
     }
 
     #[tokio::test]

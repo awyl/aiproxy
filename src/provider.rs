@@ -27,6 +27,18 @@ impl Default for ModelSurface {
     }
 }
 
+impl ModelSurface {
+    /// Wire name used in `/v1/models`: chat | messages | responses | unknown.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelSurface::ChatCompletions => "chat",
+            ModelSurface::Messages => "messages",
+            ModelSurface::Responses => "responses",
+            ModelSurface::Unknown => "unknown",
+        }
+    }
+}
+
 /// One catalog entry. `id` gets prefixed with the upstream name when exposed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
