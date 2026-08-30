@@ -30,6 +30,7 @@ pub enum EmbedError {
     Transport(String),
 }
 
+#[derive(Debug)]
 pub struct EmbeddingSlot {
     pub id: String,
     pub port: u16,
@@ -37,6 +38,7 @@ pub struct EmbeddingSlot {
     state: tokio::sync::Mutex<SlotState>,
 }
 
+#[derive(Debug)]
 enum SlotState {
     Idle,
     /// Spawned child, single-flight: the slot mutex is held across spawn +
@@ -58,6 +60,7 @@ impl EmbeddingSlot {
     }
 }
 
+#[derive(Debug)]
 pub struct EmbeddingManager {
     llama_bin: String,
     idle_ttl: Duration,
@@ -91,6 +94,11 @@ impl EmbeddingManager {
             idle_ttl: Duration::from_secs(cfg.idle_ttl_secs),
             slots,
         }
+    }
+
+    /// Unprefixed embedding model ids for the /v1/models catalog.
+    pub fn model_ids(&self) -> Vec<String> {
+        self.slots.iter().map(|s| s.id.clone()).collect()
     }
 
     fn slot(&self, id: &str) -> Option<&EmbeddingSlot> {
@@ -219,7 +227,7 @@ async fn wait_healthy(port: u16, id: &str) -> Result<(), EmbedError> {
         "child did not serve /health == 200 within 30s".into(),
     ))
 }#[cfg(test)]
-mod tests {
+pub(crate) mod testutil {
     use super::*;
     use crate::config::{EmbeddingModelConfig, EmbeddingsConfig};
     use std::fs;
@@ -285,7 +293,7 @@ exec python3 "$SDIR/fake_llama.py" "$PORT" "$OUT/$ID.pid" "$OUT/$ID.count"
 
     /// Manager over the fake bin; one model per `id`. Model file paths live in
     /// `dir` (need not exist) so pid/count files land in the test's dir.
-    fn manager_with_fake(
+    pub fn manager_with_fake(
         dir: &std::path::Path,
         port_cell: Arc<AtomicUsize>,
         ttl_secs: u64,
@@ -307,11 +315,21 @@ exec python3 "$SDIR/fake_llama.py" "$PORT" "$OUT/$ID.pid" "$OUT/$ID.count"
         EmbeddingManager::new(&cfg)
     }
 
-    fn spawn_count(dir: &std::path::Path, id: &str) -> usize {
+    pub fn spawn_count(dir: &std::path::Path, id: &str) -> usize {
         fs::read_to_string(dir.join(format!("{id}.count")))
             .map(|s| s.len())
             .unwrap_or(0)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::*;
+    use super::*;
+    use crate::config::{EmbeddingModelConfig, EmbeddingsConfig};
+    use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     #[tokio::test]
     async fn spawns_on_demand_once_and_relays() {

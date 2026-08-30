@@ -75,6 +75,7 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
     }
     let state = AppState {
         registry,
+        embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(&config.embeddings)),
         token: token.clone(),
         subscriptions,
     };

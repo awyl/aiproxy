@@ -25,13 +25,14 @@ pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router
         Router::new()
             .route("/v1/models", get(list_models))
             .route("/v1/chat/completions", post(chat_completions))
-            .route("/v1/responses", post(responses)),
+            .route("/v1/responses", post(responses))
+            .route("/v1/embeddings", post(embeddings)),
         crate::auth::auth_state(token, subs),
     )
 }
 
 pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
-    let data: Vec<Value> = state
+    let mut data: Vec<Value> = state
         .registry
         .models()
         .into_iter()
@@ -46,6 +47,17 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
             })
         })
         .collect();
+    // Fake local-embeddings provider: config-driven, never discovered.
+    for id in state.embeddings.model_ids() {
+        data.push(json!({
+            "id": format!("embeddings-local/{id}"),
+            "object": "model",
+            "created": null,
+            "owned_by": "",
+            "display_name": null,
+            "surface": "embedding",
+        }));
+    }
     (StatusCode::OK, Json(json!({"object": "list", "data": data}))).into_response()
 }
 
@@ -168,6 +180,61 @@ async fn responses(
         Err(resp) => resp,
     }
 }
+
+/// Fake `embeddings-local` provider: relay a /v1/embeddings request to the
+/// on-demand local llama-server child for the model.
+async fn embeddings(
+    State(state): State<AppState>,
+    Json(req): Json<Value>,
+) -> axum::response::Response {
+    let Some(model) = req.get("model").and_then(Value::as_str) else {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "missing 'model' field",
+            "invalid_request_error",
+        );
+    };
+    let Some(mid) = model.strip_prefix("embeddings-local/") else {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown model '{model}'; use embeddings-local/<id> for embedding models"),
+            "invalid_request_error",
+        );
+    };
+    match state.embeddings.embed(mid, &req).await {
+        Ok(v) => (StatusCode::OK, axum::Json(v)).into_response(),
+        Err(e) => match e {
+            crate::embeddings::EmbedError::UnknownModel(id) => openai_error(
+                StatusCode::BAD_REQUEST,
+                format!("unknown embedding model '{id}'"),
+                "invalid_request_error",
+            ),
+            crate::embeddings::EmbedError::SpawnFailed(id, msg) => openai_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "embedding backend '{id}' failed to start: {msg}; check llama_bin and model_file"
+                ),
+                "upstream_error",
+            ),
+            crate::embeddings::EmbedError::NotReady(id, msg) => openai_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("embedding backend '{id}' not ready: {msg}"),
+                "upstream_error",
+            ),
+            crate::embeddings::EmbedError::Http(status, body) => {
+                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                let body = serde_json::from_str::<Value>(&body)
+                    .unwrap_or_else(|_| json!({ "error": { "message": body } }));
+                (status, axum::Json(body)).into_response()
+            }
+            crate::embeddings::EmbedError::Transport(msg) => openai_error(
+                StatusCode::BAD_GATEWAY,
+                msg,
+                "upstream_error",
+            ),
+        },
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,8 +254,16 @@ mod tests {
         ];
         let reg = crate::discovery::ModelRegistry::new(providers);
         reg.refresh().await;
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap())); // outlive spawned fakes
+        let embed = crate::embeddings::testutil::manager_with_fake(
+            dir.path(),
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(20010)),
+            3600,
+            &["nomic"],
+        );
         AppState {
             registry: std::sync::Arc::new(reg),
+            embeddings: std::sync::Arc::new(embed),
             token: Some("tok".into()),
             subscriptions: Default::default(),
         }
@@ -252,9 +327,15 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["anthropic/claude-sonnet-4", "openai/gpt-4o", "opencode-go/grok-4.6"]
+            vec![
+                "anthropic/claude-sonnet-4",
+                "openai/gpt-4o",
+                "opencode-go/grok-4.6",
+                "embeddings-local/nomic"
+            ]
         );
         assert_eq!(v["data"][0]["object"], "model");
+        assert_eq!(v["data"][3]["surface"], "embedding");
     }
 
     #[tokio::test]
@@ -349,6 +430,31 @@ mod tests {
         assert!(body.contains("\"surface\":\"chat\""), "openai model surface");
         assert!(body.contains("\"surface\":\"messages\""), "anthropic model surface");
         assert!(body.contains("\"display_name\":null"), "display_name present");
+    }
+
+    #[tokio::test]
+    async fn embeddings_relays_to_local_backend() {
+        let app = openai_router(Some("tok".into())).with_state(test_state().await);
+        let req: Value = json!({"model": "embeddings-local/nomic", "input": "hello"});
+        let (status, body) = send(app, post("/v1/embeddings", &req.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"][0]["embedding"], json!([0.1, 0.2]));
+    }
+
+    #[tokio::test]
+    async fn embeddings_rejects_non_embedding_or_unknown_model() {
+        let app = openai_router(Some("tok".into())).with_state(test_state().await);
+        // chat-upstream model id on the embeddings route
+        let req: Value = json!({"model": "openai/gpt-4o", "input": "hi"});
+        let (status, body) = send(app.clone(), post("/v1/embeddings", &req.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("embedding models"), "{body}");
+        // unknown embedding id
+        let req: Value = json!({"model": "embeddings-local/nope", "input": "hi"});
+        let (status, body) = send(app.clone(), post("/v1/embeddings", &req.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("nope"), "{body}");
     }
 
     #[tokio::test]

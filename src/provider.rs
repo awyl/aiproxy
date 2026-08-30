@@ -18,6 +18,9 @@ pub enum ModelSurface {
     ChatCompletions,
     Messages,
     Responses,
+    /// Local embeddings (fake `embeddings-local` provider) — display-only
+    /// surface; chat routers never stream these.
+    Embedding,
     Unknown,
 }
 
@@ -34,6 +37,7 @@ impl ModelSurface {
             ModelSurface::ChatCompletions => "chat",
             ModelSurface::Messages => "messages",
             ModelSurface::Responses => "responses",
+            ModelSurface::Embedding => "embedding",
             ModelSurface::Unknown => "unknown",
         }
     }

@@ -94,6 +94,9 @@ mod tests {
         reg.refresh().await;
         AppState {
             registry: std::sync::Arc::new(reg),
+            embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(
+                &crate::config::EmbeddingsConfig::default(),
+            )),
             token: Some("tok".into()),
             subscriptions: Default::default(),
         }

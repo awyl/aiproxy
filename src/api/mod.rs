@@ -88,6 +88,7 @@ use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use crate::discovery::ModelRegistry;
+use crate::embeddings::EmbeddingManager;
 use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
 
 pub mod anthropic;
@@ -147,6 +148,7 @@ pub fn check_subscription(
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub registry: Arc<ModelRegistry>,
+    pub embeddings: Arc<EmbeddingManager>,
     pub token: Option<String>,
     /// Upstream prefix -> subscription token (from `token_env`).
     /// Missing entry: no gate. `Some(None)`: deny-all (misconfig).
