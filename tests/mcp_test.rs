@@ -28,7 +28,9 @@ async fn stdio_backend_serves_tools_through_http() {
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
     let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp/echo"))
+        StreamableHttpClientTransportConfig::with_uri(
+            format!("http://127.0.0.1:{}/mcp/echo", addr.port()), // loopback: sandbox rejects Host: 0.0.0.0
+        )
             .auth_header("mcp-tok"), // reqwest adds the "Bearer " prefix
     );
     let info = ClientInfo::new(

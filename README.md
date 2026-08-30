@@ -97,6 +97,10 @@ Each `mcp.servers` entry is available to clients at
 Bearer ...`). stdio entries spawn a child process; `url` entries connect to a
 remote streamable-HTTP server.
 
+## Network
+
+Binds `0.0.0.0` (all interfaces). No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything beyond a trusted LAN.
+
 ## Security
 
 - No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything public.

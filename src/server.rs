@@ -56,7 +56,7 @@ pub async fn build(config: Config) -> Result<(TcpListener, Router), ServerError>
         .merge(mcp_router)
         .with_state(state);
 
-    let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
+    let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     Ok((listener, app))
 }
 
