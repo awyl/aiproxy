@@ -198,7 +198,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
     // Env mutation is unsafe in edition 2024; unique names + cleanup guard.
