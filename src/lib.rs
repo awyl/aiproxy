@@ -2,6 +2,7 @@ pub mod config;
 pub mod api;
 pub mod auth;
 pub mod discovery;
+pub mod embeddings;
 pub mod mcp;
 pub mod providers;
 pub mod server;
