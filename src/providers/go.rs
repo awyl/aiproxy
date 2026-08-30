@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -13,7 +13,6 @@ use crate::config::UpstreamConfig;
 use crate::provider::{Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const SURFACES_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Fallback snapshot of opencode.ai/docs/go endpoints table (2026-08-30).
 /// The runtime surface map (parsed from `surface_map_url`) and config
@@ -80,16 +79,6 @@ fn strip_tags(s: &str) -> String {
 #[derive(Debug, Default)]
 pub struct SurfaceCache {
     pub map: HashMap<String, ModelSurface>,
-    pub fetched_at: Option<Instant>,
-}
-
-impl SurfaceCache {
-    fn stale(&self) -> bool {
-        match self.fetched_at {
-            Some(t) => t.elapsed() >= SURFACES_TTL,
-            None => true,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -180,9 +169,7 @@ impl OpencodeGoProvider {
             tracing::warn!(url = %self.surfaces_url, "surface map parse produced no rows; keeping previous");
             return;
         }
-        let mut cache = self.surfaces.write().unwrap();
-        cache.map = map;
-        cache.fetched_at = Some(Instant::now());
+        self.surfaces.write().unwrap().map = map;
     }
 
     fn require_surface(&self, model: &str, want: ModelSurface) -> Result<(), ProviderError> {
@@ -245,9 +232,9 @@ impl Provider for OpencodeGoProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<Model>, ProviderError> {
-        if self.surfaces.read().unwrap().stale() {
-            self.refresh_surfaces().await;
-        }
+        // Surfaces ride the discovery pass: no independent TTL. Any failure
+        // logs + keeps the last-known map (refresh_surfaces is best-effort).
+        self.refresh_surfaces().await;
         let resp = self
             .client
             .get(format!("{}/models", self.base_url))
@@ -369,7 +356,8 @@ use bytes::Bytes;
 <tr><td>Broken row</td><td>bogus-model</td><td>https://example.com/weird</td><td>@ai-sdk/none</td></tr>
 </tbody></table>";
 
-    async fn spawn_go_mock(state: SharedCapture, docs_html: Option<&str>) -> String {
+    async fn spawn_go_mock(state: SharedCapture, docs_html: Option<&str>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let docs_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut app = Router::new()
             .route("/v1/models", get(|| async { GO_MODELS }))
             .route("/v1/chat/completions", post(go_relay))
@@ -378,18 +366,23 @@ use bytes::Bytes;
             .with_state(state.clone());
         if let Some(html) = docs_html {
             let html = html.to_string();
+            let counter = docs_hits.clone();
             app = app.route(
                 "/docs/go",
                 get(move || {
                     let h = html.clone();
-                    async move { h }
+                    let c = counter.clone();
+                    async move {
+                        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        h
+                    }
                 }),
             );
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}/v1")
+        (format!("http://{addr}/v1"), docs_hits)
     }
 
     async fn go_relay(
@@ -439,8 +432,9 @@ use bytes::Bytes;
     #[tokio::test]
     async fn runtime_surface_map_extends_builtin() {
         let state = Arc::new(Capture::default());
-        let base = spawn_go_mock(state, Some(DOCS_TABLE)).await;
-        let p = provider(&base, Some(&format!("{base}/docs/go")), &[]);
+        let (base, _) = spawn_go_mock(state, Some(DOCS_TABLE)).await;
+        let root = base.rsplit_once("/v1").unwrap().0;
+        let p = provider(&base, Some(&format!("{root}/docs/go")), &[]);
         p.refresh_surfaces().await;
         assert_eq!(p.surface_of("grok-4.6"), ModelSurface::Responses);
         assert_eq!(p.surface_of("minimax-m3"), ModelSurface::Messages);
@@ -451,11 +445,27 @@ use bytes::Bytes;
     #[tokio::test]
     async fn surface_fetch_failure_falls_back_to_builtin() {
         let state = Arc::new(Capture::default());
-        let base = spawn_go_mock(state, None).await; // no /docs/go route -> 404
-        let p = provider(&base, Some(&format!("{base}/docs/go")), &[]);
+        let (base, _) = spawn_go_mock(state, None).await; // no /docs/go route -> 404
+        let root = base.rsplit_once("/v1").unwrap().0;
+        let p = provider(&base, Some(&format!("{root}/docs/go")), &[]);
         p.refresh_surfaces().await; // fails silently
         assert_eq!(p.surface_of("grok-4.6"), ModelSurface::Responses); // builtin
         assert_eq!(p.surface_of("minimax-m3"), ModelSurface::Messages);
+    }
+
+    #[tokio::test]
+    async fn surface_table_refreshed_on_every_discovery_pass() {
+        let state = Arc::new(Capture::default());
+        let (base, docs_hits) = spawn_go_mock(state, Some(DOCS_TABLE)).await;
+        let root = base.rsplit_once("/v1").unwrap().0;
+        let p = provider(&base, Some(&format!("{root}/docs/go")), &[]);
+        p.list_models().await.unwrap(); // pass 1: models + surfaces
+        p.list_models().await.unwrap(); // pass 2: models + surfaces again
+        assert_eq!(
+            docs_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "surface table must be re-fetched on every discovery pass (no independent TTL)"
+        );
     }
 
     #[test]
@@ -480,7 +490,7 @@ use bytes::Bytes;
 
     #[tokio::test]
     async fn discovery_tags_models_with_surface() {
-        let base = spawn_go_mock(Arc::new(Capture::default()), None).await;
+        let (base, _) = spawn_go_mock(Arc::new(Capture::default()), None).await;
         let p = provider(&base, None, &[]);
         let models = p.list_models().await.unwrap();
         let by_id: HashMap<_, _> = models.iter().map(|m| (m.id.as_str(), m.surface)).collect();
@@ -492,7 +502,7 @@ use bytes::Bytes;
     #[tokio::test]
     async fn surfaces_forward_to_correct_path_and_headers() {
         let state = Arc::new(Capture::default());
-        let base = spawn_go_mock(state.clone(), None).await;
+        let (base, _) = spawn_go_mock(state.clone(), None).await;
         let p = provider(&base, None, &[]);
 
         let mut s1 = p
@@ -532,7 +542,7 @@ use bytes::Bytes;
     #[tokio::test]
     async fn wrong_surface_call_is_rejected() {
         let state = Arc::new(Capture::default());
-        let base = spawn_go_mock(state, None).await;
+        let (base, _) = spawn_go_mock(state, None).await;
         let p = provider(&base, None, &[]);
         let err = p
             .chat_completions(json!({"model": "grok-4.6"}), &RequestContext { model: "grok-4.6".into() })

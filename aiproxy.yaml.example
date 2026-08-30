@@ -41,8 +41,9 @@ thinking: high                     # pi extension: default thinking level for al
 upstreams:
   # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
   # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's
-  # why this is safe to enable), surfaces parsed from surface_map_url on
-  # refresh (builtin snapshot fallback).
+  # why this is safe to enable), surfaces parsed from surface_map_url on the
+  # same refresh cadence as the ids (startup + model_refresh_secs; no TTL),
+  # builtin snapshot fallback.
   - name: opencode-go
     kind: opencode-go
     api_key_env: OPENCODE_GO_API_KEY

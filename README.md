@@ -42,6 +42,11 @@ per-refresh warnings in the log (e.g. `401` against `api.openai.com` or
 `model_refresh_secs: 0` the fetch happens once at startup; set it to a
 positive value (e.g. `1800`) for periodic re-discovery.
 
+One cadence for everything: surfaces ride the same discovery pass. A go
+`surface_map_url` table re-fetch happens on every `registry.refresh()`
+(startup + each `model_refresh_secs` tick) — no independent TTL, no special
+treatment. Failures keep the last-known map and log a warning.
+
 ## Quickstart
 
 ```bash
