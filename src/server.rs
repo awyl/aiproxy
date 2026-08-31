@@ -90,7 +90,7 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
         }
     });
 
-    let mcp_router = crate::mcp::mcp_router(&config.mcp.servers, token.clone(), &host).map_err(ServerError::Mcp)?;
+    let mcp_router = crate::mcp::mcp_router(&config.mcp.servers, token.clone(), &host, &config.mcp.allowed_hosts).map_err(ServerError::Mcp)?;
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))

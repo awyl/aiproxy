@@ -22,9 +22,13 @@ use crate::config::McpServerConfig;
 
 type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
-pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>, bind_host: &str) -> Result<Router<AppState>, String> {
+pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>, bind_host: &str, allowed_hosts: &[String]) -> Result<Router<AppState>, String> {
     let mut router = apply_auth(Router::<AppState>::new(), crate::auth::auth_state(token, &[]));
-    let mut allowed = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    let mut allowed: Vec<String> = if allowed_hosts.is_empty() {
+        vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
+    } else {
+        allowed_hosts.to_vec()
+    };
     if !allowed.contains(&bind_host.to_string()) {
         allowed.push(bind_host.into());
     }

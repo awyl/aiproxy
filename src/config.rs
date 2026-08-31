@@ -139,6 +139,11 @@ impl McpServerConfig {
 pub struct McpConfig {
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
+    /// Hosts allowed by the streamable-HTTP server's DNS rebinding protection.
+    /// Defaults to ["localhost", "127.0.0.1", "::1"] when empty; the bind
+    /// host is always added automatically.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 /// One local embedding model served by a spawned llama-server child.
@@ -389,6 +394,7 @@ mcp:
     - name: github
       url: https://api.githubcopilot.com/mcp/
       api_key_env: T_GITHUB_TOKEN
+  allowed_hosts: ["host.containers.internal"]
 "#;
 
     #[test]
@@ -424,6 +430,7 @@ mcp:
         );
         assert_eq!(cfg.mcp.servers[0].command.as_deref(), Some("npx"));
         assert_eq!(cfg.mcp.servers[1].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+        assert_eq!(cfg.mcp.allowed_hosts, vec!["host.containers.internal"]);
     }
 
     #[test]

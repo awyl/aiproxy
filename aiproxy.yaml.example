@@ -112,6 +112,12 @@ mcp:
       url: https://api.githubcopilot.com/mcp/
       api_key_env: GITHUB_TOKEN
 
+  # DNS rebinding allowlist for the streamable-HTTP server.
+  # Clients connecting via a hostname not in this list get rejected.
+  # The bind host is always added automatically.
+  # Default (empty): [localhost, 127.0.0.1, ::1]
+  allowed_hosts: ["host.containers.internal"]  # add when pi runs inside a container
+
 # Local CPU embeddings — fake provider "embeddings-local". Each model is a
 # llama-server child, spawned ON DEMAND on its first request and killed after
 # idle_ttl_secs without traffic. Installed GGUF files must exist on disk.
