@@ -16,20 +16,37 @@ and strips it. `api` is derived per model from the proxy's `surface` field:
 ## Setup
 
 ```bash
-npm install          # pull pi-ai + pi-coding-agent for types
+npm install          # pull pi-ai + pi-coding-agent for types (edit-time only)
 ```
 
-No extension env vars. Everything comes from the proxy's `aiproxy.yaml`
-(next to where you run pi, or a symlink to it):
+No extension env vars, no dependency on the proxy's yaml. The extension reads
+its connection settings from **pi's own per-machine provider config**
+(`models.json` — user-level `~/.pi/agent/models.json`, or project
+`.pi/models.json`):
 
-- `bind` → base URL (`http://host:port/v1`, default `127.0.0.1:8080`)
-- `token` / `token_env` → the bearer token (secret still lives in env, the
-  yaml only names it)
-- `thinking` → default thinking level for all models (`off|low|medium|high|max`,
-  default `high`)
+```json
+{
+  "providers": {
+    "aiproxy": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "apiKey": "$AIPROXY_TOKEN"
+    }
+  }
+}
+```
 
-The env file holds only secrets (API keys, tokens); the yaml holds all
-configuration.
+- `baseUrl` → where the proxy listens (default `http://127.0.0.1:8080/v1`;
+  put the proxy's real host here when it runs on another machine)
+- `apiKey` → bearer token; `$ENV` interpolation, a command, or a literal —
+  the same syntax pi uses for every provider. Secret keeps living in env.
+
+`aiproxy.yaml` remains the **proxy server's own config** — the extension never
+touches it. With no `providers.aiproxy` entry the extension falls back to
+localhost + no key.
+
+Default thinking level is `high` for every model; override per model with
+`models.json` `modelOverrides` (e.g. `{"providers":{"aiproxy": {"modelOverrides":
+{"aiproxy/opencode-go/mimo-v2.5": {"thinkingLevelMap": {...}}}}}}`).
 
 ## Install
 
@@ -54,10 +71,10 @@ manually. Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
 - Cost/contextWindow/maxTokens are conservative defaults (`0` cost, 128K /
   16K). Override per model in your `models.json` / provider `models` config —
   pi composes those above registered models.
-- Thinking default is `high` for every model (`thinking:` in aiproxy.yaml);
-  only that level is enabled in each model's `thinkingLevelMap`. Chat-surface
-  models receive `reasoning_effort` — models that reject it need
-  `thinking: off` or a per-model override.
+- Thinking default is `high` for every model; only that level is enabled in
+  each model's `thinkingLevelMap`. Chat-surface models receive
+  `reasoning_effort` — models that reject it need a per-model override to
+  drop thinking.
 - `Input` is limited to `["text"]` by default — Go multi-modal models exist
   (`mimo-v2-omni`); flipping to include `"image"` per model is safe if you
   tested it.

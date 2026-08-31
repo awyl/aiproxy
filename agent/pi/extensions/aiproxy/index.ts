@@ -2,14 +2,21 @@
  * aiproxy provider extension for pi.
  *
  * Fronts an aiproxy gateway: one provider entry, models discovered from the
- * gateway at startup. All configuration comes from the gateway's own yaml
- * (default `./aiproxy.yaml`), so there are NO extension env vars — env vars
- * are reserved for secrets (upstream keys, tokens) referenced by name in the
- * yaml, e.g. `token_env: AIPROXY_TOKEN`.
+ * gateway at startup. Configuration lives in PI's own per-machine config
+ * (`models.json`, user-level `~/.pi/agent/models.json` or project `.pi/`),
+ * not in the proxy's yaml — the proxy and pi can run on different machines.
  *
- *   bind: 127.0.0.1:8080   (extension derives http://127.0.0.1:8080/v1)
- *   token_env: AIPROXY_TOKEN   (or token: <literal>; secret stays in env)
- *   thinking: high          (default thinking level: off|low|medium|high|max)
+ *   {
+ *     "providers": {
+ *       "aiproxy": {
+ *         "baseUrl": "http://127.0.0.1:8080/v1",   // remote proxy: use its host
+ *         "apiKey": "$AIPROXY_TOKEN"               // $ENV interpolation, literal, or omit
+ *       }
+ *     }
+ *   }
+ *
+ * `aiproxy.yaml` is purely the PROXY SERVER's config — the extension never
+ * reads it. Defaults (no models.json entry): http://127.0.0.1:8080/v1, no key.
  *
  * The proxy serves three wire surfaces on one host; per-model `api`:
  *   surface "chat"      -> openai-completions
@@ -18,6 +25,8 @@
  */
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type Surface = "chat" | "messages" | "responses" | "unknown";
@@ -33,15 +42,45 @@ interface ModelsResponse {
   data: ProxyModel[];
 }
 
-/** Minimal yaml scrape for the handful of keys the extension needs. */
-function readYaml(path: string): Record<string, string> {
-  const text = readFileSync(path, "utf8");
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const m = /^\s*([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$/.exec(line);
-    if (m && !m[2].startsWith("#")) out[m[1]] = m[2];
+/**
+ * Read the aiproxy provider entry from PI's models.json (user-level
+ * `~/.pi/agent/models.json`). Same file pi composes over registered providers;
+ * we read it directly so discovery + registration agree with pi's auth.
+ * Returns the base URL and the apiKey config value (may use $ENV syntax — pi
+ * interpolates at request time; we pass it through for registration).
+ */
+function loadConfig(): {
+  base: string;
+  apiKey: string;
+  token?: string;
+  thinking: Thinking;
+} {
+  const candidates = [
+    join(homedir(), ".pi/agent/models.json"),
+    join(process.cwd(), ".pi/models.json"),
+  ];
+  let entry: { baseUrl?: string; apiKey?: string } | undefined;
+  for (const path of candidates) {
+    try {
+      const raw = readFileSync(path, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "") // strip block comments
+        .replace(/(^|[^:])\/\/.*$/gm, "$1"); // strip line comments (keep URLs)
+      const parsed = JSON.parse(raw) as { providers?: Record<string, { baseUrl?: string; apiKey?: string }> };
+      entry = parsed.providers?.["aiproxy"];
+      if (entry) break;
+    } catch {
+      // missing or unparseable — fall through to defaults
+    }
   }
-  return out;
+
+  const baseUrl = entry?.baseUrl?.trim() || "http://127.0.0.1:8080/v1";
+  const apiKey = entry?.apiKey?.trim() || "";
+  const token = apiKey.startsWith("$")
+    ? process.env[apiKey.slice(1)]?.trim()
+    : apiKey || undefined; // token for the discovery fetch
+
+  // default thinking level (per-model override via models.json stays possible)
+  return { base: baseUrl, apiKey, token, thinking: "high" };
 }
 
 /** Map proxy surface to pi Api id; unknown surfaces default to chat. */
@@ -63,26 +102,8 @@ function thinkingFor(level: Thinking): { reasoning: boolean; thinkingLevelMap?: 
   return { reasoning: true, thinkingLevelMap };
 }
 
-function loadConfig(): { base: string; token?: string; apiKey: string; thinking: Thinking } {
-  const yaml = readYaml("aiproxy.yaml");
-
-  // bind -> base URL (http://host:port/v1, empty host = localhost)
-  const [host, port] = (yaml.bind ?? "127.0.0.1:8080").split(":");
-  const base = `http://${host || "localhost"}:${(port ?? "8080").trim() || "8080"}/v1`;
-
-  // token: literal wins over token_env (env var NAME holding the secret).
-  // apiKey must end up identical at request time: reference the same env var
-  // (pi interpolates `$NAME` from the environment) or pass the literal.
-  const tokenEnv = yaml.token_env?.trim();
-  const token = yaml.token?.trim() || (tokenEnv ? process.env[tokenEnv]?.trim() : undefined);
-  const apiKey = tokenEnv ? `$${tokenEnv}` : token ?? "";
-
-  const thinking = (yaml.thinking ?? "high").trim().toLowerCase() as Thinking;
-  return { base, token, apiKey, thinking: ["off", "low", "medium", "high", "max"].includes(thinking) ? thinking : "high" };
-}
-
 export default async function (pi: ExtensionAPI) {
-  const { base, token, apiKey, thinking } = loadConfig();
+  const { base, apiKey, token, thinking } = loadConfig();
 
   let models: ProxyModel[] = [];
   try {
@@ -94,7 +115,7 @@ export default async function (pi: ExtensionAPI) {
   } catch (error) {
     console.warn(
       `[aiproxy] could not fetch ${base}/models: ${error instanceof Error ? error.message : String(error)}\n` +
-        "           no aiproxy models registered — check aiproxy.yaml bind/token and that the gateway is running.",
+        "           no aiproxy models registered — check models.json providers.aiproxy and that the gateway is running.",
     );
   }
 
