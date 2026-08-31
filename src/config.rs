@@ -5,11 +5,11 @@
 //! mcp.servers (name/command/args/env/url/api_key_env). Upstream keys live in
 //! env vars only, referenced by `api_key_env`.
 
+use crate::provider::ModelSurface;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::env as std_env;
 use std::path::Path;
-use crate::provider::ModelSurface;
-use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -234,9 +234,9 @@ pub fn parse_bind(raw: &str) -> Result<(String, u16), ConfigError> {
             "bind must be 'host:port', got '{raw}'"
         )));
     };
-    let port: u16 = port.parse().map_err(|_| {
-        ConfigError::Invalid(format!("bind port must be 0-65535, got '{port}'"))
-    })?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| ConfigError::Invalid(format!("bind port must be 0-65535, got '{port}'")))?;
     if host.is_empty() {
         return Err(ConfigError::Invalid("bind host must not be empty".into()));
     }
@@ -258,7 +258,8 @@ impl Config {
     }
 
     pub fn from_yaml(raw: &str) -> Result<Config, ConfigError> {
-        let cfg: Config = serde_yaml::from_str(raw).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+        let cfg: Config =
+            serde_yaml::from_str(raw).map_err(|e| ConfigError::Invalid(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -268,12 +269,12 @@ impl Config {
         self.validate_upstreams()?;
         self.validate_mcp()?;
         self.validate_embeddings()?;
-        if let Some(env) = &self.token_env {
-            if std_env::var(env).is_err() {
-                return Err(ConfigError::Invalid(format!(
-                    "token_env '{env}' is not set in the environment"
-                )));
-            }
+        if let Some(env) = &self.token_env
+            && std_env::var(env).is_err()
+        {
+            return Err(ConfigError::Invalid(format!(
+                "token_env '{env}' is not set in the environment"
+            )));
         }
         Ok(())
     }
@@ -314,7 +315,10 @@ impl Config {
                 return bad(format!("duplicate mcp server name: {}", s.name));
             }
             if s.command.is_none() && s.url.is_none() {
-                return bad(format!("mcp server '{}': command or url is required", s.name));
+                return bad(format!(
+                    "mcp server '{}': command or url is required",
+                    s.name
+                ));
             }
         }
         Ok(())
@@ -328,7 +332,10 @@ impl Config {
                 return bad(format!("duplicate embedding model id: {}", m.id));
             }
             if m.model_file.is_empty() {
-                return bad(format!("embedding model '{}': model_file is required", m.id));
+                return bad(format!(
+                    "embedding model '{}': model_file is required",
+                    m.id
+                ));
             }
         }
         Ok(())
@@ -401,17 +408,26 @@ mcp:
     fn defaults_applied() {
         let cfg = Config::from_yaml(MINIMAL).unwrap();
         assert_eq!(cfg.bind, "127.0.0.1:8080", "default bind = loopback:8080");
-        assert_eq!(cfg.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 8080));
+        assert_eq!(
+            cfg.bind_host_port().unwrap(),
+            ("127.0.0.1".to_string(), 8080)
+        );
         assert_eq!(cfg.model_refresh_secs, 0, "no auto-refresh by default");
         assert_eq!(cfg.upstreams.len(), 1);
-        assert_eq!(cfg.upstreams[0].effective_base_url(), "https://api.openai.com/v1");
+        assert_eq!(
+            cfg.upstreams[0].effective_base_url(),
+            "https://api.openai.com/v1"
+        );
         assert!(cfg.mcp.servers.is_empty());
     }
 
     #[test]
     fn full_config_parses() {
         let cfg = Config::from_yaml(FULL).unwrap();
-        assert_eq!(cfg.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 9090));
+        assert_eq!(
+            cfg.bind_host_port().unwrap(),
+            ("127.0.0.1".to_string(), 9090)
+        );
         assert_eq!(cfg.effective_token(), Some("secret-literal".into()));
         assert_eq!(cfg.upstreams[0].models, vec!["gpt-4o", "gpt-4o-mini"]);
         assert!(!cfg.upstreams[0].discover, "discover defaults to false");
@@ -420,16 +436,25 @@ mcp:
             "https://opencode.ai/zen/go/v1"
         );
         assert_eq!(
-            cfg.upstreams[1].endpoint_by_model.get("qwen3.9-x").map(String::as_str),
+            cfg.upstreams[1]
+                .endpoint_by_model
+                .get("qwen3.9-x")
+                .map(String::as_str),
             Some("messages")
         );
-        assert_eq!(cfg.upstreams[1].surface_map_url.as_deref(), Some("https://opencode.ai/docs/go"));
+        assert_eq!(
+            cfg.upstreams[1].surface_map_url.as_deref(),
+            Some("https://opencode.ai/docs/go")
+        );
         assert_eq!(
             cfg.upstreams[2].effective_base_url(),
             "https://api.anthropic.com/v1"
         );
         assert_eq!(cfg.mcp.servers[0].command.as_deref(), Some("npx"));
-        assert_eq!(cfg.mcp.servers[1].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+        assert_eq!(
+            cfg.mcp.servers[1].url.as_deref(),
+            Some("https://api.githubcopilot.com/mcp/")
+        );
         assert_eq!(cfg.mcp.allowed_hosts, vec!["host.containers.internal"]);
     }
 
@@ -445,26 +470,46 @@ upstreams:
 "#;
         let cfg = Config::from_yaml(yaml).unwrap();
         assert_eq!(cfg.upstreams[0].subscription_token(), None);
-        assert_eq!(cfg.upstreams[1].subscription_token(), Some(Some("alice-tok".into())));
-        assert_eq!(cfg.upstreams[2].subscription_token(), Some(None), "set-but-empty env = deny-all");
+        assert_eq!(
+            cfg.upstreams[1].subscription_token(),
+            Some(Some("alice-tok".into()))
+        );
+        assert_eq!(
+            cfg.upstreams[2].subscription_token(),
+            Some(None),
+            "set-but-empty env = deny-all"
+        );
     }
 
     #[test]
     fn bind_parsing_cases() {
         let ok = Config::from_yaml("upstreams:\n  - { name: a, kind: openai }\n").unwrap();
-        assert_eq!(ok.bind_host_port().unwrap(), ("127.0.0.1".to_string(), 8080));
+        assert_eq!(
+            ok.bind_host_port().unwrap(),
+            ("127.0.0.1".to_string(), 8080)
+        );
 
         for (yaml, expect) in [
             ("bind: 0.0.0.0:9000", ("0.0.0.0".to_string(), 9000u16)),
             ("bind: 127.0.0.1:0", ("127.0.0.1".to_string(), 0u16)),
         ] {
-            let cfg = Config::from_yaml(&format!("{yaml}\nupstreams:\n  - {{ name: a, kind: openai }}\n"))
-                .unwrap();
+            let cfg = Config::from_yaml(&format!(
+                "{yaml}\nupstreams:\n  - {{ name: a, kind: openai }}\n"
+            ))
+            .unwrap();
             assert_eq!(cfg.bind_host_port().unwrap(), expect, "{yaml}");
         }
 
-        for bad in ["bind: noslash", "bind: host:70000", "bind: :abc", "bind: :8081", "bind: "] {
-            let cfg = Config::from_yaml(&format!("{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"));
+        for bad in [
+            "bind: noslash",
+            "bind: host:70000",
+            "bind: :abc",
+            "bind: :8081",
+            "bind: ",
+        ] {
+            let cfg = Config::from_yaml(&format!(
+                "{bad}\nupstreams:\n  - {{ name: a, kind: openai }}\n"
+            ));
             assert!(cfg.is_err(), "expected reject: {bad}");
         }
     }
@@ -499,7 +544,10 @@ upstreams:
         )
         .unwrap();
         assert_eq!(ok.upstreams[0].kind, UpstreamKind::Openrouter);
-        assert_eq!(ok.upstreams[0].models, vec!["anthropic/claude-sonnet-4.5".to_string()]);
+        assert_eq!(
+            ok.upstreams[0].models,
+            vec!["anthropic/claude-sonnet-4.5".to_string()]
+        );
     }
 
     #[test]
@@ -514,7 +562,10 @@ upstreams:
         )
         .unwrap();
         assert_eq!(ok.upstreams[0].kind, UpstreamKind::Zai);
-        assert_eq!(ok.upstreams[0].models, vec!["glm-5.3".to_string(), "glm-5.3-flash".to_string()]);
+        assert_eq!(
+            ok.upstreams[0].models,
+            vec!["glm-5.3".to_string(), "glm-5.3-flash".to_string()]
+        );
     }
 
     #[test]
@@ -596,13 +647,20 @@ upstreams:
     #[test]
     fn opencode_go_default_base_and_surface_url() {
         let cfg = Config::from_yaml("upstreams:\n  - { name: go, kind: opencode-go }\n").unwrap();
-        assert_eq!(cfg.upstreams[0].effective_base_url(), "https://opencode.ai/zen/go/v1");
-        assert_eq!(cfg.upstreams[0].surface_map_url_or_default(), "https://opencode.ai/docs/go");
+        assert_eq!(
+            cfg.upstreams[0].effective_base_url(),
+            "https://opencode.ai/zen/go/v1"
+        );
+        assert_eq!(
+            cfg.upstreams[0].surface_map_url_or_default(),
+            "https://opencode.ai/docs/go"
+        );
     }
 
     #[test]
     fn invalid_endpoint_by_model_value_rejected() {
-        let yaml = "upstreams:\n  - { name: go, kind: opencode-go, endpoint_by_model: { x: bogus } }\n";
+        let yaml =
+            "upstreams:\n  - { name: go, kind: opencode-go, endpoint_by_model: { x: bogus } }\n";
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("endpoint_by_model"));
     }

@@ -1,11 +1,13 @@
 //! Anthropic gateway provider (kind `anthropic`). Serves the messages surface
 //! only; `chat_completions`/`responses` are rejected.
 
+use crate::config::UpstreamConfig;
+use crate::provider::{
+    Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
+};
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::{json, Value};
-use crate::config::UpstreamConfig;
-use crate::provider::{Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
+use serde_json::{Value, json};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -95,10 +97,9 @@ impl Provider for AnthropicProvider {
             .map_err(|e| ProviderError::Transport(format!("upstream {}: {e}", ctx.model)))?;
         let status = resp.status();
         if !status.is_success() {
-            let body: Value = resp
-                .json()
-                .await
-                .unwrap_or_else(|_| json!({"type": "error", "error": {"message": "upstream error"}}));
+            let body: Value = resp.json().await.unwrap_or_else(
+                |_| json!({"type": "error", "error": {"message": "upstream error"}}),
+            );
             return Err(ProviderError::Http {
                 status: status.as_u16(),
                 body,
@@ -137,22 +138,21 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::test_mock_upstream::{Capture, SharedCapture};
     use crate::provider::RequestContext;
+    use crate::providers::test_mock_upstream::{Capture, SharedCapture};
+    use axum::Router;
     use axum::body::Body;
     use axum::extract::State;
-    use axum::http::{header, HeaderMap};
+    use axum::http::{HeaderMap, header};
     use axum::response::Response;
     use axum::routing::{get, post};
-    use axum::Router;
     use bytes::Bytes;
     use futures::StreamExt;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    const MODELS_ANTHROPIC: &str =
-        r#"{"data":[{"type":"model","id":"claude-sonnet-4","display_name":"Claude Sonnet 4","created_at":"2026-05-01T00:00:00Z"}]}"#;
+    const MODELS_ANTHROPIC: &str = r#"{"data":[{"type":"model","id":"claude-sonnet-4","display_name":"Claude Sonnet 4","created_at":"2026-05-01T00:00:00Z"}]}"#;
     const MESSAGES_SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n";
 
     async fn spawn_mock(state: SharedCapture) -> String {
@@ -178,7 +178,10 @@ mod tests {
         *state.headers.lock().unwrap() = map;
         *state.body.lock().unwrap() = Some(body);
         let mut resp = Response::new(Body::from(Bytes::from_static(MESSAGES_SSE.as_bytes())));
-        resp.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/event-stream"));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/event-stream"),
+        );
         resp
     }
 
@@ -207,7 +210,10 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "claude-sonnet-4");
         assert_eq!(models[0].display_name.as_deref(), Some("Claude Sonnet 4"));
-        assert_eq!(models[0].created_at.as_deref(), Some("2026-05-01T00:00:00Z"));
+        assert_eq!(
+            models[0].created_at.as_deref(),
+            Some("2026-05-01T00:00:00Z")
+        );
     }
 
     #[tokio::test]
@@ -215,9 +221,15 @@ mod tests {
         let state = Arc::new(Capture::default());
         let base = spawn_mock(state.clone()).await;
         let p = provider(&base);
-        let req = json!({"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "hi"}]});
+        let req =
+            json!({"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "hi"}]});
         let mut stream = p
-            .messages(req, &RequestContext { model: "claude-sonnet-4".into() })
+            .messages(
+                req,
+                &RequestContext {
+                    model: "claude-sonnet-4".into(),
+                },
+            )
             .await
             .unwrap();
         let mut out = String::new();
@@ -227,8 +239,14 @@ mod tests {
         assert!(out.contains("message_start"));
         assert!(out.contains("content_block_delta"));
         let headers = state.headers.lock().unwrap();
-        assert_eq!(headers.get("x-api-key").map(String::as_str), Some("sk-ant-test"));
-        assert_eq!(headers.get("anthropic-version").map(String::as_str), Some("2023-06-01"));
+        assert_eq!(
+            headers.get("x-api-key").map(String::as_str),
+            Some("sk-ant-test")
+        );
+        assert_eq!(
+            headers.get("anthropic-version").map(String::as_str),
+            Some("2023-06-01")
+        );
         let body = state.body.lock().unwrap().clone().unwrap();
         assert_eq!(body["model"], "claude-sonnet-4");
     }

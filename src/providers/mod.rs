@@ -7,13 +7,15 @@ pub mod openai;
 #[cfg(test)]
 pub mod test_mock_upstream;
 
-use std::sync::Arc;
 use crate::config::{Config, UpstreamConfig, UpstreamKind};
-use crate::provider::{Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
+use crate::provider::{
+    Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
+};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::go::OpencodeGoProvider;
 use crate::providers::openai::OpenAiProvider;
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Upstream whose `models:` list is static: serves discovery; streams when a
 /// default surface is known (e.g. minimax -> chat) or `surface:` is set.
@@ -25,7 +27,10 @@ pub struct StaticProvider {
 }
 
 impl StaticProvider {
-    pub fn from_cfg(cfg: &UpstreamConfig, default_surface: Option<ModelSurface>) -> Option<Arc<dyn Provider>> {
+    pub fn from_cfg(
+        cfg: &UpstreamConfig,
+        default_surface: Option<ModelSurface>,
+    ) -> Option<Arc<dyn Provider>> {
         if cfg.models.is_empty() {
             return None;
         }
@@ -103,7 +108,7 @@ impl std::fmt::Debug for NoDiscoveryProvider {
     }
 }
 impl NoDiscoveryProvider {
-    pub fn new(inner: Arc<dyn Provider>) -> Arc<dyn Provider> {
+    pub fn wrap(inner: Arc<dyn Provider>) -> Arc<dyn Provider> {
         NoDiscoveryProvider::with_models(inner, Vec::new())
     }
 
@@ -154,7 +159,10 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
             UpstreamKind::Openai => discoverable(u, |u| Arc::new(OpenAiProvider::new(u))),
             UpstreamKind::Anthropic => discoverable(u, |u| Arc::new(AnthropicProvider::new(u))),
             UpstreamKind::OpencodeGo => discoverable(u, |u| Arc::new(OpencodeGoProvider::new(u))),
-            UpstreamKind::Minimax | UpstreamKind::Zai | UpstreamKind::Openrouter | UpstreamKind::Nvidia => {
+            UpstreamKind::Minimax
+            | UpstreamKind::Zai
+            | UpstreamKind::Openrouter
+            | UpstreamKind::Nvidia => {
                 // OpenAI-compatible gateways with a fixed chat surface:
                 //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go)
                 //   Z.AI GLM Coding Plan — api.z.ai/api/coding/paas/v4
@@ -177,7 +185,7 @@ fn discoverable(
     } else if u.discover {
         make(u)
     } else {
-        NoDiscoveryProvider::new(make(u))
+        NoDiscoveryProvider::wrap(make(u))
     }
 }
 
@@ -210,7 +218,8 @@ pub(crate) fn default_http_client() -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .expect("reqwest client build")
-}#[cfg(test)]
+}
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::testutil::MockProvider;
@@ -222,7 +231,7 @@ mod tests {
             vec!["gpt-4o".into()],
             crate::provider::ModelSurface::ChatCompletions,
         ));
-        let wrapped = NoDiscoveryProvider::new(inner);
+        let wrapped = NoDiscoveryProvider::wrap(inner);
         assert_eq!(wrapped.id(), "openai");
         assert_eq!(
             wrapped.surface_of("gpt-4o"),
@@ -255,10 +264,7 @@ upstreams:
         assert!(skipped.list_models().await.unwrap().is_empty());
 
         // static models list -> catalog-only upstream
-        let pinned = providers
-            .iter()
-            .find(|p| p.id() == "pinned")
-            .unwrap();
+        let pinned = providers.iter().find(|p| p.id() == "pinned").unwrap();
         let ids: Vec<String> = pinned
             .list_models()
             .await

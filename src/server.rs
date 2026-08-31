@@ -1,17 +1,17 @@
 //! Server assembly: providers -> registry -> AppState -> routers, listener.
 //! Real MCP hosting lands in Task 12 (placeholder now).
 
-use std::sync::Arc;
-use axum::routing::get;
-use axum::Router;
-use thiserror::Error;
-use tokio::net::TcpListener;
+use crate::api::AppState;
 use crate::api::anthropic::anthropic_router_with_subs;
 use crate::api::openai::openai_router_with_subs;
-use crate::api::AppState;
 use crate::config::Config;
 use crate::discovery::ModelRegistry;
 use crate::providers::build_providers;
+use axum::Router;
+use axum::routing::get;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::net::TcpListener;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -25,7 +25,10 @@ pub enum ServerError {
 
 /// Build the app. Binds per `config.bind` unless `port_override` is set
 /// (CLI `--port`), which replaces the port portion of the bind string.
-pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Result<(TcpListener, Router), ServerError> {
+pub async fn build_with_port(
+    config: Config,
+    port_override: Option<u16>,
+) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
     let port = port_override.unwrap_or(port);
 
@@ -63,11 +66,7 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
             None => {}
         }
     }
-    let subscription_values: Vec<String> = subscriptions
-        .values()
-        .flatten()
-        .cloned()
-        .collect();
+    let subscription_values: Vec<String> = subscriptions.values().flatten().cloned().collect();
 
     let token = config.effective_token();
     if token.is_none() && subscription_values.is_empty() {
@@ -75,7 +74,9 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
     }
     let state = AppState {
         registry,
-        embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(&config.embeddings)),
+        embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(
+            &config.embeddings,
+        )),
         token: token.clone(),
         subscriptions,
     };
@@ -90,12 +91,21 @@ pub async fn build_with_port(config: Config, port_override: Option<u16>) -> Resu
         }
     });
 
-    let mcp_router = crate::mcp::mcp_router(&config.mcp.servers, token.clone(), &host, &config.mcp.allowed_hosts).map_err(ServerError::Mcp)?;
+    let mcp_router = crate::mcp::mcp_router(
+        &config.mcp.servers,
+        token.clone(),
+        &host,
+        &config.mcp.allowed_hosts,
+    )
+    .map_err(ServerError::Mcp)?;
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
-        .merge(anthropic_router_with_subs(token.clone(), &subscription_values))
+        .merge(anthropic_router_with_subs(
+            token.clone(),
+            &subscription_values,
+        ))
         .merge(mcp_router)
         .with_state(state);
 
@@ -117,10 +127,7 @@ pub async fn run_with_port(config: Config, port_override: Option<u16>) -> Result
     serve(listener, app).await
 }
 
-async fn serve(
-    listener: TcpListener,
-    app: Router,
-) -> Result<(), ServerError> {
+async fn serve(listener: TcpListener, app: Router) -> Result<(), ServerError> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();

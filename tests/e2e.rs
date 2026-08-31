@@ -2,12 +2,12 @@
 //! upstream. healthz, models catalog, chat streaming relay, auth rejection.
 
 mod mock_upstream {
+    use axum::Router;
     use axum::body::Body;
-    use axum::http::header;
     use axum::http::HeaderValue;
+    use axum::http::header;
     use axum::response::Response;
     use axum::routing::{get, post};
-    use axum::Router;
     use bytes::Bytes;
 
     pub const MODELS: &str = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model","created":1720000000,"owned_by":"openai"}]}"#;
@@ -33,7 +33,7 @@ mod mock_upstream {
 use aiproxy::config::Config;
 use aiproxy::server;
 use axum::http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 async fn spawn_daemon() -> (String, tokio::task::JoinHandle<()>) {
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -69,7 +69,9 @@ async fn post_json(
     token: Option<&str>,
     body: Value,
 ) -> (StatusCode, String) {
-    let mut b = reqwest::Client::new().post(format!("{url}{path}")).json(&body);
+    let mut b = reqwest::Client::new()
+        .post(format!("{url}{path}"))
+        .json(&body);
     if let Some(t) = token {
         b = b.bearer_auth(t);
     }

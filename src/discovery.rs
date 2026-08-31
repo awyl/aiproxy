@@ -1,11 +1,11 @@
 //! Model registry + discovery: parallel per-provider model fetch, prefixed
 //! catalog, prefix resolution for the API layer.
 
+use crate::provider::{Model, Provider};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
-use crate::provider::{Model, Provider};
 
 pub struct ModelRegistry {
     providers: Vec<Arc<dyn Provider>>,
@@ -15,7 +15,10 @@ pub struct ModelRegistry {
 impl std::fmt::Debug for ModelRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModelRegistry")
-            .field("provider_ids", &self.providers.iter().map(|p| p.id()).collect::<Vec<_>>())
+            .field(
+                "provider_ids",
+                &self.providers.iter().map(|p| p.id()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -37,7 +40,7 @@ impl ModelRegistry {
             let p = p.clone();
             set.spawn(async move {
                 let deadline = tokio::time::timeout(Duration::from_secs(10), p.list_models());
-                        let models = match deadline.await {
+                let models = match deadline.await {
                     Ok(Ok(models)) => models,
                     Ok(Err(e)) => {
                         tracing::warn!(provider = %p.id(), "model discovery failed: {e:?}");
@@ -108,14 +111,20 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::testutil::MockProvider;
     use crate::provider::Provider;
+    use crate::provider::testutil::MockProvider;
     use std::sync::Arc;
 
     fn providers() -> Vec<Arc<dyn Provider>> {
         vec![
-            Arc::new(MockProvider::new("openai", vec!["gpt-4o".into(), "gpt-4o-mini".into()])),
-            Arc::new(MockProvider::new("anthropic", vec!["claude-sonnet-4".into()])),
+            Arc::new(MockProvider::new(
+                "openai",
+                vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+            )),
+            Arc::new(MockProvider::new(
+                "anthropic",
+                vec!["claude-sonnet-4".into()],
+            )),
         ]
     }
 
@@ -160,6 +169,9 @@ mod tests {
         assert_eq!(reg.resolve("openai/"), Some(("openai".into(), "".into())));
         assert!(reg.provider("openai").is_some());
         assert!(reg.provider("unknown").is_none());
-        assert_eq!(reg.prefixes().collect::<Vec<_>>(), vec!["openai", "anthropic"]); // insertion order
+        assert_eq!(
+            reg.prefixes().collect::<Vec<_>>(),
+            vec!["openai", "anthropic"]
+        ); // insertion order
     }
 }

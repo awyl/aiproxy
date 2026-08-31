@@ -1,8 +1,10 @@
+use crate::config::UpstreamConfig;
+use crate::provider::{
+    Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
+};
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::{json, Value};
-use crate::config::UpstreamConfig;
-use crate::provider::{Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -82,7 +84,10 @@ impl Provider for OpenAiProvider {
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         let resp = self
-            .authed(self.client.post(format!("{}/chat/completions", self.base_url)))
+            .authed(
+                self.client
+                    .post(format!("{}/chat/completions", self.base_url)),
+            )
             .json(&req)
             .send()
             .await
@@ -129,8 +134,8 @@ impl Provider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::test_mock_upstream::{mock_openai_server, Capture, SharedCapture};
     use crate::provider::RequestContext;
+    use crate::providers::test_mock_upstream::{Capture, SharedCapture, mock_openai_server};
     use futures::StreamExt;
     use serde_json::json;
     use std::sync::Arc;
@@ -176,16 +181,27 @@ mod tests {
         let p = provider(&format!("{base}/v1"), Some("sk-test"));
         let req = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
         let mut stream = p
-            .chat_completions(req, &RequestContext { model: "gpt-4o".into() })
+            .chat_completions(
+                req,
+                &RequestContext {
+                    model: "gpt-4o".into(),
+                },
+            )
             .await
             .unwrap();
         let mut out = Vec::new();
         while let Some(ev) = stream.next().await {
             out.extend_from_slice(&ev.unwrap().0);
         }
-        assert_eq!(String::from_utf8_lossy(&out), "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\ndata: [DONE]\n\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\ndata: [DONE]\n\n"
+        );
         let headers = state.headers.lock().unwrap();
-        assert_eq!(headers.get("authorization").map(String::as_str), Some("Bearer sk-test"));
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer sk-test")
+        );
         let body = state.body.lock().unwrap().clone().unwrap();
         assert_eq!(body["model"], "gpt-4o");
     }
@@ -196,7 +212,12 @@ mod tests {
         let (_state, base) = spawn_mock().await;
         let p = provider(&base, None);
         let err = match p
-            .chat_completions(json!({"model": "gpt-4o"}), &RequestContext { model: "gpt-4o".into() })
+            .chat_completions(
+                json!({"model": "gpt-4o"}),
+                &RequestContext {
+                    model: "gpt-4o".into(),
+                },
+            )
             .await
         {
             Err(e) => e,
@@ -217,13 +238,23 @@ mod tests {
         let p = provider(&format!("{base}/v1"), None);
         assert_eq!(p.surface_of("gpt-4o"), ModelSurface::ChatCompletions);
         let err = p
-            .messages(json!({"model": "gpt-4o"}), &RequestContext { model: "gpt-4o".into() })
+            .messages(
+                json!({"model": "gpt-4o"}),
+                &RequestContext {
+                    model: "gpt-4o".into(),
+                },
+            )
             .await
             .err()
             .expect("expected unsupported-surface error");
         assert!(matches!(err, ProviderError::Transport(_)));
         let err2 = p
-            .responses(json!({"model": "gpt-4o"}), &RequestContext { model: "gpt-4o".into() })
+            .responses(
+                json!({"model": "gpt-4o"}),
+                &RequestContext {
+                    model: "gpt-4o".into(),
+                },
+            )
             .await
             .err()
             .expect("expected unsupported-surface error");

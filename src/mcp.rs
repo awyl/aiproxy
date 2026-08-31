@@ -4,26 +4,34 @@
 //! streamable-HTTP server). Reconnect on failure: a failed backend call
 //! drops the cached handle; the next request reconnects.
 
-use tokio::process::Command;
-use std::sync::Arc;
+use crate::api::AppState;
+use crate::auth::apply_auth;
+use crate::config::McpServerConfig;
 use axum::Router;
 use rmcp::model::*;
 use rmcp::service::RunningService;
 use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ErrorData, ServerHandler};
+use std::sync::Arc;
+use tokio::process::Command;
 use tokio::sync::Mutex;
-use crate::api::AppState;
-use crate::auth::apply_auth;
-use crate::config::McpServerConfig;
 
 type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
-pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>, bind_host: &str, allowed_hosts: &[String]) -> Result<Router<AppState>, String> {
-    let mut router = apply_auth(Router::<AppState>::new(), crate::auth::auth_state(token, &[]));
+pub fn mcp_router(
+    servers: &[McpServerConfig],
+    token: Option<String>,
+    bind_host: &str,
+    allowed_hosts: &[String],
+) -> Result<Router<AppState>, String> {
+    let mut router = apply_auth(
+        Router::<AppState>::new(),
+        crate::auth::auth_state(token, &[]),
+    );
     let mut allowed: Vec<String> = if allowed_hosts.is_empty() {
         vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
     } else {
@@ -101,7 +109,10 @@ impl ProxyHandler {
                 .await
                 .map_err(|e| ErrorData::internal_error(format!("remote backend: {e}"), None))
         } else {
-            Err(ErrorData::invalid_params("server has neither command nor url", None))
+            Err(ErrorData::invalid_params(
+                "server has neither command nor url",
+                None,
+            ))
         }
     }
 }

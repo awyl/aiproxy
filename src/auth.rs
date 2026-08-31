@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Body,
     extract::{Request, State},
-    http::{header, StatusCode},
-    middleware::{from_fn_with_state, Next},
+    http::{StatusCode, header},
+    middleware::{Next, from_fn_with_state},
     response::Response,
-    Router,
 };
 
 /// Constant-time string comparison (no early length-scoped short-circuit on
@@ -85,10 +85,10 @@ async fn auth_check(State(state): State<AuthState>, mut req: Request, next: Next
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     fn router_with(expected: Option<String>) -> Router {
@@ -158,9 +158,10 @@ mod tests {
     async fn middleware_exposes_bearer_token_to_handlers() {
         use axum::extract::Extension;
         let app = apply_auth(
-            Router::new().route("/tok", get(|Extension(t): Extension<Option<String>>| async move {
-                t.unwrap_or_default()
-            })),
+            Router::new().route(
+                "/tok",
+                get(|Extension(t): Extension<Option<String>>| async move { t.unwrap_or_default() }),
+            ),
             auth_state(Some("sekrit".into()), &[]),
         );
         let resp = app

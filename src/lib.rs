@@ -1,9 +1,9 @@
-pub mod config;
 pub mod api;
 pub mod auth;
+pub mod config;
 pub mod discovery;
 pub mod embeddings;
 pub mod mcp;
+pub mod provider;
 pub mod providers;
 pub mod server;
-pub mod provider;

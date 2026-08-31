@@ -1,13 +1,13 @@
 //! Anthropic API routes (/v1/models, /v1/messages) with surface gating.
 
+use crate::api::{AppState, Surface, anthropic_error, check_surface, relay_or_error};
+use crate::auth::apply_auth;
+use crate::provider::{ModelSurface, ProviderError, RequestContext};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{json, Value};
-use crate::api::{anthropic_error, check_surface, relay_or_error, AppState, Surface};
-use crate::auth::apply_auth;
-use crate::provider::{ModelSurface, ProviderError, RequestContext};
+use serde_json::{Value, json};
 
 pub fn anthropic_router(token: Option<String>) -> Router<AppState> {
     anthropic_router_with_subs(token, &[])
@@ -58,7 +58,12 @@ pub async fn messages(
         );
     }
     let provider = state.registry.provider(&pid).unwrap();
-    if let Err(resp) = check_surface(provider.as_ref(), &mid, ModelSurface::Messages, Surface::Anthropic) {
+    if let Err(resp) = check_surface(
+        provider.as_ref(),
+        &mid,
+        ModelSurface::Messages,
+        Surface::Anthropic,
+    ) {
         return resp;
     }
     let mut stripped = req.clone();
@@ -77,18 +82,30 @@ pub async fn messages(
 mod tests {
     use super::*;
     use crate::api::AppState;
-    use crate::provider::testutil::MockProvider;
     use crate::provider::ModelSurface;
+    use crate::provider::testutil::MockProvider;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
         let providers: Vec<std::sync::Arc<dyn crate::provider::Provider>> = vec![
-            std::sync::Arc::new(MockProvider::with_surface("openai", vec!["gpt-4o".into()], ModelSurface::ChatCompletions)),
-            std::sync::Arc::new(MockProvider::with_surface("anthropic", vec!["claude-sonnet-4".into()], ModelSurface::Messages)),
-            std::sync::Arc::new(MockProvider::with_surface("opencode-go", vec!["grok-4.6".into()], ModelSurface::Responses)),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "openai",
+                vec!["gpt-4o".into()],
+                ModelSurface::ChatCompletions,
+            )),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "anthropic",
+                vec!["claude-sonnet-4".into()],
+                ModelSurface::Messages,
+            )),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "opencode-go",
+                vec!["grok-4.6".into()],
+                ModelSurface::Responses,
+            )),
         ];
         let reg = crate::discovery::ModelRegistry::new(providers);
         reg.refresh().await;
@@ -105,7 +122,9 @@ mod tests {
     async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 

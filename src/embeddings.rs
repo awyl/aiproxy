@@ -6,9 +6,9 @@
 //! traffic. Children are independent OS processes on 127.0.0.1:<port>; the
 //! proxy relays `POST /v1/embeddings` to the right port.
 
-use std::time::{Duration, Instant};
-use serde_json::Value;
 use crate::config::EmbeddingsConfig;
+use serde_json::Value;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 /// How long to wait for a child to serve /health == 200 (llama.cpp answers 503
@@ -73,10 +73,10 @@ pub struct EmbeddingManager {
 impl Drop for EmbeddingManager {
     fn drop(&mut self) {
         for slot in &mut self.slots {
-            if let Ok(mut st) = slot.state.try_lock() {
-                if let SlotState::Live { child, .. } = &mut *st {
-                    let _ = child.start_kill();
-                }
+            if let Ok(mut st) = slot.state.try_lock()
+                && let SlotState::Live { child, .. } = &mut *st
+            {
+                let _ = child.start_kill();
             }
         }
     }
@@ -201,12 +201,12 @@ impl EmbeddingManager {
     pub async fn reaper_round(&self) {
         for slot in &self.slots {
             let mut st = slot.state.lock().await;
-            if let SlotState::Live { child, last_used } = &mut *st {
-                if last_used.elapsed() >= self.idle_ttl {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await; // reap zombie
-                    *st = SlotState::Idle;
-                }
+            if let SlotState::Live { child, last_used } = &mut *st
+                && last_used.elapsed() >= self.idle_ttl
+            {
+                let _ = child.kill().await;
+                let _ = child.wait().await; // reap zombie
+                *st = SlotState::Idle;
             }
         }
     }
@@ -229,7 +229,8 @@ async fn wait_healthy(port: u16, id: &str) -> Result<(), EmbedError> {
         id.to_string(),
         "child did not serve /health == 200 within 30s".into(),
     ))
-}#[cfg(test)]
+}
+#[cfg(test)]
 pub(crate) mod testutil {
     use super::*;
     use crate::config::{EmbeddingModelConfig, EmbeddingsConfig};
@@ -337,7 +338,12 @@ mod tests {
     #[tokio::test]
     async fn spawns_on_demand_once_and_relays() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19010)), 3600, &["nomic"]);
+        let mgr = manager_with_fake(
+            dir.path(),
+            Arc::new(AtomicUsize::new(19010)),
+            3600,
+            &["nomic"],
+        );
         let req = serde_json::json!({ "model": "nomic", "input": "hello" });
         let out = mgr.embed("nomic", &req).await.expect("embed ok");
         assert_eq!(out["data"][0]["embedding"], serde_json::json!([0.1, 0.2]));
@@ -377,7 +383,11 @@ mod tests {
 
         // port freed -> next request respawns (count increments, new pid)
         let _ = mgr.embed("nomic", &req).await.expect("embed ok 2");
-        assert_eq!(spawn_count(dir.path(), "nomic"), 2, "child must be respawned after reap");
+        assert_eq!(
+            spawn_count(dir.path(), "nomic"),
+            2,
+            "child must be respawned after reap"
+        );
         assert_ne!(
             fs::read_to_string(dir.path().join("nomic.pid")).unwrap(),
             first_pid
@@ -389,7 +399,12 @@ mod tests {
     async fn traffic_within_ttl_keeps_child_alive() {
         // generous ttl; traffic at ~600ms keeps last_used well inside it
         let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19040)), 10, &["nomic"]);
+        let mgr = manager_with_fake(
+            dir.path(),
+            Arc::new(AtomicUsize::new(19040)),
+            10,
+            &["nomic"],
+        );
         let req = serde_json::json!({ "model": "nomic", "input": "hi" });
         let _ = mgr.embed("nomic", &req).await.expect("embed 1");
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -398,7 +413,11 @@ mod tests {
         mgr.reaper_round().await;
 
         let _ = mgr.embed("nomic", &req).await.expect("embed 3");
-        assert_eq!(spawn_count(dir.path(), "nomic"), 1, "recent traffic must keep the child");
+        assert_eq!(
+            spawn_count(dir.path(), "nomic"),
+            1,
+            "recent traffic must keep the child"
+        );
         mgr.shutdown_all().await;
     }
 

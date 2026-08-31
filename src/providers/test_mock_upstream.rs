@@ -3,12 +3,12 @@
 #![cfg(test)]
 
 use axum::body::Body;
-use bytes::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,8 +20,7 @@ pub struct Capture {
 
 pub type SharedCapture = Arc<Capture>;
 
-pub const MODELS_JSON: &str =
-    r#"{"object":"list","data":[{"id":"gpt-4o","object":"model","created":1720000000,"owned_by":"openai"}]}"#;
+pub const MODELS_JSON: &str = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model","created":1720000000,"owned_by":"openai"}]}"#;
 
 fn capture_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
@@ -32,7 +31,10 @@ fn capture_headers(headers: &HeaderMap) -> HashMap<String, String> {
 
 fn sse(body: &'static [u8]) -> Response {
     let mut resp = Response::new(Body::from(Bytes::from_static(body)));
-    resp.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/event-stream"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
     resp
 }
 

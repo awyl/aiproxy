@@ -3,14 +3,16 @@
 //! runtime from `surface_map_url` (default opencode docs), config overrides
 //! on top, builtin snapshot fallback.
 
+use crate::config::UpstreamConfig;
+use crate::provider::{
+    Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
+};
+use futures::StreamExt;
+use reqwest::Client;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use futures::StreamExt;
-use reqwest::Client;
-use serde_json::{json, Value};
-use crate::config::UpstreamConfig;
-use crate::provider::{Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -21,9 +23,8 @@ fn builtin_surface(model: &str) -> ModelSurface {
     use ModelSurface::*;
     match model {
         "grok-4.6" | "gpt-5.6-luna" | "muse-spark-1.2-contributor" => Responses,
-        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5"
-        | "qwen3.8-max" | "qwen3.8-flash" | "qwen3.7-max"
-        | "qwen3.7-plus" | "qwen3.6-plus" => Messages,
+        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max" | "qwen3.8-flash"
+        | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus" => Messages,
         _ => ChatCompletions,
     }
 }
@@ -300,10 +301,9 @@ impl Provider for OpencodeGoProvider {
             .map_err(|e| ProviderError::Transport(format!("opencode-go {}: {e}", ctx.model)))?;
         let status = resp.status();
         if !status.is_success() {
-            let body: Value = resp
-                .json()
-                .await
-                .unwrap_or_else(|_| json!({"type": "error", "error": {"message": "opencode-go upstream error"}}));
+            let body: Value = resp.json().await.unwrap_or_else(
+                |_| json!({"type": "error", "error": {"message": "opencode-go upstream error"}}),
+            );
             return Err(ProviderError::Http {
                 status: status.as_u16(),
                 body,
@@ -331,15 +331,15 @@ impl Provider for OpencodeGoProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::test_mock_upstream::{Capture, SharedCapture};
     use crate::provider::RequestContext;
+    use crate::providers::test_mock_upstream::{Capture, SharedCapture};
+    use axum::Router;
     use axum::body::Body;
-use bytes::Bytes;
     use axum::extract::State;
-    use axum::http::{header, HeaderMap};
+    use axum::http::{HeaderMap, header};
     use axum::response::Response;
     use axum::routing::{get, post};
-    use axum::Router;
+    use bytes::Bytes;
     use futures::StreamExt;
     use serde_json::json;
     use std::collections::HashMap;
@@ -356,7 +356,10 @@ use bytes::Bytes;
 <tr><td>Broken row</td><td>bogus-model</td><td>https://example.com/weird</td><td>@ai-sdk/none</td></tr>
 </tbody></table>";
 
-    async fn spawn_go_mock(state: SharedCapture, docs_html: Option<&str>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn spawn_go_mock(
+        state: SharedCapture,
+        docs_html: Option<&str>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         let docs_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut app = Router::new()
             .route("/v1/models", get(|| async { GO_MODELS }))
@@ -398,11 +401,18 @@ use bytes::Bytes;
         map.insert("__path".to_string(), path);
         *state.headers.lock().unwrap() = map;
         let mut resp = Response::new(Body::from(Bytes::from_static(b"data: {\"ok\":true}\n\n")));
-        resp.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/event-stream"));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/event-stream"),
+        );
         resp
     }
 
-    fn provider(base: &str, docs_url: Option<&str>, overrides: &[(&str, &str)]) -> OpencodeGoProvider {
+    fn provider(
+        base: &str,
+        docs_url: Option<&str>,
+        overrides: &[(&str, &str)],
+    ) -> OpencodeGoProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
             token_env: None,
@@ -412,7 +422,10 @@ use bytes::Bytes;
             base_url: Some(base.into()),
             api_key_env: None,
             models: vec![],
-            endpoint_by_model: overrides.iter().map(|(m, s)| (m.to_string(), s.to_string())).collect(),
+            endpoint_by_model: overrides
+                .iter()
+                .map(|(m, s)| (m.to_string(), s.to_string()))
+                .collect(),
             surface_map_url: docs_url.map(String::from),
         };
         OpencodeGoProvider::new_with_key(&cfg, Some("go-sk-test".into()))
@@ -422,9 +435,15 @@ use bytes::Bytes;
     fn parse_surface_table_extracts_rows() {
         let map = parse_surface_table(DOCS_TABLE);
         assert_eq!(map.get("grok-4.6"), Some(&ModelSurface::Responses));
-        assert_eq!(map.get("glm-5.3-flash"), Some(&ModelSurface::ChatCompletions));
+        assert_eq!(
+            map.get("glm-5.3-flash"),
+            Some(&ModelSurface::ChatCompletions)
+        );
         assert_eq!(map.get("minimax-m3"), Some(&ModelSurface::Messages));
-        assert!(!map.contains_key("bogus-model"), "unknown endpoint rows skipped");
+        assert!(
+            !map.contains_key("bogus-model"),
+            "unknown endpoint rows skipped"
+        );
         assert!(parse_surface_table("<html>no table</html>").is_empty());
         assert!(parse_surface_table("").is_empty());
     }
@@ -479,7 +498,9 @@ use bytes::Bytes;
             base_url: Some("http://x/v1".into()),
             api_key_env: None,
             models: vec![],
-            endpoint_by_model: vec![("grok-4.6".into(), "chat".into())].into_iter().collect(),
+            endpoint_by_model: vec![("grok-4.6".into(), "chat".into())]
+                .into_iter()
+                .collect(),
             surface_map_url: None,
         };
         let p = OpencodeGoProvider::new_with_key(&cfg, None);
@@ -506,18 +527,34 @@ use bytes::Bytes;
         let p = provider(&base, None, &[]);
 
         let mut s1 = p
-            .chat_completions(json!({"model": "kimi-k3"}), &RequestContext { model: "kimi-k3".into() })
+            .chat_completions(
+                json!({"model": "kimi-k3"}),
+                &RequestContext {
+                    model: "kimi-k3".into(),
+                },
+            )
             .await
             .unwrap();
         while s1.next().await.is_some() {}
         {
             let h = state.headers.lock().unwrap();
-            assert_eq!(h.get("__path").map(String::as_str), Some("/v1/chat/completions"));
-            assert_eq!(h.get("authorization").map(String::as_str), Some("Bearer go-sk-test"));
+            assert_eq!(
+                h.get("__path").map(String::as_str),
+                Some("/v1/chat/completions")
+            );
+            assert_eq!(
+                h.get("authorization").map(String::as_str),
+                Some("Bearer go-sk-test")
+            );
         }
 
         let mut s2 = p
-            .messages(json!({"model": "minimax-m3"}), &RequestContext { model: "minimax-m3".into() })
+            .messages(
+                json!({"model": "minimax-m3"}),
+                &RequestContext {
+                    model: "minimax-m3".into(),
+                },
+            )
             .await
             .unwrap();
         while s2.next().await.is_some() {}
@@ -525,11 +562,19 @@ use bytes::Bytes;
             let h = state.headers.lock().unwrap();
             assert_eq!(h.get("__path").map(String::as_str), Some("/v1/messages"));
             assert_eq!(h.get("x-api-key").map(String::as_str), Some("go-sk-test"));
-            assert_eq!(h.get("anthropic-version").map(String::as_str), Some("2023-06-01"));
+            assert_eq!(
+                h.get("anthropic-version").map(String::as_str),
+                Some("2023-06-01")
+            );
         }
 
         let mut s3 = p
-            .responses(json!({"model": "grok-4.6"}), &RequestContext { model: "grok-4.6".into() })
+            .responses(
+                json!({"model": "grok-4.6"}),
+                &RequestContext {
+                    model: "grok-4.6".into(),
+                },
+            )
             .await
             .unwrap();
         while s3.next().await.is_some() {}
@@ -545,7 +590,12 @@ use bytes::Bytes;
         let (base, _) = spawn_go_mock(state, None).await;
         let p = provider(&base, None, &[]);
         let err = p
-            .chat_completions(json!({"model": "grok-4.6"}), &RequestContext { model: "grok-4.6".into() })
+            .chat_completions(
+                json!({"model": "grok-4.6"}),
+                &RequestContext {
+                    model: "grok-4.6".into(),
+                },
+            )
             .await
             .err()
             .expect("expected ding");
@@ -553,9 +603,17 @@ use bytes::Bytes;
             ProviderError::Transport(m) => m.clone(),
             other => panic!("expected Transport, got {other:?}"),
         };
-        assert!(msg.to_lowercase().contains("responses"), "message should hint the correct surface: {msg}");
+        assert!(
+            msg.to_lowercase().contains("responses"),
+            "message should hint the correct surface: {msg}"
+        );
         let err2 = p
-            .messages(json!({"model": "kimi-k3"}), &RequestContext { model: "kimi-k3".into() })
+            .messages(
+                json!({"model": "kimi-k3"}),
+                &RequestContext {
+                    model: "kimi-k3".into(),
+                },
+            )
             .await
             .err()
             .expect("expected ding on messages");

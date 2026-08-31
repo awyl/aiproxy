@@ -2,8 +2,8 @@
 //! Spawned by aiproxy's stdio backend in tests/mcp_test.rs.
 
 use rmcp::model::*;
-use rmcp::{serve_server, ErrorData, ServerHandler};
-use serde_json::{json, Value};
+use rmcp::{ErrorData, ServerHandler, serve_server};
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
 struct EchoServer;
@@ -40,7 +40,9 @@ impl ServerHandler for EchoServer {
             .and_then(|a| a.get("input"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let result = CallToolResult::success(vec![ContentBlock::text(json!({"echoed": input}).to_string())]);
+        let result = CallToolResult::success(vec![ContentBlock::text(
+            json!({"echoed": input}).to_string(),
+        )]);
         Ok(CallToolResponse::Complete(result))
     }
 }

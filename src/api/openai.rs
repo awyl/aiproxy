@@ -2,18 +2,18 @@
 //! surface gating. Handlers resolve the prefixed model, strip the prefix,
 //! verify the wire surface, then relay the provider's SSE stream.
 
+use crate::api::{AppState, Surface, check_surface, openai_error, relay_or_error};
+use crate::auth::apply_auth;
+use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::Future;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::api::{check_surface, openai_error, relay_or_error, AppState, Surface};
-use crate::auth::apply_auth;
-use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
 
 pub fn openai_router(token: Option<String>) -> Router<AppState> {
     openai_router_with_subs(token, &[])
@@ -58,7 +58,11 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
             "surface": "embedding",
         }));
     }
-    (StatusCode::OK, Json(json!({"object": "list", "data": data}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"object": "list", "data": data})),
+    )
+        .into_response()
 }
 
 /// Resolve prefixed model -> provider + stripped id, verify the wire surface,
@@ -74,7 +78,8 @@ async fn route_one(
         Arc<dyn Provider>,
         Value,
         String,
-    ) -> Pin<Box<dyn Future<Output = Result<ProviderStream, ProviderError>> + Send>>,
+    )
+        -> Pin<Box<dyn Future<Output = Result<ProviderStream, ProviderError>> + Send>>,
 ) -> Result<ProviderStream, axum::response::Response> {
     let Some(model) = req.get("model").and_then(Value::as_str) else {
         return Err(openai_error(
@@ -107,20 +112,16 @@ async fn route_one(
         ));
     }
     let provider = state.registry.provider(&pid).unwrap();
-    if let Err(resp) = check_surface(provider.as_ref(), &mid, required, surface) {
-        return Err(resp);
-    }
+    check_surface(provider.as_ref(), &mid, required, surface)?;
     let mut stripped = req.clone();
     stripped["model"] = json!(mid);
-    call(provider, stripped, mid)
-        .await
-        .map_err(|e| match e {
-            ProviderError::Transport(msg) if msg.contains("surface") => {
-                openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
-            }
-            // upstream Http/transport failures translate to the surface's error shape
-            other => relay_error(other, surface),
-        })
+    call(provider, stripped, mid).await.map_err(|e| match e {
+        ProviderError::Transport(msg) if msg.contains("surface") => {
+            openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
+        }
+        // upstream Http/transport failures translate to the surface's error shape
+        other => relay_error(other, surface),
+    })
 }
 
 /// Non-streaming variant of `relay_or_error` for the error path of `route_one`.
@@ -132,7 +133,9 @@ fn relay_error(e: ProviderError, surface: Surface) -> axum::response::Response {
         }
         ProviderError::Transport(msg) => match surface {
             Surface::Openai => openai_error(StatusCode::BAD_GATEWAY, msg, "upstream_error"),
-            Surface::Anthropic => crate::api::anthropic_error(StatusCode::BAD_GATEWAY, msg, "api_error"),
+            Surface::Anthropic => {
+                crate::api::anthropic_error(StatusCode::BAD_GATEWAY, msg, "api_error")
+            }
         },
     }
 }
@@ -227,11 +230,9 @@ async fn embeddings(
                     .unwrap_or_else(|_| json!({ "error": { "message": body } }));
                 (status, axum::Json(body)).into_response()
             }
-            crate::embeddings::EmbedError::Transport(msg) => openai_error(
-                StatusCode::BAD_GATEWAY,
-                msg,
-                "upstream_error",
-            ),
+            crate::embeddings::EmbedError::Transport(msg) => {
+                openai_error(StatusCode::BAD_GATEWAY, msg, "upstream_error")
+            }
         },
     }
 }
@@ -239,18 +240,30 @@ async fn embeddings(
 mod tests {
     use super::*;
     use crate::api::AppState;
-    use crate::provider::testutil::MockProvider;
     use crate::provider::ModelSurface;
+    use crate::provider::testutil::MockProvider;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
         let providers: Vec<std::sync::Arc<dyn crate::provider::Provider>> = vec![
-            std::sync::Arc::new(MockProvider::with_surface("openai", vec!["gpt-4o".into()], ModelSurface::ChatCompletions)),
-            std::sync::Arc::new(MockProvider::with_surface("anthropic", vec!["claude-sonnet-4".into()], ModelSurface::Messages)),
-            std::sync::Arc::new(MockProvider::with_surface("opencode-go", vec!["grok-4.6".into()], ModelSurface::Responses)),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "openai",
+                vec!["gpt-4o".into()],
+                ModelSurface::ChatCompletions,
+            )),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "anthropic",
+                vec!["claude-sonnet-4".into()],
+                ModelSurface::Messages,
+            )),
+            std::sync::Arc::new(MockProvider::with_surface(
+                "opencode-go",
+                vec!["grok-4.6".into()],
+                ModelSurface::Responses,
+            )),
         ];
         let reg = crate::discovery::ModelRegistry::new(providers);
         reg.refresh().await;
@@ -272,7 +285,9 @@ mod tests {
     async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
@@ -298,10 +313,7 @@ mod tests {
 
     async fn state_with_subscriptions(subs: Vec<(&str, Option<String>)>) -> AppState {
         let mut state = test_state().await;
-        state.subscriptions = subs
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+        state.subscriptions = subs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         state
     }
 
@@ -356,7 +368,8 @@ mod tests {
     #[tokio::test]
     async fn chat_completions_streams_relayed_bytes() {
         let app = openai_router(Some("tok".into())).with_state(test_state().await);
-        let req: Value = json!({"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
+        let req: Value =
+            json!({"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
         let (status, body) = send(app, post("/v1/chat/completions", &req.to_string())).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("data: {\"ok\":true}\n\n"));
@@ -365,15 +378,21 @@ mod tests {
     #[tokio::test]
     async fn subscription_gate_accepts_owner_and_rejects_others() {
         let state = state_with_subscriptions(vec![("openai", Some("alice-tok".into()))]).await;
-        let app = openai_router_with_subs(Some("tok".into()), &["alice-tok".into()]).with_state(state);
+        let app =
+            openai_router_with_subs(Some("tok".into()), &["alice-tok".into()]).with_state(state);
         let req = json!({"model": "openai/gpt-4o", "messages": [{"role":"user","content":"hi"}]});
 
         // owner token -> relayed to mock upstream (200)
-        let (status, body) = send(app.clone(), post_with_token("/v1/chat/completions", &req.to_string(), "alice-tok")).await;
+        let (status, body) = send(
+            app.clone(),
+            post_with_token("/v1/chat/completions", &req.to_string(), "alice-tok"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "owner token must pass: {body}");
 
         // global token but NOT the subscription token -> 401
-        let (status, body) = send(app.clone(), post("/v1/chat/completions", &req.to_string())).await;
+        let (status, body) =
+            send(app.clone(), post("/v1/chat/completions", &req.to_string())).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(body.contains("subscription"), "{body}");
 
@@ -401,7 +420,11 @@ mod tests {
             post_with_token("/v1/chat/completions", &req.to_string(), "anything"),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "misconfig must deny: {body}");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "misconfig must deny: {body}"
+        );
     }
 
     #[tokio::test]
@@ -410,7 +433,11 @@ mod tests {
         let app = openai_router(Some("tok".into())).with_state(state);
         let req = json!({"model": "openai/gpt-4o", "messages": [{"role":"user","content":"hi"}]});
         let (status, body) = send(app, post("/v1/chat/completions", &req.to_string())).await;
-        assert_eq!(status, StatusCode::OK, "no gate = global token suffices: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "no gate = global token suffices: {body}"
+        );
     }
 
     #[tokio::test]
@@ -426,10 +453,22 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("\"surface\":\"responses\""), "go grok model surface");
-        assert!(body.contains("\"surface\":\"chat\""), "openai model surface");
-        assert!(body.contains("\"surface\":\"messages\""), "anthropic model surface");
-        assert!(body.contains("\"display_name\":null"), "display_name present");
+        assert!(
+            body.contains("\"surface\":\"responses\""),
+            "go grok model surface"
+        );
+        assert!(
+            body.contains("\"surface\":\"chat\""),
+            "openai model surface"
+        );
+        assert!(
+            body.contains("\"surface\":\"messages\""),
+            "anthropic model surface"
+        );
+        assert!(
+            body.contains("\"display_name\":null"),
+            "display_name present"
+        );
     }
 
     #[tokio::test]

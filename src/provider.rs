@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// The three agent-facing wire formats a model can be served on, plus Unknown
 /// for static catalog entries that only appear in `/v1/models`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelSurface {
     ChatCompletions,
@@ -21,13 +21,8 @@ pub enum ModelSurface {
     /// Local embeddings (fake `embeddings-local` provider) — display-only
     /// surface; chat routers never stream these.
     Embedding,
+    #[default]
     Unknown,
-}
-
-impl Default for ModelSurface {
-    fn default() -> Self {
-        ModelSurface::Unknown
-    }
 }
 
 impl ModelSurface {

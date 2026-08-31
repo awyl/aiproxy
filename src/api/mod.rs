@@ -25,7 +25,11 @@ mod tests {
 
     #[tokio::test]
     async fn openai_error_shape() {
-        let resp = openai_error(StatusCode::BAD_REQUEST, "bad model", "invalid_request_error");
+        let resp = openai_error(
+            StatusCode::BAD_REQUEST,
+            "bad model",
+            "invalid_request_error",
+        );
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
         assert_eq!(body["error"]["message"], "bad model");
@@ -34,7 +38,11 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_error_shape() {
-        let resp = anthropic_error(StatusCode::TOO_MANY_REQUESTS, "slow down", "rate_limit_error");
+        let resp = anthropic_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow down",
+            "rate_limit_error",
+        );
         let body: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
         assert_eq!(body["type"], "error");
         assert_eq!(body["error"]["type"], "rate_limit_error");
@@ -46,7 +54,9 @@ mod tests {
         // upstream emits mid-line chunk splits; client must receive exact bytes
         let stream = stream::iter(vec![
             Ok::<_, ProviderError>(Event(Bytes::from_static(b"data: {\"a\":"))),
-            Ok(Event(Bytes::from_static(b"1,\"b\":[2,3]}\n\ndata: {\"c\":4}\n\n"))),
+            Ok(Event(Bytes::from_static(
+                b"1,\"b\":[2,3]}\n\ndata: {\"c\":4}\n\n",
+            ))),
         ]);
         let resp = sse_relay(Box::new(stream));
         assert_eq!(resp.headers()["content-type"], "text/event-stream");
@@ -78,24 +88,24 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
         assert_eq!(body["error"]["message"], "rate limited by upstream");
     }
-
 }
 
+use crate::discovery::ModelRegistry;
+use crate::embeddings::EmbeddingManager;
+use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
 use axum::body::Body;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
-use crate::discovery::ModelRegistry;
-use crate::embeddings::EmbeddingManager;
-use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
 
 pub mod anthropic;
 pub mod openai;
 
 /// Gate a route on the model's wire surface. Returns a 400 naming the
 /// model's actual surface on mismatch (Unknown -> cannot stream).
+#[allow(clippy::result_large_err)]
 pub fn check_surface(
     provider: &dyn Provider,
     model: &str,
@@ -118,28 +128,26 @@ pub fn check_surface(
     };
     Err(match surface {
         Surface::Openai => openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
-        Surface::Anthropic => anthropic_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error"),
+        Surface::Anthropic => {
+            anthropic_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
+        }
     })
 }
 
 /// Gate a route on a per-upstream subscription token. Returns `Ok` when the
 /// upstream has no subscription gate, `Err` when the request token does not
 /// match the upstream's subscription token (or the gate is misconfigured).
-pub fn check_subscription(
-    state: &AppState,
-    prefix: &str,
-    token: Option<&str>,
-) -> Result<(), ()> {
+pub fn check_subscription(state: &AppState, prefix: &str, token: Option<&str>) -> Result<(), &'static str> {
     let Some(gate) = state.subscriptions.get(prefix) else {
         return Ok(()); // no gate for this upstream
     };
     match gate {
-        None => Err(()), // token_env set but env missing -> deny all
+        None => Err("token_env set but env missing"), // deny all
         Some(sub) => {
             if token.is_some_and(|t| crate::auth::constant_time_eq(t, sub)) {
                 Ok(())
             } else {
-                Err(())
+                Err("token mismatch")
             }
         }
     }
@@ -175,8 +183,10 @@ pub fn sse_relay(stream: ProviderStream) -> Response {
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),
     );
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
     resp
 }
 
