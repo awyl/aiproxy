@@ -13,19 +13,39 @@ model_refresh_secs: 0              # discovery interval; 0 = fetch once at start
 # authenticates the request AND locks it to that subscription's models; requests
 # for a prefix you don't own are rejected (401). Owner token example:
 #
-# upstreams:
-#   - name: go-alice
-#     kind: opencode-go
-#     api_key_env: GO_ALICE_KEY
-#     token_env: GO_ALICE_TOKEN      # env holding alice's proxy token
-#     discover: true
-#   - name: go-bob
-#     kind: opencode-go
-#     api_key_env: GO_BOB_KEY
-#     token_env: GO_BOB_TOKEN
-#     discover: true
-#
-# Model ids become go-alice/mimo-v2.5 and go-bob/mimo-v2.5.
+upstreams:
+  # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
+  # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's
+  # why this is safe to enable), surfaces parsed from surface_map_url on the
+  # same refresh cadence as the ids (startup + model_refresh_secs; no TTL),
+  # builtin snapshot fallback.
+  - name: opencode-go
+    kind: opencode-go
+    api_key_env: OPENCODE_GO_API_KEY
+    discover: true
+    # endpoint_by_model:            # overrides for new models (chat | messages | responses)
+    #   qwen3.9-x: messages
+    # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
+
+  # Every upstream is catalog-only unless you opt in:
+  #   - `models: [...]`   -> static list, never probed (recommended)
+  #   - `discover: true`  -> probe GET <base_url>/models at startup/refresh.
+  #                          Requires the upstream to be reachable AND keyed;
+  #                          otherwise expect per-refresh warnings (401 etc).
+  # Omitting both declarations a provider with an EMPTY catalog: requests
+  # still route to it, but agents won't see models in /v1/models.
+  #   - name: go-alice
+  #     kind: opencode-go
+  #     api_key_env: GO_ALICE_KEY
+  #     token_env: GO_ALICE_TOKEN      # env holding alice's proxy token
+  #     discover: true
+  #   - name: go-bob
+  #     kind: opencode-go
+  #     api_key_env: GO_BOB_KEY
+  #     token_env: GO_BOB_TOKEN
+  #     discover: true
+  #
+  # Model ids become go-alice/mimo-v2.5 and go-bob/mimo-v2.5.
 
   # MiniMax (international) — OpenAI-compatible wire (api.minimax.io/v1).
   # Token Plan (Subscription Key, sk-cp-...) and pay-as-you-go API keys both
@@ -60,27 +80,6 @@ model_refresh_secs: 0              # discovery interval; 0 = fetch once at start
     models: [glm-5.3, glm-5.3-flash]                            # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
 
-upstreams:
-  # OpenCode Go — flagship upstream. Discovery is opt-in like any other:
-  # ids from https://opencode.ai/zen/go/v1/models (public, keyless — that's
-  # why this is safe to enable), surfaces parsed from surface_map_url on the
-  # same refresh cadence as the ids (startup + model_refresh_secs; no TTL),
-  # builtin snapshot fallback.
-  - name: opencode-go
-    kind: opencode-go
-    api_key_env: OPENCODE_GO_API_KEY
-    discover: true
-    # endpoint_by_model:            # overrides for new models (chat | messages | responses)
-    #   qwen3.9-x: messages
-    # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
-
-  # Every upstream is catalog-only unless you opt in:
-  #   - `models: [...]`   -> static list, never probed (recommended)
-  #   - `discover: true`  -> probe GET <base_url>/models at startup/refresh.
-  #                          Requires the upstream to be reachable AND keyed;
-  #                          otherwise expect per-refresh warnings (401 etc).
-  # Omitting both declarations a provider with an EMPTY catalog: requests
-  # still route to it, but agents won't see models in /v1/models.
 
   # OpenAI-compatible gateway with a pinned model list (no probing):
   - name: openai
