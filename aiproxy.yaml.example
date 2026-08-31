@@ -110,6 +110,8 @@ mcp:
     - name: github
       url: https://api.githubcopilot.com/mcp/
       api_key_env: GITHUB_TOKEN
+      env:
+        USER_AGENT: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
   # DNS rebinding allowlist for the streamable-HTTP server.
   # Clients connecting via a hostname not in this list get rejected.

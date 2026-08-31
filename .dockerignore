@@ -1,0 +1,13 @@
+target/
+.llm-wiki/
+.direnv/
+.env
+.envrc
+flake.nix
+flake.lock
+docs/
+agent/
+extensions/
+*.md
+!README.md
+Cargo.lock
