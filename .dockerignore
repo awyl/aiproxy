@@ -3,10 +3,15 @@ target/
 .direnv/
 .env
 .envrc
+.env.*
 flake.nix
 flake.lock
 docs/
 agent/
 extensions/
+tests/
 *.md
 !README.md
+docker-push.sh
+aiproxy.yaml
+.pi/

@@ -1,201 +1,208 @@
+> **⚠️ Warning: Built with AI. Use at your own risk.**
+
 # aiproxy
 
-A single-host LLM proxy that centralizes upstream credentials and MCP servers.
-Agents connect to one URL with one shared token and get every configured LLM
-provider and MCP server — no per-agent API keys.
+Unified LLM proxy — set up once, every agent connects through it. No per-agent API key management.
 
-The flagship upstream is [OpenCode Go](https://opencode.ai/go): one $10/mo
-subscription, model ids + wire surfaces auto-discovered (chat-completions,
-messages, or Responses per model, resolved at runtime).
+Single endpoint serves OpenAI `/v1/*`, Anthropic `/v1/messages`, and OpenAI Responses `/v1/responses` wire formats. Models are auto-discovered or statically listed. MCP servers hosted at `/mcp/<name>`. Local CPU embeddings via llama.cpp.
 
-## What it exposes
-
-| Route | Purpose |
-|---|---|
-| `GET /v1/models` | merged, prefixed model catalog |
-| `POST /v1/chat/completions` | OpenAI chat-completions surface (SSE) |
-| `POST /v1/responses` | OpenAI Responses surface (SSE) |
-| `POST /v1/messages` | Anthropic messages surface (SSE) |
-| `/mcp/<name>` | streamable-HTTP MCP endpoint per configured server |
-| `GET /healthz` | liveness |
-
-Model ids are always `{upstream name}/{model id}` — e.g. `opencode-go/kimi-k3`,
-`opencode-go/grok-4.6`, `openai/gpt-4o`. The proxy strips the prefix, picks the
-upstream, checks the model's wire surface, and relays upstream SSE bytes
-verbatim.
-
-## Discovery
-
-Discovery is opt-in for every upstream, OpenCode Go included. Its catalog
-fetch is keyless/public, so enabling it there is low-risk — that's the
-standard setup.
-
-| Config | Behavior |
-|---|---|
-| `models: [a, b]` | static catalog, never probed (recommended) |
-| `discover: true` | probes `GET <base_url>/models` at startup + each refresh |
-| neither | empty catalog — requests still route, agents see no models |
-
-`discover: true` needs a reachable, keyed upstream — otherwise expect
-per-refresh warnings in the log (e.g. `401` against `api.openai.com` or
-`Transport` against an idle `localhost:11434` Ollama). With the default
-`model_refresh_secs: 0` the fetch happens once at startup; set it to a
-positive value (e.g. `1800`) for periodic re-discovery.
-
-One cadence for everything: surfaces ride the same discovery pass. A go
-`surface_map_url` table re-fetch happens on every `registry.refresh()`
-(startup + each `model_refresh_secs` tick) — no independent TTL, no special
-treatment. Failures keep the last-known map and log a warning.
-
-## Local embeddings (fake provider)
-
-`POST /v1/embeddings` relays to on-demand local llama-server children behind the
-fake provider `embeddings-local` — no API key, no cloud:
-
-```yaml
-embeddings:
-  llama_bin: llama-server   # llama.cpp binary (install: https://github.com/ggml-org/llama.cpp)
-  idle_ttl_secs: 3600       # kill a child after 1h with no traffic (spawn on first request)
-  models:
-    - { id: nomic-embed-text-v1.5, model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf }
-    - { id: all-MiniLM-L6-v2,       model_file: /models/all-MiniLM-L6-v2.Q8_0.gguf }
-    - { id: bge-small-en-v1.5,      model_file: /models/bge-small-en-v1.5.Q8_0.gguf }
-```
-
-Each model runs as its own child process on 127.0.0.1 (default ports 18081+,
-override per model with `port:`). Only the requested model loads into RAM, so
-the configured ones fit well under 1GB each (nomic Q8 ≈ 150MB weights,
-MiniLM ≈ 30MB, bge-small ≈ 40MB — single-resident tops out ~450MB). GGUF
-files: download from Hugging Face (e.g. `nomic-ai/nomic-embed-text-v1.5-GGUF`).
-
-Call it OpenAI-style:
+## Quick start
 
 ```bash
-curl http://localhost:8080/v1/embeddings -H "Authorization: Bearer $AIPROXY_TOKEN" \
-  -d '{"model": "embeddings-local/nomic-embed-text-v1.5", "input": "some text"}'
-```
-
-Catalog: `/v1/models` lists `embeddings-local/*` (surface `embedding`) — chat
-routers reject these ids with a surface hint.
-
-## Quickstart
-
-```bash
+# 1. Clone and build
+git clone https://github.com/awyl/aiproxy.git && cd aiproxy
 cargo build --release
+
+# 2. Configure
 cp aiproxy.yaml.example aiproxy.yaml
-cp .env.example .env
-# edit .env: set AIPROXY_TOKEN + OPENCODE_GO_API_KEY
-export $(grep -v '^#' .env | xargs)   # or use a dotenv loader
+# Edit aiproxy.yaml — add your upstreams and keys
+
+# 3. Set API keys
+export AIPROXY_TOKEN=your-proxy-secret
+export OPENCODE_GO_API_KEY=your-go-key
+export MINIMAX_API_KEY=your-minimax-key
+
+# 4. Run
 ./target/release/aiproxy --config aiproxy.yaml
 ```
 
-`aiproxy --help` for flags (`--config`, `--port`).
+## Supported upstream kinds
 
-## OpenCode setup
+| Kind | Wire format | Default base URL | Discovery | Notes |
+|------|-------------|-----------------|-----------|-------|
+| `opencode-go` | OpenAI + Anthropic + Responses | `opencode.ai/zen/go/v1` | Public, keyless | Routes per-model across 3 surfaces |
+| `openai` | OpenAI chat completions | `api.openai.com/v1` | Keyed | Generic OpenAI-compatible gateway |
+| `anthropic` | Anthropic messages | `api.anthropic.com/v1` | Keyed | Generic Anthropic-compatible gateway |
+| `minimax` | OpenAI chat completions | `api.minimax.io/v1` | Keyed | Token Plan or pay-as-you-go |
+| `zai` | OpenAI chat completions | `api.z.ai/api/coding/paas/v4` | Keyed | GLM Coding Plan |
+| `openrouter` | OpenAI chat completions | `openrouter.ai/api/v1` | Public, keyless | 396+ models aggregated |
+| `nvidia` | OpenAI chat completions | `integrate.api.nvidia.com/v1` | Public, keyless | NIM cloud; self-hosted via `base_url` |
 
-Point opencode at the proxy with custom providers. Because Go serves different
-models over three wire formats, use one provider entry per AI SDK package — the
-proxy exposes all three surfaces on the same host:
+Agent-facing model ids are always `<upstream-name>/<model-id>`, e.g. `opencode-go/mimo-v2.5`.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "aiproxy-chat": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "aiproxy (chat)",
-      "options": { "baseURL": "http://localhost:8080/v1", "apiKey": "<shared token>" },
-      "models": { "opencode-go/kimi-k3": {}, "opencode-go/glm-5.3-flash": {} }
-    },
-    "aiproxy-messages": {
-      "npm": "@ai-sdk/anthropic",
-      "name": "aiproxy (messages)",
-      "options": { "baseURL": "http://localhost:8080/v1", "apiKey": "<shared token>" },
-      "models": { "opencode-go/minimax-m3": {}, "opencode-go/qwen3.7-plus": {} }
-    },
-    "aiproxy-responses": {
-      "npm": "@ai-sdk/openai",
-      "name": "aiproxy (responses)",
-      "options": { "baseURL": "http://localhost:8080/v1", "apiKey": "<shared token>" },
-      "models": { "opencode-go/grok-4.6": {}, "opencode-go/gpt-5.6-luna": {} }
-    }
-  }
-}
+## Docker
+
+```bash
+# Build
+DOCKER_USER=yourhubuser ./docker-push.sh 0.1.0
+
+# Run
+docker run -d \
+  -v ./aiproxy.yaml:/etc/aiproxy/aiproxy.yaml \
+  -e AIPROXY_TOKEN=secret \
+  -e OPENCODE_GO_API_KEY=... \
+  -p 8080:8080 \
+  yourhubuser/aiproxy:0.1.0
 ```
 
-Model ids must match the catalog served by `GET /v1/models` — run `curl
-http://localhost:8080/v1/models` to see the current list, and check the
-[Go docs](https://opencode.ai/docs/go) endpoints table for which surface a model
-uses. Any OpenAI-compatible client (Ollama, LM Studio, arbitrary SDKs) can point
-at `http://<host>:8080/v1` the same way.
+The image includes Node.js (`npx`) and Python/uv (`uvx`) for MCP servers, plus `llama-server` for local embeddings.
 
-## MCP
+## Configuration
 
-Each `mcp.servers` entry is available to clients at
-`http://<host>:8080/mcp/<name>`, guarded by the shared token (`Authorization:
-Bearer ...`). stdio entries spawn a child process; `url` entries connect to a
-remote streamable-HTTP server.
+Config lives in a single YAML file. Keys are **never** stored in the config — they reference env vars by name.
 
-## Network
+```yaml
+bind: 127.0.0.1:8080                # or 0.0.0.0:8080 for all interfaces
+token_env: AIPROXY_TOKEN             # bearer auth; omit both token_env/token = no auth
+model_refresh_secs: 0                # 0 = fetch once at startup; >0 = periodic refresh
 
-Binds `0.0.0.0` (all interfaces). No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything beyond a trusted LAN.
+upstreams:
+  - name: opencode-go
+    kind: opencode-go
+    api_key_env: OPENCODE_GO_API_KEY
+    discover: true                   # public catalog, safe to enable
 
-## Multi-subscription routing
+  - name: minimax
+    kind: minimax
+    api_key_env: MINIMAX_API_KEY
+    models: [MiniMax-M3]             # static list, no probing
 
-Give each upstream its own `token_env`; that token both authenticates and pins
-the requester to that subscription:
+mcp:
+  servers:
+    - name: searxng
+      command: npx
+      args: ["-y", "mcp-searxng"]
+      env:
+        SEARXNG_URL: "http://localhost:8888"
+
+embeddings:
+  llama_bin: llama-server
+  idle_ttl_secs: 3600
+  models:
+    - id: nomic-embed-text-v1.5
+      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
+      port: 18081
+```
+
+### Discovery
+
+- `models: [...]` — static list, never probed (recommended for keyed upstreams)
+- `discover: true` — probe `GET <base_url>/models` at startup/refresh
+- Neither — empty catalog; requests still route, agents see nothing in `/v1/models`
+
+OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key.
+
+### Multi-subscription
+
+Each upstream can have its own bearer token via `token_env`. The token both authenticates and locks the request to that upstream's models.
 
 ```yaml
 upstreams:
   - name: go-alice
     kind: opencode-go
     api_key_env: GO_ALICE_KEY
-    token_env: GO_ALICE_TOKEN    # alice's bearer token
-    discover: true
+    token_env: GO_ALICE_TOKEN
   - name: go-bob
     kind: opencode-go
-    api_key_env: GO_BOB_KEY
+    api_key_env: GO_BOB_TOKEN
     token_env: GO_BOB_TOKEN
-    discover: true
 ```
 
-Global auth accepts the global token **or** any subscription token. Requests
-for a model prefix you don't own → `401`. Model ids are `go-alice/mimo-v2.5`,
-`go-bob/mimo-v2.5` — pick a subscription by prefix. Proxy-level keys stay
-per-upstream (`api_key_env`), so each subscription's quota is separate.
+Model ids become `go-alice/mimo-v2.5` and `go-bob/mimo-v2.5`. Alice can't use Bob's models.
 
-## Network & Security
+## MCP hosting
 
-- Binds the address in `bind` (default `127.0.0.1:8080`); use
-  `bind: 0.0.0.0:8080` for LAN/containers.
-- No TLS in v1 — put a reverse proxy (e.g. Caddy) in front for anything public.
-- Upstream keys live in env vars only (`api_key_env`); never in the YAML.
-- No token configured = auth disabled (the proxy warns at startup).
+aiproxy hosts MCP servers via the [pi-mcp-extension](https://www.npmjs.com/package/pi-mcp-extension) or any MCP client. Two transport types:
 
-## Architecture
+- **stdio**: proxy spawns a child process (`command` + `args` + `env`) and exposes it at `/mcp/<name>`
+- **streamable-http**: proxy connects to a remote MCP server (`url`) and relays
 
-Single crate, small modules, module boundaries as traits:
-
-```
-config.rs       YAML schema + validation + env-key resolution (bind, token_env)
-auth.rs         token middleware: global OR subscription tokens, constant-time
-provider.rs     Provider trait + Model/ModelSurface/Event — the core interface
-providers/
-  openai.rs     OpenAI-compatible gateway (kind "openai")
-  anthropic.rs  Anthropic gateway (kind "anthropic")
-  go.rs         OpenCode Go (kind "opencode-go", per-model surface routing)
-discovery.rs    model registry: parallel refresh, prefixed catalog
-api/
-  mod.rs        SSE relay + per-surface error translation
-  openai.rs     /v1/models, /v1/chat/completions, /v1/responses
-  anthropic.rs  /v1/messages
-mcp.rs          MCP host: stdio + remote backends, lazy reconnect
-server.rs       assembly: providers -> registry -> routers -> listener
+```yaml
+mcp:
+  servers:
+    - name: filesystem
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    - name: github
+      url: https://api.githubcopilot.com/mcp/
+      api_key_env: GITHUB_TOKEN
 ```
 
-## Development
+Clients connect at `http://<host>:8080/mcp/<name>` with the same bearer token as the proxy.
+
+## Local embeddings
+
+CPU-only embedding server via llama.cpp. Models are spawned on demand and killed after idle timeout — only one model resident at a time.
+
+```yaml
+embeddings:
+  llama_bin: llama-server
+  idle_ttl_secs: 3600
+  models:
+    - id: nomic-embed-text-v1.5
+      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
+      port: 18081
+```
 
 ```bash
-cargo test
-cargo run -- --help
+# Download a GGUF model
+huggingface-cli download nomic-ai/nomic-embed-text-v1.5-GGUF --local-dir /models
 ```
+
+Exposed as `embeddings-local/<model-id>` in the catalog (surface: `embedding`). Standard `POST /v1/embeddings` endpoint.
+
+## Connecting pi
+
+Install the pi aiproxy extension:
+
+```bash
+# Project-scoped (recommended)
+pi install ./agent/pi/extensions/aiproxy -l
+
+# Or global
+cp -r agent/pi/extensions/aiproxy ~/.pi/agent/extensions/aiproxy
+```
+
+Configure in `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "aiproxy": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "apiKey": "$AIPROXY_TOKEN"
+    }
+  }
+}
+```
+
+Models auto-register from `/v1/models`. Wire format (openai-completions / anthropic-messages / openai-responses) is set per-model based on the upstream's surface. Thinking defaults to `high` for all models; override per-model via `modelOverrides` in models.json.
+
+## CLI
+
+```
+aiproxy --config <path>        # run with config file
+aiproxy --port <port>          # override bind port
+aiproxy --help                 # show options
+```
+
+## Security notes
+
+- No TLS in v1 — put a reverse proxy (nginx, caddy) in front for anything public
+- API keys live in env vars only; the config references them by name
+- Bearer token auth; omit `token_env`/`token` for unauthenticated mode
+- MCP `allowed_hosts` defaults to `[localhost, 127.0.0.1, ::1]`; add hostnames for container-to-host connections
+
+## License
+
+MIT

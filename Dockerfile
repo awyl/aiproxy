@@ -1,5 +1,5 @@
-# ── Build stage: Rust binary ─────────────────────────────────────────────────
-FROM rust:1.87-alpine AS rust-builder
+# ── Build stage: Rust binary (static musl) ───────────────────────────────────
+FROM rust:1.96-alpine AS rust-builder
 
 RUN apk add --no-cache musl-dev
 
@@ -12,11 +12,12 @@ RUN rm -rf src
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-# ── Build stage: llama.cpp (CPU-only, for embeddings) ────────────────────────
-FROM alpine:3.21 AS llama-builder
+# ── Build stage: llama.cpp (Debian glibc, GGML_NATIVE for CPU optimizations) ─
+FROM debian:trixie-slim AS llama-builder
 
-RUN apk add --no-cache \
-        cmake g++ make git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git cmake g++ make \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
 
@@ -28,16 +29,17 @@ RUN cmake -B build \
     && cmake --build build --config Release -j$(nproc) \
     && cp build/bin/llama-server /usr/local/bin/llama-server
 
-# ── Runtime stage ────────────────────────────────────────────────────────────
-FROM alpine:3.21
+# ── Runtime stage (Debian, glibc for llama.cpp native perf) ──────────────────
+FROM debian:trixie-slim
 
-# Runtime deps: Node.js (npx), Python (uvx), curl (uv install)
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
         nodejs \
         npm \
         python3 \
-        py3-pip \
-        curl
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
 # uv (for uvx)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
