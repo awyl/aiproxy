@@ -10,4 +10,3 @@ agent/
 extensions/
 *.md
 !README.md
-Cargo.lock
