@@ -22,14 +22,20 @@ use crate::config::McpServerConfig;
 
 type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
-pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>) -> Result<Router<AppState>, String> {
+pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>, bind_host: &str) -> Result<Router<AppState>, String> {
     let mut router = apply_auth(Router::<AppState>::new(), crate::auth::auth_state(token, &[]));
+    let mut allowed = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    if !allowed.contains(&bind_host.to_string()) {
+        allowed.push(bind_host.into());
+    }
     for server in servers {
         let name = server.clone();
+        let mut server_config = StreamableHttpServerConfig::default();
+        server_config.allowed_hosts = allowed.clone();
         let service: StreamableHttpService<ProxyHandler, _> = StreamableHttpService::new(
             move || Ok(ProxyHandler::new(name.clone())),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default(),
+            server_config,
         );
         router = router.nest_service(format!("/mcp/{}", server.name).as_str(), service);
     }
