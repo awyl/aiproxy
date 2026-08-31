@@ -36,6 +36,10 @@ pub fn mcp_router(servers: &[McpServerConfig], token: Option<String>, bind_host:
         let name = server.clone();
         let mut server_config = StreamableHttpServerConfig::default();
         server_config.allowed_hosts = allowed.clone();
+        // Stateless mode: no session IDs, no DNS-rebinding-like session lookup.
+        // Clients re-initialize on every connection instead of tracking session IDs,
+        // which avoids "Session not found" when SSE streams reconnect.
+        server_config.legacy_session_mode = false;
         let service: StreamableHttpService<ProxyHandler, _> = StreamableHttpService::new(
             move || Ok(ProxyHandler::new(name.clone())),
             LocalSessionManager::default().into(),
