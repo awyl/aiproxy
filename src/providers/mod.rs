@@ -151,66 +151,65 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
     cfg.upstreams
         .iter()
         .map(|u| match u.kind {
-            UpstreamKind::Openai => {
-                if let Some(p) = StaticProvider::from_cfg(u, None) {
-                    p
-                } else if u.discover {
-                    Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>
-                } else {
-                    NoDiscoveryProvider::new(Arc::new(OpenAiProvider::new(u)))
-                }
-            }
-            UpstreamKind::Anthropic => {
-                if let Some(p) = StaticProvider::from_cfg(u, None) {
-                    p
-                } else if u.discover {
-                    Arc::new(AnthropicProvider::new(u)) as Arc<dyn Provider>
-                } else {
-                    NoDiscoveryProvider::new(Arc::new(AnthropicProvider::new(u)))
-                }
-            }
+            UpstreamKind::Openai => discoverable(u, |u| Arc::new(OpenAiProvider::new(u))),
+            UpstreamKind::Anthropic => discoverable(u, |u| Arc::new(AnthropicProvider::new(u))),
+            UpstreamKind::OpencodeGo => discoverable(u, |u| Arc::new(OpencodeGoProvider::new(u))),
             UpstreamKind::Minimax | UpstreamKind::Zai | UpstreamKind::Openrouter | UpstreamKind::Nvidia => {
                 // OpenAI-compatible gateways with a fixed chat surface:
-                //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go,
-                //             MINIMAX_API_KEY)
+                //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go)
                 //   Z.AI GLM Coding Plan — api.z.ai/api/coding/paas/v4
-                //             (subscription key, ZAI_API_KEY)
-                //   OpenRouter — openrouter.ai/api/v1 (aggregator, id
-                //             `provider/model`, catalog public/keyless,
-                //             OPENROUTER_API_KEY)
-                //   NVIDIA NIM — integrate.api.nvidia.com/v1 (id `org/model`,
-                //             catalog public/keyless, NVIDIA_API_KEY);
-                //             self-hosted NIM = custom base_url
-                let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
-                if u.discover {
-                    provider
-                } else {
-                    // Static `models:` act as the catalog; the gateway still
-                    // streams (surface = chat for the whole kind).
-                    let catalog = u
-                        .models
-                        .iter()
-                        .map(|m| Model {
-                            id: m.clone(),
-                            display_name: None,
-                            created_at: None,
-                            surface: ModelSurface::ChatCompletions,
-                        })
-                        .collect();
-                    NoDiscoveryProvider::with_models(provider, catalog)
-                }
-            }
-            UpstreamKind::OpencodeGo => {
-                if let Some(p) = StaticProvider::from_cfg(u, None) {
-                    p
-                } else if u.discover {
-                    Arc::new(OpencodeGoProvider::new(u)) as Arc<dyn Provider>
-                } else {
-                    NoDiscoveryProvider::new(Arc::new(OpencodeGoProvider::new(u)))
-                }
+                //   OpenRouter — openrouter.ai/api/v1 (id `provider/model`)
+                //   NVIDIA NIM — integrate.api.nvidia.com/v1 (self-host via base_url)
+                chat_kind(u)
             }
         })
         .collect()
+}
+
+/// Static `models:` win; else `discover: true` probes live; else the catalog is
+/// empty but requests still route. Shared by the openai/anthropic/go kinds.
+fn discoverable(
+    u: &UpstreamConfig,
+    make: impl Fn(&UpstreamConfig) -> Arc<dyn Provider>,
+) -> Arc<dyn Provider> {
+    if let Some(p) = StaticProvider::from_cfg(u, None) {
+        p
+    } else if u.discover {
+        make(u)
+    } else {
+        NoDiscoveryProvider::new(make(u))
+    }
+}
+
+/// Chat-fixed OpenAI-compatible gateways: static `models:` act as the catalog
+/// with `surface = chat` while the gateway still streams; `discover: true`
+/// probes live instead.
+fn chat_kind(u: &UpstreamConfig) -> Arc<dyn Provider> {
+    let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
+    if u.discover {
+        provider
+    } else {
+        let catalog = u
+            .models
+            .iter()
+            .map(|m| Model {
+                id: m.clone(),
+                display_name: None,
+                created_at: None,
+                surface: ModelSurface::ChatCompletions,
+            })
+            .collect();
+        NoDiscoveryProvider::with_models(provider, catalog)
+    }
+}
+
+/// Shared HTTP client for the gateway providers (10s connect, 600s total).
+pub(crate) fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .expect("reqwest client build")
 }#[cfg(test)]
 mod tests {
     use super::*;

@@ -65,6 +65,7 @@ pub struct EmbeddingManager {
     llama_bin: String,
     idle_ttl: Duration,
     slots: Vec<EmbeddingSlot>,
+    client: reqwest::Client,
 }
 
 /// Kill every running child synchronously on drop (also covers panic
@@ -93,6 +94,7 @@ impl EmbeddingManager {
             llama_bin: cfg.llama_bin.clone(),
             idle_ttl: Duration::from_secs(cfg.idle_ttl_secs),
             slots,
+            client: reqwest::Client::new(),
         }
     }
 
@@ -117,7 +119,8 @@ impl EmbeddingManager {
             slot.port
         };
         let url = format!("http://127.0.0.1:{port}/v1/embeddings");
-        let resp = reqwest::Client::new()
+        let resp = self
+            .client
             .post(&url)
             .json(req)
             .send()

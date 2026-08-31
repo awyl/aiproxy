@@ -1,4 +1,3 @@
-use std::time::Duration;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -23,11 +22,7 @@ impl OpenAiProvider {
             id: cfg.name.clone(),
             base_url: cfg.effective_base_url(),
             api_key,
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(600))
-                .build()
-                .expect("reqwest client build"),
+            client: crate::providers::default_http_client(),
         }
     }
 

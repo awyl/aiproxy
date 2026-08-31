@@ -259,22 +259,32 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        let bad = |msg: String| Err(ConfigError::Invalid(msg));
-
         self.bind_host_port()?;
-
-        let mut seen = std::collections::HashSet::new();
-        for u in &self.upstreams {
-            if !seen.insert(u.name.as_str()) {
-                return bad(format!("duplicate upstream name: {}", u.name));
+        self.validate_upstreams()?;
+        self.validate_mcp()?;
+        self.validate_embeddings()?;
+        if let Some(env) = &self.token_env {
+            if std_env::var(env).is_err() {
+                return Err(ConfigError::Invalid(format!(
+                    "token_env '{env}' is not set in the environment"
+                )));
             }
         }
+        Ok(())
+    }
+
+    fn validate_upstreams(&self) -> Result<(), ConfigError> {
+        let bad = |msg: String| Err(ConfigError::Invalid(msg));
         if self.upstreams.is_empty() {
             return bad("at least one upstream is required".into());
         }
+        let mut seen = std::collections::HashSet::new();
         for u in &self.upstreams {
             if u.name.is_empty() {
                 return bad("upstream name must not be empty".into());
+            }
+            if !seen.insert(u.name.as_str()) {
+                return bad(format!("duplicate upstream name: {}", u.name));
             }
             for (model, surface) in &u.endpoint_by_model {
                 if !matches!(surface.as_str(), "chat" | "messages" | "responses") {
@@ -285,22 +295,28 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
 
+    fn validate_mcp(&self) -> Result<(), ConfigError> {
+        let bad = |msg: String| Err(ConfigError::Invalid(msg));
         let mut seen = std::collections::HashSet::new();
-        for s in &self.mcp.servers {
-            if !seen.insert(s.name.as_str()) {
-                return bad(format!("duplicate mcp server name: {}", s.name));
-            }
-        }
         for s in &self.mcp.servers {
             if s.name.is_empty() {
                 return bad("mcp server name must not be empty".into());
+            }
+            if !seen.insert(s.name.as_str()) {
+                return bad(format!("duplicate mcp server name: {}", s.name));
             }
             if s.command.is_none() && s.url.is_none() {
                 return bad(format!("mcp server '{}': command or url is required", s.name));
             }
         }
+        Ok(())
+    }
 
+    fn validate_embeddings(&self) -> Result<(), ConfigError> {
+        let bad = |msg: String| Err(ConfigError::Invalid(msg));
         let mut seen = std::collections::HashSet::new();
         for m in &self.embeddings.models {
             if !seen.insert(m.id.as_str()) {
@@ -308,12 +324,6 @@ impl Config {
             }
             if m.model_file.is_empty() {
                 return bad(format!("embedding model '{}': model_file is required", m.id));
-            }
-        }
-
-        if let Some(env) = &self.token_env {
-            if std_env::var(env).is_err() {
-                return bad(format!("token_env '{env}' is not set in the environment"));
             }
         }
         Ok(())
