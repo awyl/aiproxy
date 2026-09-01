@@ -3,7 +3,7 @@ set -euo pipefail
 
 DOCKER_USER="${DOCKER_USER:?Set DOCKER_USER to your Docker Hub username}"
 IMAGE="${DOCKER_USER}/aiproxy"
-VERSION="${1:?Usage: $0 <version>  e.g. $0 0.1.0}"
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 
 echo "Building ${IMAGE}:${VERSION}..."
 docker build -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" .
