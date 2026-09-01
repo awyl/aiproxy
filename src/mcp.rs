@@ -24,14 +24,11 @@ type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
 pub fn mcp_router(
     servers: &[McpServerConfig],
-    token: Option<String>,
+    global_token: &Option<String>,
     bind_host: &str,
     allowed_hosts: &[String],
 ) -> Result<Router<AppState>, String> {
-    let mut router = apply_auth(
-        Router::<AppState>::new(),
-        crate::auth::auth_state(token, &[]),
-    );
+    let mut router = Router::<AppState>::new();
     let mut allowed: Vec<String> = if allowed_hosts.is_empty() {
         vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
     } else {
@@ -41,6 +38,9 @@ pub fn mcp_router(
         allowed.push(bind_host.into());
     }
     for server in servers {
+        // Per-server auth: token_env > literal token > global fallback.
+        let effective_token = server.effective_token(global_token);
+
         let name = server.clone();
         let mut server_config = StreamableHttpServerConfig::default();
         server_config.allowed_hosts = allowed.clone();
@@ -53,7 +53,16 @@ pub fn mcp_router(
             LocalSessionManager::default().into(),
             server_config,
         );
-        router = router.nest_service(format!("/mcp/{}", server.name).as_str(), service);
+        let path = format!("/mcp/{}", server.name);
+        let mut server_router = Router::new().nest_service(path.as_str(), service);
+        // Wrap this server's routes with its own auth layer.
+        if let Some(tok) = effective_token {
+            server_router = apply_auth(
+                server_router,
+                crate::auth::auth_state(Some(tok), &[]),
+            );
+        }
+        router = router.merge(server_router);
     }
     Ok(router)
 }

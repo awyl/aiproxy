@@ -124,6 +124,15 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Per-server auth token (literal). When set, this server requires
+    /// this token as Bearer — the global token is NOT accepted.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Per-server auth token from an env var name. Takes precedence over
+    /// the literal `token` field. When set but the env var is empty,
+    /// falls back to the global token.
+    #[serde(default)]
+    pub token_env: Option<String>,
 }
 
 impl McpServerConfig {
@@ -132,6 +141,25 @@ impl McpServerConfig {
             .as_ref()
             .and_then(|k| std_env::var(k).ok())
             .filter(|v| !v.is_empty())
+    }
+
+    /// Per-server auth token: token_env > literal token > global fallback.
+    pub fn effective_token(&self, global: &Option<String>) -> Option<String> {
+        // 1. Per-server token from env var
+        if let Some(env) = &self.token_env {
+            if let Some(val) = std_env::var(env).ok().filter(|v| !v.is_empty()) {
+                return Some(val);
+            }
+            // env var set but empty — fall through to global (not deny-all)
+        }
+        // 2. Per-server literal token
+        if let Some(t) = &self.token {
+            if !t.is_empty() {
+                return Some(t.clone());
+            }
+        }
+        // 3. Global fallback
+        global.clone()
     }
 }
 
@@ -724,5 +752,111 @@ upstreams:
 
         let err = Config::load(&dir.join("definitely-missing-file-91283.yaml")).unwrap_err();
         assert!(matches!(err, ConfigError::Io(_)));
+    }
+
+    #[test]
+    fn mcp_server_effective_token_fallback_to_global() {
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+mcp:
+  servers:
+    - name: fs
+      command: npx
+      args: ["-y", "mcp-fs"]
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        let global = Some("global-tok".into());
+        assert_eq!(
+            cfg.mcp.servers[0].effective_token(&global),
+            Some("global-tok".into()),
+            "no per-server token -> use global"
+        );
+    }
+
+    #[test]
+    fn mcp_server_effective_token_literal_overrides_global() {
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+mcp:
+  servers:
+    - name: fs
+      command: npx
+      args: ["-y", "mcp-fs"]
+      token: server-specific-tok
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        let global = Some("global-tok".into());
+        assert_eq!(
+            cfg.mcp.servers[0].effective_token(&global),
+            Some("server-specific-tok".into()),
+            "literal token overrides global"
+        );
+    }
+
+    #[test]
+    fn mcp_server_effective_token_env_overrides_literal_and_global() {
+        let _g = set_env_guarded("T_MCP_SERVER_TOK", "env-tok");
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+mcp:
+  servers:
+    - name: fs
+      command: npx
+      args: ["-y", "mcp-fs"]
+      token: literal-tok
+      token_env: T_MCP_SERVER_TOK
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        let global = Some("global-tok".into());
+        assert_eq!(
+            cfg.mcp.servers[0].effective_token(&global),
+            Some("env-tok".into()),
+            "token_env overrides literal token"
+        );
+    }
+
+    #[test]
+    fn mcp_server_effective_token_empty_env_falls_back_to_global() {
+        let _g = set_env_guarded("T_MCP_EMPTY", "");
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+mcp:
+  servers:
+    - name: fs
+      command: npx
+      args: ["-y", "mcp-fs"]
+      token_env: T_MCP_EMPTY
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        let global = Some("global-tok".into());
+        assert_eq!(
+            cfg.mcp.servers[0].effective_token(&global),
+            Some("global-tok".into()),
+            "empty token_env falls back to global"
+        );
+    }
+
+    #[test]
+    fn mcp_server_effective_token_no_global_no_per_server() {
+        let yaml = r#"
+upstreams:
+  - { name: a, kind: openai }
+mcp:
+  servers:
+    - name: fs
+      command: npx
+      args: ["-y", "mcp-fs"]
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        let global = None;
+        assert_eq!(
+            cfg.mcp.servers[0].effective_token(&global),
+            None,
+            "no per-server token + no global = no auth"
+        );
     }
 }

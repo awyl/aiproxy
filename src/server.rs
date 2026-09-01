@@ -93,7 +93,7 @@ pub async fn build_with_port(
 
     let mcp_router = crate::mcp::mcp_router(
         &config.mcp.servers,
-        token.clone(),
+        &token,
         &host,
         &config.mcp.allowed_hosts,
     )

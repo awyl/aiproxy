@@ -110,6 +110,10 @@ mcp:
     - name: github
       url: https://api.githubcopilot.com/mcp/
       api_key_env: GITHUB_TOKEN
+      # Per-server auth token (optional). When set, requires this token
+      # instead of the global token. Falls back to global when unset.
+      # token: "mcp-specific-secret"
+      # token_env: MCP_GITHUB_TOKEN  # env var name takes precedence over token:
       env:
         USER_AGENT: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
