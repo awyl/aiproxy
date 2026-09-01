@@ -28,13 +28,13 @@ pub enum EmbedError {
 
 /// A loaded model instance that can embed texts.
 #[async_trait::async_trait]
-pub(crate) trait ModelInstance: Send + Sync {
+pub trait ModelInstance: Send + Sync {
     async fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, usize), String>;
 }
 
 /// Backend that loads model instances on demand.
 #[async_trait::async_trait]
-pub(crate) trait EmbeddingBackend: Send + Sync {
+pub trait EmbeddingBackend: Send + Sync {
     async fn load_model(&self, model: &str) -> Result<Arc<dyn ModelInstance>, EmbedError>;
 }
 
@@ -155,7 +155,13 @@ impl EmbeddingManager {
             .ok_or_else(|| EmbedError::UnknownModel(id.to_string()))?;
 
         let input_texts = extract_input_texts(req)?;
+        tracing::debug!(
+            model = %id,
+            input_count = input_texts.len(),
+            "embedding request"
+        );
 
+        let t0 = Instant::now();
         let (embeddings, dim) = {
             let mut st = slot.state.lock().await;
             self.ensure_loaded(slot, &mut st).await?;
@@ -192,6 +198,15 @@ impl EmbeddingManager {
             })
             .collect();
         let total_tokens: usize = input_texts.iter().map(|t| t.len() / 4).sum(); // rough estimate
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+        tracing::debug!(
+            model = %id,
+            input_count = input_texts.len(),
+            dimensions = dim,
+            elapsed_ms,
+            "embedding completed"
+        );
 
         Ok(serde_json::json!({
             "object": "list",
@@ -219,7 +234,13 @@ impl EmbeddingManager {
             }
             SlotState::Idle => {
                 tracing::info!(model = %slot.id, fastembed_model = %slot.model, "loading embedding model");
+                let t0 = Instant::now();
                 let instance = self.backend.load_model(&slot.model).await?;
+                tracing::info!(
+                    model = %slot.id,
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "embedding model loaded"
+                );
                 *st = SlotState::Loaded {
                     instance,
                     last_used: Instant::now(),

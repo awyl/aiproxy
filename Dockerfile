@@ -1,17 +1,24 @@
-# ── Build stage: Rust binary (static musl) ───────────────────────────────────
-FROM rust:1.96-alpine AS rust-builder
+# syntax=docker/dockerfile:1
+# ── Build stage: Rust binary (glibc, matches ort-sys prebuilt) ────────────────
+FROM debian:trixie-slim AS rust-builder
 
-RUN apk add --no-cache musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential curl pkg-config ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup (trixie has glibc 2.40, needed by ort-sys prebuilt)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN cargo --version && rustc --version
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo 'fn main() {}' > src/lib.rs
-RUN cargo build --release 2>/dev/null || true
-RUN rm -rf src
-
 COPY src ./src
-RUN touch src/main.rs && cargo build --release
-# ── Runtime stage (Debian, glibc for llama.cpp native perf) ──────────────────
+RUN --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,sharing=shared,target=/app/target \
+    cargo build --release && cp /app/target/release/aiproxy /usr/local/bin/aiproxy
+
+# ── Runtime stage (Debian, glibc for onnxruntime) ─────────────────────────────
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,12 +34,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Copy binaries from build stages
-COPY --from=rust-builder /app/target/release/aiproxy /usr/local/bin/aiproxy
+# Copy binary from build stage
+COPY --from=rust-builder /usr/local/bin/aiproxy /usr/local/bin/aiproxy
 
-RUN mkdir -p /etc/aiproxy
-VOLUME ["/etc/aiproxy"]
-
+RUN mkdir -p /etc/aiproxy /models
+VOLUME ["/etc/aiproxy", "/models"]
+ENV FASTEMBED_CACHE_DIR=/models
 EXPOSE 8080
 
 ENTRYPOINT ["aiproxy"]

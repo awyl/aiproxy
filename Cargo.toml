@@ -18,7 +18,7 @@ thiserror = "2"
 futures = "0.3"
 bytes = "1"
 async-trait = "0.1"
-fastembed = "6"
+fastembed = { version = "6", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 regex = "1"
 rmcp = { version = "=3.1.4", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "transport-child-process", "transport-io", "tower"] }
 
