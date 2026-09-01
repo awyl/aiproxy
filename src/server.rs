@@ -100,6 +100,14 @@ pub async fn build_with_port(
     )
     .map_err(ServerError::Mcp)?;
 
+    // MCP multiplexer: single /mcp endpoint aggregating all servers
+    let multiplex_state = crate::mcp_multiplexer::McpMultiplexState {
+        servers: config.mcp.servers.clone(),
+        global_token: token.clone(),
+    };
+    let multiplex_router = crate::mcp_multiplexer::mcp_multiplex_route()
+        .with_state(multiplex_state);
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
@@ -108,6 +116,7 @@ pub async fn build_with_port(
             &subscription_values,
         ))
         .merge(mcp_router)
+        .merge(multiplex_router)
         .with_state(state);
 
     let listener = TcpListener::bind((host.as_str(), port)).await?;

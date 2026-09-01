@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod embeddings;
 pub mod mcp;
+pub mod mcp_multiplexer;
 pub mod provider;
 pub mod providers;
 pub mod server;

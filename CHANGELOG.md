@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2025-09-02
+
+### Added
+- **MCP multiplexer** — single `/mcp` endpoint aggregates multiple MCP servers. Use `X-MCP-Servers` header to select servers and pass per-server tokens (e.g. `X-MCP-Servers: searxng:tok,ctx7`). Auth check on every `tools/list` and `tools/call` call, not just connection. Tools namespaced as `<server>__<tool>`.
+
+### Changed
+- **MCP per-server auth** — `token`/`token_env` on MCP servers now works with both individual `/mcp/<name>` endpoints and the new `/mcp` multiplexer.
+
 ## [0.2.4] - 2025-09-02
 
 ### Changed

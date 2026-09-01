@@ -118,6 +118,17 @@ mcp:
       env:
         USER_AGENT: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
+    # Example: server with per-server auth token
+    # - name: searxng
+    #   command: npx
+    #   args: ["-y", "mcp-searxng"]
+    #   token_env: SEARXNG_MCP_TOKEN  # requires this token instead of global
+
+  # MCP multiplexer: single /mcp endpoint aggregates multiple servers.
+  # Use X-MCP-Servers header to select servers and pass per-server tokens:
+  #   X-MCP-Servers: searxng:searxng_token,ctx7,grep:grep_token
+  # No header → include all servers (auth via Authorization header).
+
   # DNS rebinding allowlist for the streamable-HTTP server.
   # Clients connecting via a hostname not in this list get rejected.
   # The bind host is always added automatically.

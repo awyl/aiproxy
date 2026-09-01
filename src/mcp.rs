@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
+pub type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
 pub fn mcp_router(
     servers: &[McpServerConfig],
@@ -179,5 +179,164 @@ impl ServerHandler for ProxyHandler {
             .await
             .map(CallToolResponse::from)
             .map_err(|e| ErrorData::internal_error(format!("backend call_tool: {e}"), None))
+    }
+}
+
+// ── MCP multiplexer: aggregate multiple backends under /mcp ────────────────
+
+/// Parsed entry from X-MCP-Servers header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerEntry {
+    pub name: String,
+    pub token: Option<String>,
+}
+
+/// Parse `X-MCP-Servers` header value.
+/// Format: `name:token,name,name:token`
+/// - `name:token` → token provided
+/// - `name` → no token (use auth fallback)
+pub fn parse_mcp_servers_header(value: &str) -> Vec<McpServerEntry> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|entry| {
+            match entry.split_once(':') {
+                Some((name, token)) => McpServerEntry {
+                    name: name.trim().to_string(),
+                    token: Some(token.trim().to_string()),
+                },
+                None => McpServerEntry {
+                    name: entry.to_string(),
+                    token: None,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Resolve the token to check against a server's effective_token.
+/// Priority: header token > Authorization header fallback.
+pub fn resolve_check_token(
+    entry: &McpServerEntry,
+    auth_header: Option<&str>,
+) -> Option<String> {
+    entry
+        .token
+        .clone()
+        .or_else(|| auth_header.map(String::from))
+}
+
+/// Check if a token grants access to a server.
+pub fn check_server_auth(
+    check_token: Option<&str>,
+    effective_token: &Option<String>,
+) -> bool {
+    match effective_token {
+        // Server is open (no token required) → always grant
+        None => true,
+        // Server requires token → check match
+        Some(required) => match check_token {
+            Some(provided) => provided == required,
+            None => false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod multiplexer_tests {
+    use super::*;
+
+    #[test]
+    fn parse_single_server_with_token() {
+        let entries = parse_mcp_servers_header("searxng:my_secret");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "searxng");
+        assert_eq!(entries[0].token.as_deref(), Some("my_secret"));
+    }
+
+    #[test]
+    fn parse_single_server_without_token() {
+        let entries = parse_mcp_servers_header("ctx7");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "ctx7");
+        assert_eq!(entries[0].token, None);
+    }
+
+    #[test]
+    fn parse_multiple_servers_mixed() {
+        let entries = parse_mcp_servers_header("searxng:tok_a,ctx7,grep:tok_b");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "searxng");
+        assert_eq!(entries[0].token.as_deref(), Some("tok_a"));
+        assert_eq!(entries[1].name, "ctx7");
+        assert_eq!(entries[1].token, None);
+        assert_eq!(entries[2].name, "grep");
+        assert_eq!(entries[2].token.as_deref(), Some("tok_b"));
+    }
+
+    #[test]
+    fn parse_empty_header() {
+        let entries = parse_mcp_servers_header("");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_whitespace_handling() {
+        let entries = parse_mcp_servers_header(" searxng : tok_a , ctx7 ");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "searxng");
+        assert_eq!(entries[0].token.as_deref(), Some("tok_a"));
+        assert_eq!(entries[1].name, "ctx7");
+    }
+
+    #[test]
+    fn resolve_token_header_over_auth() {
+        let entry = McpServerEntry {
+            name: "x".into(),
+            token: Some("header_tok".into()),
+        };
+        assert_eq!(
+            resolve_check_token(&entry, Some("auth_tok")),
+            Some("header_tok".into())
+        );
+    }
+
+    #[test]
+    fn resolve_token_fallback_to_auth() {
+        let entry = McpServerEntry {
+            name: "x".into(),
+            token: None,
+        };
+        assert_eq!(
+            resolve_check_token(&entry, Some("auth_tok")),
+            Some("auth_tok".into())
+        );
+    }
+
+    #[test]
+    fn resolve_token_no_token_anywhere() {
+        let entry = McpServerEntry {
+            name: "x".into(),
+            token: None,
+        };
+        assert_eq!(resolve_check_token(&entry, None), None);
+    }
+
+    #[test]
+    fn auth_open_server_always_grants() {
+        assert!(check_server_auth(None, &None));
+        assert!(check_server_auth(Some("anything"), &None));
+    }
+
+    #[test]
+    fn auth_required_token_match() {
+        assert!(check_server_auth(Some("secret"), &Some("secret".into())));
+        assert!(!check_server_auth(Some("wrong"), &Some("secret".into())));
+    }
+
+    #[test]
+    fn auth_required_no_token_denies() {
+        assert!(!check_server_auth(None, &Some("secret".into())));
     }
 }

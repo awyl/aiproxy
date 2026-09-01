@@ -153,6 +153,32 @@ mcp:
 
 Clients connect at `http://<host>:8080/mcp/<name>` with the appropriate bearer token.
 
+### MCP multiplexer
+
+A single `/mcp` endpoint aggregates multiple MCP servers. Use the `X-MCP-Servers` header to select which servers to include and authenticate per-server:
+
+```
+X-MCP-Servers: searxng:searxng_token,ctx7,grep:grep_token
+```
+
+Format: `name:token` or just `name`:
+- `name:token` — use provided token for auth
+- `name` — fallback to `Authorization: Bearer <token>` header
+
+If the token matches the server's effective token (`token_env` > `token` > global), that server's tools are included. Tools are namespaced as `<server>__<tool>` (e.g. `searxng__search`).
+
+```
+POST /mcp
+Headers:
+  Authorization: Bearer <global-token>
+  X-MCP-Servers: searxng:tok_a,ctx7
+Body: {"jsonrpc":"2.0","method":"tools/list","id":1}
+```
+
+No `X-MCP-Servers` header → include all servers (auth via `Authorization` header).
+
+Individual `/mcp/<name>` endpoints remain available for backward compatibility.
+
 ## Local embeddings
 
 CPU-only embedding via fastembed (ONNX). Models auto-download from HuggingFace on first request and unload after idle timeout — only the requested model is resident, keeping memory low.
