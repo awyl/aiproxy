@@ -68,16 +68,10 @@ manually. Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
 
 ## Notes
 
-- Cost/contextWindow/maxTokens are conservative defaults (`0` cost, 128K /
-  16K). Override per model in your `models.json` / provider `models` config —
-  pi composes those above registered models.
-- Thinking default is `high` for every model; only that level is enabled in
-  each model's `thinkingLevelMap`. Chat-surface models receive
-  `reasoning_effort` — models that reject it need a per-model override to
-  drop thinking.
-- `Input` is limited to `["text"]` by default — Go multi-modal models exist
-  (`mimo-v2-omni`); flipping to include `"image"` per model is safe if you
-  tested it.
+- Model metadata (contextWindow, maxTokens, reasoning, cost, etc.) is resolved
+  from pi's live model store (`models-store.json`) so context sizes match what
+  pi knows about each model (e.g. mimo-v2.5 gets 1M, not 128k defaults).
+- `Input` defaults to `["text"]` — flip to include `"image"` per model if tested.
 - If the gateway is unreachable at startup, the extension warns and registers
   zero models — pi still starts.
 
