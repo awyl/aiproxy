@@ -4,6 +4,13 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.2.3] - 2025-09-02
+
+### Changed
+- **Pi extension: model metadata from pi's model store** — extension reads `models-store.json` for all model attributes (contextWindow, maxTokens, reasoning, thinkingLevelMap, input, cost, headers, compat) instead of hardcoding. Models show correct context sizes (e.g. mimo-v2.5 1M, deepseek-v4-pro 1M) instead of 128k defaults.
+
 ## [0.2.2] - 2025-09-01
 
 ### Added
