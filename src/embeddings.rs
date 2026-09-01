@@ -1,100 +1,139 @@
-//! Local embeddings — on-demand llama-server children behind the fake
+//! Local embeddings — in-process fastembed backend behind the fake
 //! `embeddings-local` provider.
 //!
-//! Lifecycle: a child is spawned on first request for a model (single-flight),
-//! kept for reuse, and killed by the idle reaper after `idle_ttl_secs` with no
-//! traffic. Children are independent OS processes on 127.0.0.1:<port>; the
-//! proxy relays `POST /v1/embeddings` to the right port.
+//! Lifecycle: a model is loaded on first request for that model (single-flight),
+//! kept for reuse, and dropped by the idle reaper after `idle_ttl_secs` with no
+//! traffic. All models are ONNX-based and auto-downloaded from HuggingFace on
+//! first use.
 
 use crate::config::EmbeddingsConfig;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
-
-/// How long to wait for a child to serve /health == 200 (llama.cpp answers 503
-/// while loading, so poll).
-const HEALTH_POLL_STEP: Duration = Duration::from_millis(500);
-const HEALTH_MAX_WAIT: Duration = Duration::from_secs(30);
+use tokio::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
     #[error("unknown embedding model: {0}")]
     UnknownModel(String),
-    #[error("embedding backend '{0}' failed to start: {1}")]
-    SpawnFailed(String, String),
-    #[error("embedding backend '{0}' not ready: {1}")]
-    NotReady(String, String),
-    #[error("embedding call failed ({0}): {1}")]
-    Http(u16, String),
-    #[error("embedding call failed: {0}")]
-    Transport(String),
+    #[error("embedding model '{0}' failed to load: {1}")]
+    LoadFailed(String, String),
+    #[error("embedding call failed for '{0}': {1}")]
+    EmbedFailed(String, String),
 }
 
-#[derive(Debug)]
-pub struct EmbeddingSlot {
-    pub id: String,
-    pub port: u16,
-    model_file: String,
-    state: tokio::sync::Mutex<SlotState>,
+// ---------------------------------------------------------------------------
+// Backend trait — real fastembed in prod, mockable in tests
+// ---------------------------------------------------------------------------
+
+/// A loaded model instance that can embed texts.
+#[async_trait::async_trait]
+pub(crate) trait ModelInstance: Send + Sync {
+    async fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, usize), String>;
 }
 
-#[derive(Debug)]
+/// Backend that loads model instances on demand.
+#[async_trait::async_trait]
+pub(crate) trait EmbeddingBackend: Send + Sync {
+    async fn load_model(&self, model: &str) -> Result<Arc<dyn ModelInstance>, EmbedError>;
+}
+
+// ---------------------------------------------------------------------------
+// fastembed backend
+// ---------------------------------------------------------------------------
+
+pub struct FastembedBackend;
+
+#[async_trait::async_trait]
+impl EmbeddingBackend for FastembedBackend {
+    async fn load_model(&self, model: &str) -> Result<Arc<dyn ModelInstance>, EmbedError> {
+        let model_name = model.to_string();
+        let instance = tokio::task::spawn_blocking(move || {
+            let variant: fastembed::EmbeddingModel = model_name
+                .parse()
+                .map_err(|_| format!("unknown fastembed model variant: {model_name}"))?;
+            let opts = fastembed::InitOptions::new(variant);
+            let te = fastembed::TextEmbedding::try_new(opts)
+                .map_err(|e| format!("init: {e}"))?;
+            Ok::<_, String>(te)
+        })
+        .await
+        .map_err(|e| EmbedError::LoadFailed(model.into(), format!("task join: {e}")))?
+        .map_err(|e| EmbedError::LoadFailed(model.into(), e))?;
+
+        Ok(Arc::new(FastembedInstance(Mutex::new(instance))))
+    }
+}
+
+struct FastembedInstance(Mutex<fastembed::TextEmbedding>);
+
+#[async_trait::async_trait]
+impl ModelInstance for FastembedInstance {
+    async fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, usize), String> {
+        let mut guard = self.0.lock().await;
+        let result = guard
+            .embed(texts, None)
+            .map_err(|e| format!("fastembed embed: {e}"))?;
+        let dim = result.first().map_or(0, |v| v.len());
+        Ok((result, dim))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slot and manager
+// ---------------------------------------------------------------------------
+
+struct EmbeddingSlot {
+    id: String,
+    model: String,
+    dimensions: Option<u32>,
+    state: Mutex<SlotState>,
+}
+
 enum SlotState {
     Idle,
-    /// Spawned child, single-flight: the slot mutex is held across spawn +
-    /// health wait, so concurrent callers serialize and reuse the child.
-    Live {
-        child: tokio::process::Child,
+    Loaded {
+        instance: Arc<dyn ModelInstance>,
         last_used: Instant,
     },
 }
 
-impl EmbeddingSlot {
-    fn new(id: String, model_file: String, port: u16) -> Self {
-        Self {
-            id,
-            port,
-            model_file,
-            state: tokio::sync::Mutex::new(SlotState::Idle),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct EmbeddingManager {
-    llama_bin: String,
     idle_ttl: Duration,
     slots: Vec<EmbeddingSlot>,
-    client: reqwest::Client,
+    backend: Arc<dyn EmbeddingBackend>,
 }
 
-/// Kill every running child synchronously on drop (also covers panic
-/// unwinding — tokio's Child does not kill on drop, unlike std's).
-impl Drop for EmbeddingManager {
-    fn drop(&mut self) {
-        for slot in &mut self.slots {
-            if let Ok(mut st) = slot.state.try_lock()
-                && let SlotState::Live { child, .. } = &mut *st
-            {
-                let _ = child.start_kill();
-            }
-        }
+impl std::fmt::Debug for EmbeddingManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingManager")
+            .field("idle_ttl", &self.idle_ttl)
+            .field("slots", &self.slots.len())
+            .finish()
     }
 }
 
 impl EmbeddingManager {
     pub fn new(cfg: &EmbeddingsConfig) -> Self {
+        Self::with_backend(cfg, Arc::new(FastembedBackend))
+    }
+
+    pub(crate) fn with_backend(cfg: &EmbeddingsConfig, backend: Arc<dyn EmbeddingBackend>) -> Self {
+        let idle_ttl = Duration::from_secs(cfg.idle_ttl_secs);
         let slots = cfg
             .models
             .iter()
-            .enumerate()
-            .map(|(i, m)| EmbeddingSlot::new(m.id.clone(), m.model_file.clone(), cfg.port_for(i)))
+            .map(|m| EmbeddingSlot {
+                id: m.id.clone(),
+                model: m.model.clone(),
+                dimensions: m.dimensions,
+                state: Mutex::new(SlotState::Idle),
+            })
             .collect();
         Self {
-            llama_bin: cfg.llama_bin.clone(),
-            idle_ttl: Duration::from_secs(cfg.idle_ttl_secs),
+            idle_ttl,
             slots,
-            client: reqwest::Client::new(),
+            backend,
         }
     }
 
@@ -107,222 +146,204 @@ impl EmbeddingManager {
         self.slots.iter().find(|s| s.id == id)
     }
 
-    /// Ensure the child for `id` is running (spawn on demand), then relay an
-    /// OpenAI `/v1/embeddings` request and return the upstream JSON verbatim.
+    /// Load the model for `id` if not already loaded (single-flight via slot
+    /// mutex), then embed the input texts and return an OpenAI-compatible JSON
+    /// response.
     pub async fn embed(&self, id: &str, req: &Value) -> Result<Value, EmbedError> {
         let slot = self
             .slot(id)
             .ok_or_else(|| EmbedError::UnknownModel(id.to_string()))?;
-        let port = {
+
+        let input_texts = extract_input_texts(req)?;
+
+        let (embeddings, dim) = {
             let mut st = slot.state.lock().await;
-            self.ensure_spawned(slot, &mut st).await?;
-            slot.port
+            self.ensure_loaded(slot, &mut st).await?;
+            if let SlotState::Loaded {
+                instance, last_used, ..
+            } = &mut *st
+            {
+                *last_used = Instant::now();
+                let inst = Arc::clone(instance);
+                drop(st); // release lock before embed call
+
+                let refs: Vec<&str> = input_texts.iter().map(|s| s.as_str()).collect();
+                let (vecs, d) = inst.embed(&refs).await.map_err(|e| {
+                    EmbedError::EmbedFailed(slot.id.clone(), e)
+                })?;
+                let dim_override = slot.dimensions.unwrap_or(d as u32);
+                (vecs, dim_override)
+            } else {
+                unreachable!("ensure_loaded just set Loaded");
+            }
         };
-        let url = format!("http://127.0.0.1:{port}/v1/embeddings");
-        let resp = self
-            .client
-            .post(&url)
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| EmbedError::Transport(format!("{url}: {e}")))?;
-        let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| EmbedError::Transport(format!("bad response body: {e}")))?;
-        if !status.is_success() {
-            return Err(EmbedError::Http(status.as_u16(), body.to_string()));
-        }
-        Ok(body)
+
+        // Build OpenAI-compatible response.
+        let dim = dim as usize;
+        let data: Vec<Value> = embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(i, vec)| {
+                serde_json::json!({
+                    "object": "embedding",
+                    "index": i,
+                    "embedding": vec,
+                })
+            })
+            .collect();
+        let total_tokens: usize = input_texts.iter().map(|t| t.len() / 4).sum(); // rough estimate
+
+        Ok(serde_json::json!({
+            "object": "list",
+            "model": format!("embeddings-local/{}", id),
+            "data": data,
+            "usage": {
+                "prompt_tokens": total_tokens,
+                "total_tokens": total_tokens,
+            },
+            "dimensions": dim,
+        }))
     }
 
-    /// Spawn the child if not Live. Single-flight: the caller holds the slot
-    /// lock; spawn + health wait happen under it.
-    async fn ensure_spawned(
+    /// Ensure the model for `slot` is loaded. Single-flight: the caller holds
+    /// the slot lock; load happens under it.
+    async fn ensure_loaded(
         &self,
         slot: &EmbeddingSlot,
         st: &mut SlotState,
     ) -> Result<(), EmbedError> {
         match st {
-            SlotState::Live { last_used, .. } => {
+            SlotState::Loaded { last_used, .. } => {
                 *last_used = Instant::now();
                 Ok(())
             }
             SlotState::Idle => {
-                let mut child = Command::new(&self.llama_bin)
-                    .args([
-                        "-m",
-                        &slot.model_file,
-                        "--embeddings",
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        &slot.port.to_string(),
-                    ])
-                    // Spawn errors surface through the health poll; don't hold
-                    // the child's stdout pipe open (would block the proxy on a
-                    // chatty child).
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .map_err(|e| EmbedError::SpawnFailed(slot.id.clone(), e.to_string()))?;
-                match wait_healthy(slot.port, &slot.id).await {
-                    Ok(()) => {
-                        *st = SlotState::Live {
-                            child,
-                            last_used: Instant::now(),
-                        };
-                        Ok(())
-                    }
-                    Err(e) => {
-                        let _ = child.kill().await;
-                        Err(e)
-                    }
-                }
+                tracing::info!(model = %slot.id, fastembed_model = %slot.model, "loading embedding model");
+                let instance = self.backend.load_model(&slot.model).await?;
+                *st = SlotState::Loaded {
+                    instance,
+                    last_used: Instant::now(),
+                };
+                Ok(())
             }
         }
     }
 
-    /// Kill every running child immediately (shutdown / test cleanup).
+    /// Unload every loaded model (shutdown / test cleanup).
     pub async fn shutdown_all(&self) {
         for slot in &self.slots {
             let mut st = slot.state.lock().await;
-            if let SlotState::Live { child, .. } = &mut *st {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+            if matches!(&*st, SlotState::Loaded { .. }) {
                 *st = SlotState::Idle;
             }
         }
     }
 
-    /// One reaper pass: kill + drop children idle longer than the TTL.
+    /// One reaper pass: drop models idle longer than the TTL.
     /// Called from the reaper task at an interval; public so tests drive it.
     pub async fn reaper_round(&self) {
         for slot in &self.slots {
             let mut st = slot.state.lock().await;
-            if let SlotState::Live { child, last_used } = &mut *st
+            if let SlotState::Loaded { last_used, .. } = &*st
                 && last_used.elapsed() >= self.idle_ttl
             {
-                let _ = child.kill().await;
-                let _ = child.wait().await; // reap zombie
+                tracing::info!(model = %slot.id, "unloading idle embedding model");
                 *st = SlotState::Idle;
             }
         }
     }
 }
 
-/// Poll `GET /health` until 200 (llama.cpp returns 503 while loading).
-async fn wait_healthy(port: u16, id: &str) -> Result<(), EmbedError> {
-    let url = format!("http://127.0.0.1:{port}/health");
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + HEALTH_MAX_WAIT;
-    while Instant::now() < deadline {
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => return Ok(()),
-            Ok(_) => {} // 503: still loading
-            Err(_) => {}
-        }
-        tokio::time::sleep(HEALTH_POLL_STEP).await;
+/// Extract input texts from an OpenAI-format embedding request.
+/// Supports both `"input": "single string"` and `"input": ["array", "of", "strings"]`.
+fn extract_input_texts(req: &Value) -> Result<Vec<String>, EmbedError> {
+    let input = req
+        .get("input")
+        .ok_or_else(|| EmbedError::EmbedFailed("?".into(), "missing 'input' field".into()))?;
+    match input {
+        Value::String(s) => Ok(vec![s.clone()]),
+        Value::Array(arr) => arr
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.as_str()
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        EmbedError::EmbedFailed(
+                            "?".into(),
+                            format!("input[{i}] is not a string"),
+                        )
+                    })
+            })
+            .collect(),
+        _ => Err(EmbedError::EmbedFailed(
+            "?".into(),
+            "'input' must be a string or array of strings".into(),
+        )),
     }
-    Err(EmbedError::NotReady(
-        id.to_string(),
-        "child did not serve /health == 200 within 30s".into(),
-    ))
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::*;
     use crate::config::{EmbeddingModelConfig, EmbeddingsConfig};
-    use std::fs;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// One fake llama-server bin for the whole test binary: written + chmod'd
-    /// ONCE (executing a just-written script races overlayfs copy-up ->
-    /// ETXTBSY). Per-test output files derive from the `-m` file path
-    /// (`<model_dir>/<id>.pid|.count`), so parallel tests keep separate state.
-    fn fake_llama_bin() -> &'static str {
-        static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        BIN.get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!("aiproxy-fake-llama-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let py = dir.join("fake_llama.py");
-            fs::write(
-                &py,
-                r#"import http.server, json, sys, os
-port=int(sys.argv[1]); pidf=sys.argv[2]; cntf=sys.argv[3]
-open(pidf,"w").write(str(os.getpid()))
-open(cntf,"a").write("x")
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path=="/health":
-            b=b'{"status":"ok"}'; self.send_response(200); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
-    def do_POST(self):
-        n=int(self.headers.get("Content-Length",0)); body=json.loads(self.rfile.read(n))
-        out={"object":"list","model":body.get("model","test"),"data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":1,"total_tokens":1}}
-        b=json.dumps(out).encode(); self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
-    def log_message(self,*a): pass
-http.server.HTTPServer(("127.0.0.1",port),H).serve_forever()
-"#,
-            )
-            .unwrap();
-            let sh = dir.join("fake_llama.sh");
-            fs::write(
-                &sh,
-                r#"#!/bin/bash
-# fake llama-server: parse -m <file> and --port <N> from manager args
-MODEL=""; PORT=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -m) MODEL="$2"; shift 2 ;;
-    --port) PORT="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-ID=$(basename "$MODEL" .gguf)
-OUT=$(dirname "$MODEL")
-SDIR=$(dirname "$0")
-exec python3 "$SDIR/fake_llama.py" "$PORT" "$OUT/$ID.pid" "$OUT/$ID.count"
-"#,
-            )
-            .unwrap();
-            let mut perm = fs::metadata(&sh).unwrap().permissions();
-            use std::os::unix::fs::PermissionsExt;
-            perm.set_mode(0o755);
-            fs::set_permissions(&sh, perm).unwrap();
-            sh.to_str().unwrap().to_string()
-        })
+    /// Fake backend for unit tests — no real model loading, fast, deterministic.
+    pub struct FakeBackend {
+        pub load_count: AtomicUsize,
     }
 
-    /// Manager over the fake bin; one model per `id`. Model file paths live in
-    /// `dir` (need not exist) so pid/count files land in the test's dir.
+    impl FakeBackend {
+        pub fn new() -> Self {
+            Self {
+                load_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    struct FakeInstance;
+
+    #[async_trait::async_trait]
+    impl EmbeddingBackend for FakeBackend {
+        async fn load_model(&self, _model: &str) -> Result<Arc<dyn ModelInstance>, EmbedError> {
+            self.load_count.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(FakeInstance))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelInstance for FakeInstance {
+        async fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, usize), String> {
+            // Return fixed embeddings with integer values for clean assertion.
+            let vecs = texts.iter().map(|_| vec![1.0, 2.0, 3.0]).collect();
+            Ok((vecs, 3))
+        }
+    }
+
     pub fn manager_with_fake(
-        dir: &std::path::Path,
-        port_cell: Arc<AtomicUsize>,
         ttl_secs: u64,
         ids: &[&str],
-    ) -> EmbeddingManager {
+    ) -> (EmbeddingManager, Arc<FakeBackend>) {
+        let backend = Arc::new(FakeBackend::new());
         let models: Vec<EmbeddingModelConfig> = ids
             .iter()
             .map(|id| EmbeddingModelConfig {
                 id: (*id).to_string(),
-                model_file: dir.join(format!("{id}.gguf")).to_str().unwrap().to_string(),
-                port: Some(port_cell.fetch_add(1, Ordering::SeqCst) as u16),
+                model: "FakeModel".to_string(),
+                dimensions: None,
             })
             .collect();
         let cfg = EmbeddingsConfig {
-            llama_bin: fake_llama_bin().to_string(),
             idle_ttl_secs: ttl_secs,
             models,
         };
-        EmbeddingManager::new(&cfg)
-    }
-
-    pub fn spawn_count(dir: &std::path::Path, id: &str) -> usize {
-        fs::read_to_string(dir.join(format!("{id}.count")))
-            .map(|s| s.len())
-            .unwrap_or(0)
+        let mgr = EmbeddingManager::with_backend(&cfg, backend.clone());
+        (mgr, backend)
     }
 }
 
@@ -330,100 +351,94 @@ exec python3 "$SDIR/fake_llama.py" "$PORT" "$OUT/$ID.pid" "$OUT/$ID.count"
 mod tests {
     use super::testutil::*;
     use super::*;
-    use crate::config::{EmbeddingModelConfig, EmbeddingsConfig};
-    use std::fs;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
-    async fn spawns_on_demand_once_and_relays() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(
-            dir.path(),
-            Arc::new(AtomicUsize::new(19010)),
-            3600,
-            &["nomic"],
-        );
-        let req = serde_json::json!({ "model": "nomic", "input": "hello" });
+    async fn embed_returns_openai_compatible_response() {
+        let (mgr, _) = manager_with_fake(3600, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hello world" });
         let out = mgr.embed("nomic", &req).await.expect("embed ok");
-        assert_eq!(out["data"][0]["embedding"], serde_json::json!([0.1, 0.2]));
-        assert_eq!(spawn_count(dir.path(), "nomic"), 1, "exactly one spawn");
-
-        // second call reuses the running child — no new spawn
-        let first_pid = fs::read_to_string(dir.path().join("nomic.pid")).unwrap();
-        let _ = mgr.embed("nomic", &req).await.expect("embed ok 2");
-        assert_eq!(spawn_count(dir.path(), "nomic"), 1, "no second spawn");
+        assert_eq!(out["object"], "list");
+        assert_eq!(out["model"], "embeddings-local/nomic");
+        assert_eq!(out["data"][0]["object"], "embedding");
+        assert_eq!(out["data"][0]["index"], 0);
         assert_eq!(
-            fs::read_to_string(dir.path().join("nomic.pid")).unwrap(),
-            first_pid
+            out["data"][0]["embedding"],
+            serde_json::json!([1.0, 2.0, 3.0])
         );
-        mgr.shutdown_all().await; // cleanup — never leave orphans behind
+        assert_eq!(out["usage"]["prompt_tokens"], 2); // "hello world" / 4 ≈ 2
+        assert_eq!(out["dimensions"], 3);
     }
 
     #[tokio::test]
-    async fn idle_reaper_kills_and_frees_the_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(dir.path(), Arc::new(AtomicUsize::new(19030)), 1, &["nomic"]);
-        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
-        let _ = mgr.embed("nomic", &req).await.expect("embed ok");
-        let first_pid = fs::read_to_string(dir.path().join("nomic.pid")).unwrap();
-        assert_eq!(spawn_count(dir.path(), "nomic"), 1);
-
-        // reaper pass until the child is gone (bounded wait — robust under load)
-        let mut killed = false;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            mgr.reaper_round().await;
-            if !std::path::Path::new(&format!("/proc/{first_pid}")).exists() {
-                killed = true;
-                break;
-            }
-        }
-        assert!(killed, "idle child must be killed by the reaper");
-
-        // port freed -> next request respawns (count increments, new pid)
-        let _ = mgr.embed("nomic", &req).await.expect("embed ok 2");
-        assert_eq!(
-            spawn_count(dir.path(), "nomic"),
-            2,
-            "child must be respawned after reap"
-        );
-        assert_ne!(
-            fs::read_to_string(dir.path().join("nomic.pid")).unwrap(),
-            first_pid
-        );
-        mgr.shutdown_all().await;
+    async fn embed_batch_input() {
+        let (mgr, _) = manager_with_fake(3600, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": ["hello", "world"] });
+        let out = mgr.embed("nomic", &req).await.expect("embed ok");
+        assert_eq!(out["data"].as_array().unwrap().len(), 2);
+        assert_eq!(out["data"][0]["index"], 0);
+        assert_eq!(out["data"][1]["index"], 1);
     }
 
     #[tokio::test]
-    async fn traffic_within_ttl_keeps_child_alive() {
-        // generous ttl; traffic at ~600ms keeps last_used well inside it
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = manager_with_fake(
-            dir.path(),
-            Arc::new(AtomicUsize::new(19040)),
-            10,
-            &["nomic"],
-        );
+    async fn loads_model_on_demand_and_reuses() {
+        let (mgr, backend) = manager_with_fake(3600, &["nomic"]);
         let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+
         let _ = mgr.embed("nomic", &req).await.expect("embed 1");
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let _ = mgr.embed("nomic", &req).await.expect("embed 2"); // refreshes last_used
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(backend.load_count.load(Ordering::SeqCst), 1);
+
+        let _ = mgr.embed("nomic", &req).await.expect("embed 2");
+        assert_eq!(
+            backend.load_count.load(Ordering::SeqCst),
+            1,
+            "must not reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_unloads_model() {
+        let (mgr, backend) = manager_with_fake(1, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+
+        let _ = mgr.embed("nomic", &req).await.expect("embed ok");
+        assert_eq!(backend.load_count.load(Ordering::SeqCst), 1);
+
+        // Wait for the model to become idle (ttl = 1s)
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        mgr.reaper_round().await;
+
+        // Next request must reload
+        let _ = mgr.embed("nomic", &req).await.expect("embed after reap");
+        assert_eq!(
+            backend.load_count.load(Ordering::SeqCst),
+            2,
+            "must reload after reaper"
+        );
+    }
+
+    #[tokio::test]
+    async fn traffic_within_ttl_keeps_model() {
+        let (mgr, backend) = manager_with_fake(10, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+
+        let _ = mgr.embed("nomic", &req).await.expect("embed 1");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = mgr.embed("nomic", &req).await.expect("embed 2"); // refresh
+        tokio::time::sleep(Duration::from_millis(200)).await;
         mgr.reaper_round().await;
 
         let _ = mgr.embed("nomic", &req).await.expect("embed 3");
         assert_eq!(
-            spawn_count(dir.path(), "nomic"),
+            backend.load_count.load(Ordering::SeqCst),
             1,
-            "recent traffic must keep the child"
+            "recent traffic must keep the model"
         );
-        mgr.shutdown_all().await;
     }
 
     #[tokio::test]
     async fn unknown_model_is_rejected() {
-        let mgr = EmbeddingManager::new(&EmbeddingsConfig::default());
+        let (mgr, _) = manager_with_fake(3600, &[]);
         let err = mgr
             .embed("nope", &serde_json::json!({ "model": "nope" }))
             .await
@@ -432,21 +447,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_failure_is_reported_with_binary() {
-        let cfg = EmbeddingsConfig {
-            llama_bin: "/nonexistent/llama-server".into(),
-            idle_ttl_secs: 3600,
-            models: vec![EmbeddingModelConfig {
-                id: "x".into(),
-                model_file: "/m/x.gguf".into(),
-                port: Some(19020),
-            }],
-        };
-        let mgr = EmbeddingManager::new(&cfg);
+    async fn shutdown_all_unloads_models() {
+        let (mgr, backend) = manager_with_fake(3600, &["nomic"]);
+        let req = serde_json::json!({ "model": "nomic", "input": "hi" });
+        let _ = mgr.embed("nomic", &req).await.expect("embed ok");
+        assert_eq!(backend.load_count.load(Ordering::SeqCst), 1);
+
+        mgr.shutdown_all().await;
+
+        // Next request must reload
+        let _ = mgr.embed("nomic", &req).await.expect("embed after shutdown");
+        assert_eq!(backend.load_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_input_is_rejected() {
+        let (mgr, _) = manager_with_fake(3600, &["nomic"]);
         let err = mgr
-            .embed("x", &serde_json::json!({ "model": "x" }))
+            .embed("nomic", &serde_json::json!({ "model": "nomic" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, EmbedError::SpawnFailed(..)), "got {err:?}");
+        assert!(matches!(err, EmbedError::EmbedFailed(..)));
+    }
+
+    #[tokio::test]
+    async fn model_ids_exposed_for_catalog() {
+        let (mgr, _) = manager_with_fake(3600, &["a", "b", "c"]);
+        assert_eq!(mgr.model_ids(), vec!["a", "b", "c"]);
     }
 }

@@ -185,7 +185,7 @@ async fn responses(
 }
 
 /// Fake `embeddings-local` provider: relay a /v1/embeddings request to the
-/// on-demand local llama-server child for the model.
+/// in-process fastembed backend for the model.
 async fn embeddings(
     State(state): State<AppState>,
     Json(req): Json<Value>,
@@ -212,27 +212,16 @@ async fn embeddings(
                 format!("unknown embedding model '{id}'"),
                 "invalid_request_error",
             ),
-            crate::embeddings::EmbedError::SpawnFailed(id, msg) => openai_error(
+            crate::embeddings::EmbedError::LoadFailed(id, msg) => openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "embedding backend '{id}' failed to start: {msg}; check llama_bin and model_file"
-                ),
+                format!("embedding model '{id}' failed to load: {msg}"),
                 "upstream_error",
             ),
-            crate::embeddings::EmbedError::NotReady(id, msg) => openai_error(
+            crate::embeddings::EmbedError::EmbedFailed(id, msg) => openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("embedding backend '{id}' not ready: {msg}"),
+                format!("embedding model '{id}' embed failed: {msg}"),
                 "upstream_error",
             ),
-            crate::embeddings::EmbedError::Http(status, body) => {
-                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-                let body = serde_json::from_str::<Value>(&body)
-                    .unwrap_or_else(|_| json!({ "error": { "message": body } }));
-                (status, axum::Json(body)).into_response()
-            }
-            crate::embeddings::EmbedError::Transport(msg) => {
-                openai_error(StatusCode::BAD_GATEWAY, msg, "upstream_error")
-            }
         },
     }
 }
@@ -267,10 +256,7 @@ mod tests {
         ];
         let reg = crate::discovery::ModelRegistry::new(providers);
         reg.refresh().await;
-        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap())); // outlive spawned fakes
-        let embed = crate::embeddings::testutil::manager_with_fake(
-            dir.path(),
-            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(20010)),
+        let (embed, _backend) = crate::embeddings::testutil::manager_with_fake(
             3600,
             &["nomic"],
         );
@@ -478,7 +464,7 @@ mod tests {
         let (status, body) = send(app, post("/v1/embeddings", &req.to_string())).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let v: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["data"][0]["embedding"], json!([0.1, 0.2]));
+        assert_eq!(v["data"][0]["embedding"], json!([1.0, 2.0, 3.0]));
     }
 
     #[tokio::test]

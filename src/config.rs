@@ -146,32 +146,32 @@ pub struct McpConfig {
     pub allowed_hosts: Vec<String>,
 }
 
-/// One local embedding model served by a spawned llama-server child.
+/// One local embedding model served by the in-process fastembed backend.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EmbeddingModelConfig {
     /// Proxied id, exposed as `embeddings-local/<id>`. Must be unique.
     pub id: String,
-    /// GGUF file path passed to llama-server (-m).
-    pub model_file: String,
-    /// Loopback port for the child; `None` = auto (18081 + index).
+    /// fastembed `EmbeddingModel` variant name (e.g. "AllMiniLML6V2",
+    /// "BGESmallENV15", "NomicEmbedTextV15"). Models are auto-downloaded
+    /// from HuggingFace on first use.
+    pub model: String,
+    /// Optional output dimension override (some models support e.g. 256, 384,
+    /// 512). `None` = model default.
     #[serde(default)]
-    pub port: Option<u16>,
+    pub dimensions: Option<u32>,
 }
 
-fn default_llama_bin() -> String {
-    "llama-server".to_string()
-}
 
 fn default_idle_ttl() -> u64 {
-    3600 // kill child after 1h with no traffic
+    3600 // drop model after 1h with no traffic
 }
 
-/// Local embeddings: on-demand llama-server children behind the fake
-/// `embeddings-local` provider.
+/// Local embeddings: in-process fastembed backend behind the fake
+/// `embeddings-local` provider. Models are loaded on demand and unloaded
+/// by the idle reaper.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingsConfig {
-    pub llama_bin: String,
     pub idle_ttl_secs: u64,
     pub models: Vec<EmbeddingModelConfig>,
 }
@@ -179,19 +179,9 @@ pub struct EmbeddingsConfig {
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
-            llama_bin: default_llama_bin(),
             idle_ttl_secs: default_idle_ttl(),
             models: Vec::new(),
         }
-    }
-}
-
-impl EmbeddingsConfig {
-    /// Default loopback port for the model at `index` when none configured.
-    pub fn port_for(&self, index: usize) -> u16 {
-        self.models[index]
-            .port
-            .unwrap_or_else(|| 18081 + index as u16)
     }
 }
 
@@ -331,9 +321,9 @@ impl Config {
             if !seen.insert(m.id.as_str()) {
                 return bad(format!("duplicate embedding model id: {}", m.id));
             }
-            if m.model_file.is_empty() {
+            if m.model.is_empty() {
                 return bad(format!(
-                    "embedding model '{}': model_file is required",
+                    "embedding model '{}': model variant is required",
                     m.id
                 ));
             }
@@ -572,43 +562,36 @@ upstreams:
     fn embeddings_block_defaults_and_models() {
         // no embeddings block -> defaults
         let cfg = Config::from_yaml("upstreams:\n  - { name: a, kind: openai }\n").unwrap();
-        assert_eq!(cfg.embeddings.llama_bin, "llama-server");
         assert_eq!(cfg.embeddings.idle_ttl_secs, 3600);
         assert!(cfg.embeddings.models.is_empty());
 
         // full block
         let cfg = Config::from_yaml(
-            "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  llama_bin: /opt/llama/bin/llama-server\n  idle_ttl_secs: 120\n  models:\n    - { id: nomic-embed-text-v1.5, model_file: /m/nomic.Q8_0.gguf, port: 18081 }\n    - { id: all-MiniLM-L6-v2, model_file: /m/minilm.Q8_0.gguf }\n",
+            "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  idle_ttl_secs: 120\n  models:\n    - { id: nomic-embed-text-v1.5, model: NomicEmbedTextV15 }\n    - { id: all-MiniLM-L6-v2, model: AllMiniLML6V2, dimensions: 384 }\n",
         )
         .unwrap();
-        assert_eq!(cfg.embeddings.llama_bin, "/opt/llama/bin/llama-server");
         assert_eq!(cfg.embeddings.idle_ttl_secs, 120);
         assert_eq!(cfg.embeddings.models.len(), 2);
         assert_eq!(cfg.embeddings.models[0].id, "nomic-embed-text-v1.5");
-        assert_eq!(cfg.embeddings.models[0].model_file, "/m/nomic.Q8_0.gguf");
-        assert_eq!(cfg.embeddings.models[0].port, Some(18081));
-        assert_eq!(cfg.embeddings.models[1].port, None);
+        assert_eq!(cfg.embeddings.models[0].model, "NomicEmbedTextV15");
+        assert_eq!(cfg.embeddings.models[0].dimensions, None);
+        assert_eq!(cfg.embeddings.models[1].model, "AllMiniLML6V2");
+        assert_eq!(cfg.embeddings.models[1].dimensions, Some(384));
     }
 
     #[test]
     fn embeddings_validation_rejects_bad_config() {
         // duplicate model id
         let bad = Config::from_yaml(
-            "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  models:\n    - { id: x, model_file: /m/x.gguf }\n    - { id: x, model_file: /m/y.gguf }\n",
+            "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  models:\n    - { id: x, model: AllMiniLML6V2 }\n    - { id: x, model: AllMiniLML6V2 }\n",
         );
         assert!(bad.is_err(), "duplicate embedding id must be rejected");
 
-        // port out of range (u16 overflow)
-        let bad = Config::from_yaml(
-            "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  models:\n    - { id: x, model_file: /m/x.gguf, port: 70000 }\n",
-        );
-        assert!(bad.is_err(), "port > 65535 must be rejected");
-
-        // missing model_file
+        // missing model variant
         let bad = Config::from_yaml(
             "upstreams:\n  - { name: a, kind: openai }\n\nembeddings:\n  models:\n    - { id: x }\n",
         );
-        assert!(bad.is_err(), "model without model_file must be rejected");
+        assert!(bad.is_err(), "model without model variant must be rejected");
     }
 
     #[test]

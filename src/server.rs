@@ -81,7 +81,7 @@ pub async fn build_with_port(
         subscriptions,
     };
 
-    // Embedding children: idle reaper (kill + release after idle_ttl_secs).
+    // Embedding models: idle reaper (unload after idle_ttl_secs).
     let emb = state.embeddings.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));

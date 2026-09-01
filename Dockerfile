@@ -11,24 +11,6 @@ RUN rm -rf src
 
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
-
-# ── Build stage: llama.cpp (Debian glibc, GGML_NATIVE for CPU optimizations) ─
-FROM debian:trixie-slim AS llama-builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git cmake g++ make \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
-
-WORKDIR /llama.cpp
-RUN cmake -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_NATIVE=ON \
-        -DLLAMA_CURL=OFF \
-    && cmake --build build --config Release -j$(nproc) \
-    && cp build/bin/llama-server /usr/local/bin/llama-server
-
 # ── Runtime stage (Debian, glibc for llama.cpp native perf) ──────────────────
 FROM debian:trixie-slim
 
@@ -47,10 +29,9 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 # Copy binaries from build stages
 COPY --from=rust-builder /app/target/release/aiproxy /usr/local/bin/aiproxy
-COPY --from=llama-builder /usr/local/bin/llama-server /usr/local/bin/llama-server
 
-RUN mkdir -p /etc/aiproxy /models
-VOLUME ["/etc/aiproxy", "/models"]
+RUN mkdir -p /etc/aiproxy
+VOLUME ["/etc/aiproxy"]
 
 EXPOSE 8080
 

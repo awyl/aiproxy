@@ -142,22 +142,17 @@ Clients connect at `http://<host>:8080/mcp/<name>` with the same bearer token as
 
 ## Local embeddings
 
-CPU-only embedding server via llama.cpp. Models are spawned on demand and killed after idle timeout — only one model resident at a time.
+CPU-only embedding via fastembed (ONNX). Models auto-download from HuggingFace on first request and unload after idle timeout — only one model resident at a time.
 
 ```yaml
 embeddings:
-  llama_bin: llama-server
   idle_ttl_secs: 3600
   models:
     - id: nomic-embed-text-v1.5
-      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
-      port: 18081
+      model: NomicEmbedTextV15
 ```
 
-```bash
-# Download a GGUF model
-huggingface-cli download nomic-ai/nomic-embed-text-v1.5-GGUF --local-dir /models
-```
+Models download automatically on first use — no manual GGUF management needed.
 
 Exposed as `embeddings-local/<model-id>` in the catalog (surface: `embedding`). Standard `POST /v1/embeddings` endpoint.
 

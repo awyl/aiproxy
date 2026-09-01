@@ -119,18 +119,15 @@ mcp:
   # Default (empty): [localhost, 127.0.0.1, ::1]
   allowed_hosts: ["host.containers.internal"]  # add when pi runs inside a container
 
-# Local CPU embeddings — fake provider "embeddings-local". Each model is a
-# llama-server child, spawned ON DEMAND on its first request and killed after
-# idle_ttl_secs without traffic. Installed GGUF files must exist on disk.
-# Grab them with e.g.: huggingface-cli download nomic-ai/nomic-embed-text-v1.5-GGUF --local-dir /models
+# Local CPU embeddings — fake provider "embeddings-local". Each model loads
+# via fastembed (ONNX) on first request, auto-downloads from HuggingFace,
+# and unloads after idle_ttl_secs without traffic.
 embeddings:
-  llama_bin: llama-server          # path or bare name on PATH (llama.cpp build)
-  idle_ttl_secs: 3600              # kill child after 1h idle (seconds)
+  idle_ttl_secs: 3600              # unload model after 1h idle (seconds)
   models:
     - id: nomic-embed-text-v1.5    # proxied id: embeddings-local/nomic-embed-text-v1.5
-      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
-      port: 18081                  # loopback port for the child (omitted -> 18081 + index)
-    - id: all-MiniLM-L6-v2
-      model_file: /models/all-MiniLM-L6-v2.Q8_0.gguf
-    - id: bge-small-en-v1.5
-      model_file: /models/bge-small-en-v1.5.Q8_0.gguf
+      model: NomicEmbedTextV15
+    - id: all-MiniLM-L6-v2        # proxied id: embeddings-local/all-MiniLM-L6-v2
+      model: AllMiniLML6V2
+    - id: bge-small-en-v1.5       # proxied id: embeddings-local/bge-small-en-v1.5
+      model: BGESmallENV15
