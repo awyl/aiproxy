@@ -4,7 +4,7 @@
 
 Unified LLM proxy — set up once, every agent connects through it. No per-agent API key management.
 
-Single endpoint serves OpenAI `/v1/*`, Anthropic `/v1/messages`, and OpenAI Responses `/v1/responses` wire formats. Models are auto-discovered or statically listed. MCP servers hosted at `/mcp/<name>`. Local CPU embeddings via llama.cpp.
+Single endpoint serves OpenAI `/v1/*`, Anthropic `/v1/messages`, and OpenAI Responses `/v1/responses` wire formats. Models are auto-discovered or statically listed. MCP servers hosted at `/mcp/<name>`. Local CPU embeddings via fastembed (ONNX).
 
 ## Quick start
 
@@ -20,7 +20,6 @@ cp aiproxy.yaml.example aiproxy.yaml
 # 3. Set API keys
 export AIPROXY_TOKEN=your-proxy-secret
 export OPENCODE_GO_API_KEY=your-go-key
-export MINIMAX_API_KEY=your-minimax-key
 
 # 4. Run
 ./target/release/aiproxy --config aiproxy.yaml
@@ -44,18 +43,19 @@ Agent-facing model ids are always `<upstream-name>/<model-id>`, e.g. `opencode-g
 
 ```bash
 # Build
-DOCKER_USER=yourhubuser ./docker-push.sh 0.1.0
+DOCKER_USER=yourhubuser ./docker-push.sh 0.2.2
 
 # Run
 docker run -d \
-  -v ./aiproxy.yaml:/etc/aiproxy/aiproxy.yaml \
+  -v ./aiproxy.yaml:/etc/aiproxy/aiproxy.yaml:ro \
+  -v aiproxy-models:/models \
   -e AIPROXY_TOKEN=secret \
   -e OPENCODE_GO_API_KEY=... \
   -p 8080:8080 \
-  yourhubuser/aiproxy:0.1.0
+  yourhubuser/aiproxy:0.2.2
 ```
 
-The image includes Node.js (`npx`) and Python/uv (`uvx`) for MCP servers, plus `llama-server` for local embeddings.
+The image includes Node.js (`npx`), Python/uv (`uvx`) for MCP servers, and ONNX Runtime (via fastembed) for local embeddings. Embedding models auto-download to `/models` on first use.
 
 ## Configuration
 
@@ -84,14 +84,16 @@ mcp:
       args: ["-y", "mcp-searxng"]
       env:
         SEARXNG_URL: "http://localhost:8888"
+    - name: github
+      url: https://api.githubcopilot.com/mcp/
+      api_key_env: GITHUB_TOKEN
+      token_env: MCP_GITHUB_TOKEN    # per-server auth (optional, falls back to global)
 
 embeddings:
-  llama_bin: llama-server
   idle_ttl_secs: 3600
   models:
     - id: nomic-embed-text-v1.5
-      model_file: /models/nomic-embed-text-v1.5.Q8_0.gguf
-      port: 18081
+      model: NomicEmbedTextV15
 ```
 
 ### Discovery
@@ -114,7 +116,7 @@ upstreams:
     token_env: GO_ALICE_TOKEN
   - name: go-bob
     kind: opencode-go
-    api_key_env: GO_BOB_TOKEN
+    api_key_env: GO_BOB_KEY
     token_env: GO_BOB_TOKEN
 ```
 
@@ -127,6 +129,8 @@ aiproxy hosts MCP servers via the [pi-mcp-extension](https://www.npmjs.com/packa
 - **stdio**: proxy spawns a child process (`command` + `args` + `env`) and exposes it at `/mcp/<name>`
 - **streamable-http**: proxy connects to a remote MCP server (`url`) and relays
 
+Each MCP server can optionally require its own auth token via `token` (literal) or `token_env` (env var name). Precedence: per-server `token_env` > per-server `token` > global token. When no token is set on a server, clients authenticate with the global proxy token.
+
 ```yaml
 mcp:
   servers:
@@ -136,20 +140,29 @@ mcp:
     - name: github
       url: https://api.githubcopilot.com/mcp/
       api_key_env: GITHUB_TOKEN
+      token_env: MCP_GITHUB_TOKEN   # this server requires its own token
+    - name: searxng
+      command: npx
+      args: ["-y", "mcp-searxng"]
+      # no token → uses global proxy token
 ```
 
-Clients connect at `http://<host>:8080/mcp/<name>` with the same bearer token as the proxy.
+Clients connect at `http://<host>:8080/mcp/<name>` with the appropriate bearer token.
 
 ## Local embeddings
 
-CPU-only embedding via fastembed (ONNX). Models auto-download from HuggingFace on first request and unload after idle timeout — only one model resident at a time.
+CPU-only embedding via fastembed (ONNX). Models auto-download from HuggingFace on first request and unload after idle timeout — only the requested model is resident, keeping memory low.
 
 ```yaml
 embeddings:
   idle_ttl_secs: 3600
   models:
-    - id: nomic-embed-text-v1.5
+    - id: nomic-embed-text-v1.5    # proxied id: embeddings-local/nomic-embed-text-v1.5
       model: NomicEmbedTextV15
+    - id: all-MiniLM-L6-v2        # proxied id: embeddings-local/all-MiniLM-L6-v2
+      model: AllMiniLML6V2
+    - id: bge-small-en-v1.5       # proxied id: embeddings-local/bge-small-en-v1.5
+      model: BGESmallENV15
 ```
 
 Models download automatically on first use — no manual GGUF management needed.
@@ -196,6 +209,7 @@ aiproxy --help                 # show options
 - No TLS in v1 — put a reverse proxy (nginx, caddy) in front for anything public
 - API keys live in env vars only; the config references them by name
 - Bearer token auth; omit `token_env`/`token` for unauthenticated mode
+- MCP servers support per-server auth tokens (falls back to global)
 - MCP `allowed_hosts` defaults to `[localhost, 127.0.0.1, ::1]`; add hostnames for container-to-host connections
 
 ## License
