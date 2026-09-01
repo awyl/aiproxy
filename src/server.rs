@@ -48,20 +48,21 @@ pub async fn build_with_port(
         });
     }
 
+    let ids = config.provider_ids();
     let mut subscriptions = std::collections::HashMap::new();
-    for u in &config.upstreams {
+    for (u, id) in config.upstreams.iter().zip(&ids) {
         match u.subscription_token() {
             Some(Some(tok)) => {
-                subscriptions.insert(u.name.clone(), Some(tok));
-                tracing::info!(upstream = %u.name, "subscription-gated upstream enabled");
+                subscriptions.insert(id.clone(), Some(tok));
+                tracing::info!(upstream = %id, "subscription-gated upstream enabled");
             }
             Some(None) => {
                 tracing::error!(
-                    upstream = %u.name,
+                    upstream = %id,
                     token_env = u.token_env.as_deref().unwrap_or(""),
                     "upstream subscription token_env set but env var missing/empty — upstream is deny-all"
                 );
-                subscriptions.insert(u.name.clone(), None);
+                subscriptions.insert(id.clone(), None);
             }
             None => {}
         }

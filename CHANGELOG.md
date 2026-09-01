@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.4] - 2025-09-02
+
+### Changed
+- **Provider ID scheme** — `name` is now optional (defaults to `kind`). Single upstream of kind → ID = kind name (e.g. `opencode-go`). Multiple upstreams of kind → ID = kind=name (e.g. `opencode-go=alice`). Name uniqueness is per-kind, not global.
+- **Extension catalog lookup** — strips subscription suffix (`=name`) before matching in pi's model store, so multi-subscription models get correct metadata.
+
+### Added
+- **Fail-fast validation** — 2+ upstreams of same kind with 2+ missing names → config error at startup.
+
 ## [0.2.3] - 2025-09-02
 
 ### Changed

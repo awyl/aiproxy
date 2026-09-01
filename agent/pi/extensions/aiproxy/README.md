@@ -5,7 +5,12 @@ are auto-discovered from the gateway at startup, split across the three wire
 surfaces the proxy speaks.
 
 Model ids stay prefixed (`opencode-go/mimo-v2.5`); the proxy routes by prefix
-and strips it. `api` is derived per model from the proxy's `surface` field:
+and strips it. Provider IDs follow a scheme:
+
+- 1 upstream of kind → ID = kind name (e.g. `opencode-go`)
+- 2+ upstreams of kind → ID = kind=name (e.g. `opencode-go=alice`)
+
+`api` is derived per model from the proxy's `surface` field:
 
 | proxy surface | pi api |
 |---|---|
@@ -78,8 +83,8 @@ manually. Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
 ## Multi-subscription gateways
 
 With per-upstream `token_env` (aiproxy multi-subscription), the catalog
-contains models from every subscription (`go-alice/*`, `go-bob/*`). This
-extension registers all of them; each user picks their subscription by model
+contains models from every subscription (`opencode-go=alice/*`, `opencode-go=bob/*`).
+This extension registers all of them; each user picks their subscription by model
 prefix and their own `AIPROXY_TOKEN` identifies them (requests for prefixes
 they don't own are rejected by the proxy). One extension, no per-user config
 beyond each person's token env.

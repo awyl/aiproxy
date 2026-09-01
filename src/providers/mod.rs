@@ -29,6 +29,7 @@ pub struct StaticProvider {
 impl StaticProvider {
     pub fn from_cfg(
         cfg: &UpstreamConfig,
+        id: &str,
         default_surface: Option<ModelSurface>,
     ) -> Option<Arc<dyn Provider>> {
         if cfg.models.is_empty() {
@@ -36,7 +37,7 @@ impl StaticProvider {
         }
         let surface = cfg.surface.or(default_surface);
         Some(Arc::new(StaticProvider {
-            id: cfg.name.clone(),
+            id: id.to_string(),
             models: cfg.models.clone(),
             surface,
         }))
@@ -153,22 +154,19 @@ impl Provider for NoDiscoveryProvider {
 }
 
 pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
+    let ids = cfg.provider_ids();
     cfg.upstreams
         .iter()
-        .map(|u| match u.kind {
-            UpstreamKind::Openai => discoverable(u, |u| Arc::new(OpenAiProvider::new(u))),
-            UpstreamKind::Anthropic => discoverable(u, |u| Arc::new(AnthropicProvider::new(u))),
-            UpstreamKind::OpencodeGo => discoverable(u, |u| Arc::new(OpencodeGoProvider::new(u))),
+        .zip(ids)
+        .map(|(u, id)| match u.kind {
+            UpstreamKind::Openai => discoverable(u, &id, |u, id| Arc::new(OpenAiProvider::new(u, id))),
+            UpstreamKind::Anthropic => discoverable(u, &id, |u, id| Arc::new(AnthropicProvider::new(u, id))),
+            UpstreamKind::OpencodeGo => discoverable(u, &id, |u, id| Arc::new(OpencodeGoProvider::new(u, id))),
             UpstreamKind::Minimax
             | UpstreamKind::Zai
             | UpstreamKind::Openrouter
             | UpstreamKind::Nvidia => {
-                // OpenAI-compatible gateways with a fixed chat surface:
-                //   Minimax — api.minimax.io/v1 (Token Plan / pay-as-you-go)
-                //   Z.AI GLM Coding Plan — api.z.ai/api/coding/paas/v4
-                //   OpenRouter — openrouter.ai/api/v1 (id `provider/model`)
-                //   NVIDIA NIM — integrate.api.nvidia.com/v1 (self-host via base_url)
-                chat_kind(u)
+                chat_kind(u, &id)
             }
         })
         .collect()
@@ -178,22 +176,23 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
 /// empty but requests still route. Shared by the openai/anthropic/go kinds.
 fn discoverable(
     u: &UpstreamConfig,
-    make: impl Fn(&UpstreamConfig) -> Arc<dyn Provider>,
+    id: &str,
+    make: impl Fn(&UpstreamConfig, &str) -> Arc<dyn Provider>,
 ) -> Arc<dyn Provider> {
-    if let Some(p) = StaticProvider::from_cfg(u, None) {
+    if let Some(p) = StaticProvider::from_cfg(u, id, None) {
         p
     } else if u.discover {
-        make(u)
+        make(u, id)
     } else {
-        NoDiscoveryProvider::wrap(make(u))
+        NoDiscoveryProvider::wrap(make(u, id))
     }
 }
 
 /// Chat-fixed OpenAI-compatible gateways: static `models:` act as the catalog
 /// with `surface = chat` while the gateway still streams; `discover: true`
 /// probes live instead.
-fn chat_kind(u: &UpstreamConfig) -> Arc<dyn Provider> {
-    let provider = Arc::new(OpenAiProvider::new(u)) as Arc<dyn Provider>;
+fn chat_kind(u: &UpstreamConfig, id: &str) -> Arc<dyn Provider> {
+    let provider = Arc::new(OpenAiProvider::new(u, id)) as Arc<dyn Provider>;
     if u.discover {
         provider
     } else {
@@ -257,14 +256,15 @@ upstreams:
         assert_eq!(providers.len(), 3);
 
         // openai without models and without discover -> exists, but catalog empty
+        // ID = kind name (single upstream of kind)
         let skipped = providers
             .iter()
-            .find(|p| p.id() == "skipped")
+            .find(|p| p.id() == "openai")
             .expect("provider present");
         assert!(skipped.list_models().await.unwrap().is_empty());
 
         // static models list -> catalog-only upstream
-        let pinned = providers.iter().find(|p| p.id() == "pinned").unwrap();
+        let pinned = providers.iter().find(|p| p.id() == "anthropic").unwrap();
         let ids: Vec<String> = pinned
             .list_models()
             .await

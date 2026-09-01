@@ -1,8 +1,13 @@
 # aiproxy example configuration.
 #
 # Upstream keys live in env vars ONLY, referenced by `api_key_env` name.
-# Agent-facing model ids are always `{upstream name}/{model id}`, e.g.
+# Agent-facing model ids are always `{provider-id}/{model id}`, e.g.
 # `opencode-go/kimi-k3`.
+#
+# Provider ID scheme:
+#   - 1 upstream of kind: ID = kind name (e.g. "opencode-go")
+#   - 2+ upstreams of kind: ID = kind=name (e.g. "opencode-go=alice")
+# `name` is optional when only 1 upstream of a kind; required for multiples.
 
 bind: 127.0.0.1:8080          # listen "host:port"; 0.0.0.0:8080 = all interfaces
                                # (reverse proxy recommended for anything public)
@@ -19,13 +24,27 @@ upstreams:
   # why this is safe to enable), surfaces parsed from surface_map_url on the
   # same refresh cadence as the ids (startup + model_refresh_secs; no TTL),
   # builtin snapshot fallback.
-  - name: opencode-go
-    kind: opencode-go
+  - kind: opencode-go             # name optional — provider ID = "opencode-go"
     api_key_env: OPENCODE_GO_API_KEY
     discover: true
     # endpoint_by_model:            # overrides for new models (chat | messages | responses)
     #   qwen3.9-x: messages
     # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
+
+  # Multi-subscription example: two opencode-go upstreams.
+  # Name is required — provider IDs become "opencode-go=alice" and "opencode-go=bob".
+  # Model ids: opencode-go=alice/mimo-v2.5, opencode-go=bob/mimo-v2.5
+  #
+  # - name: alice
+  #   kind: opencode-go
+  #   api_key_env: GO_ALICE_KEY
+  #   token_env: GO_ALICE_TOKEN      # env holding alice's proxy token
+  #   discover: true
+  # - name: bob
+  #   kind: opencode-go
+  #   api_key_env: GO_BOB_KEY
+  #   token_env: GO_BOB_TOKEN
+  #   discover: true
 
   # Every upstream is catalog-only unless you opt in:
   #   - `models: [...]`   -> static list, never probed (recommended)
@@ -34,24 +53,11 @@ upstreams:
   #                          otherwise expect per-refresh warnings (401 etc).
   # Omitting both declarations a provider with an EMPTY catalog: requests
   # still route to it, but agents won't see models in /v1/models.
-  #   - name: go-alice
-  #     kind: opencode-go
-  #     api_key_env: GO_ALICE_KEY
-  #     token_env: GO_ALICE_TOKEN      # env holding alice's proxy token
-  #     discover: true
-  #   - name: go-bob
-  #     kind: opencode-go
-  #     api_key_env: GO_BOB_KEY
-  #     token_env: GO_BOB_TOKEN
-  #     discover: true
-  #
-  # Model ids become go-alice/mimo-v2.5 and go-bob/mimo-v2.5.
 
   # MiniMax (international) — OpenAI-compatible wire (api.minimax.io/v1).
   # Token Plan (Subscription Key, sk-cp-...) and pay-as-you-go API keys both
   # go in the same env var; the proxy relays your Bearer as-is.
-  - name: minimax
-    kind: minimax
+  - kind: minimax                  # provider ID = "minimax"
     api_key_env: MINIMAX_API_KEY
     models: [MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed]   # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
@@ -59,37 +65,32 @@ upstreams:
   # NVIDIA NIM cloud — OpenAI-compatible (integrate.api.nvidia.com/v1).
   # Ids are `org/model`; catalog is PUBLIC/keyless, chat needs NVIDIA_API_KEY.
   # Self-hosted NIM = same kind, custom base_url.
-  - name: nvidia
-    kind: nvidia
+  - kind: nvidia                   # provider ID = "nvidia"
     api_key_env: NVIDIA_API_KEY
     discover: true          # safe: GET /v1/models is keyless (83 models)
 
   # OpenRouter — OpenAI-compatible aggregator (openrouter.ai/api/v1).
   # Model ids are `provider/model`; the catalog is PUBLIC/keyless, only chat
   # calls need OPENROUTER_API_KEY.
-  - name: openrouter
-    kind: openrouter
+  - kind: openrouter               # provider ID = "openrouter"
     api_key_env: OPENROUTER_API_KEY
     discover: true          # safe: GET /v1/models is keyless (396 models)
 
   # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
   # The coding-plan API key (individual or team) goes in ZAI_API_KEY.
-  - name: zai
-    kind: zai
+  - kind: zai                      # provider ID = "zai"
     api_key_env: ZAI_API_KEY
     models: [glm-5.3, glm-5.3-flash]                            # streams; surface = chat
     # discover: true   # instead, probe GET /v1/models at startup (needs the key)
 
 
   # OpenAI-compatible gateway with a pinned model list (no probing):
-  - name: openai
-    kind: openai
+  - kind: openai                   # provider ID = "openai"
     api_key_env: OPENAI_API_KEY
     models: [gpt-4o, gpt-4o-mini]
 
   # Anthropic-compatible gateway, discovery enabled:
-  - name: anthropic
-    kind: anthropic
+  - kind: anthropic                # provider ID = "anthropic"
     api_key_env: ANTHROPIC_API_KEY
     discover: true
 

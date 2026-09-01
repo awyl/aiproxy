@@ -42,6 +42,18 @@ pub enum UpstreamKind {
 }
 
 impl UpstreamKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Openai => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Minimax => "minimax",
+            Self::Zai => "zai",
+            Self::Openrouter => "openrouter",
+            Self::Nvidia => "nvidia",
+            Self::OpencodeGo => "opencode-go",
+        }
+    }
+
     pub fn default_base_url(self) -> &'static str {
         match self {
             UpstreamKind::Openai => "https://api.openai.com/v1",
@@ -57,7 +69,8 @@ impl UpstreamKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub kind: UpstreamKind,
     #[serde(default)]
     pub base_url: Option<String>,
@@ -83,6 +96,25 @@ pub struct UpstreamConfig {
 }
 
 impl UpstreamConfig {
+    /// User-provided name or the kind name if omitted.
+    pub fn effective_name(&self) -> &str {
+        self.name.as_deref().unwrap_or_else(|| self.kind.as_str())
+    }
+
+    /// Provider ID used as the model prefix and subscription key.
+    ///
+    /// - Single upstream of kind: just the kind name (e.g. "opencode-go")
+    /// - Multiple upstreams of kind: kind=name (e.g. "opencode-go=alice")
+    ///
+    /// Must be called after normalization (group_by_kind applied).
+    pub fn provider_id(&self, count_in_kind: usize) -> String {
+        if count_in_kind <= 1 {
+            self.kind.as_str().to_string()
+        } else {
+            format!("{}={}", self.kind.as_str(), self.effective_name())
+        }
+    }
+
     pub fn surface_map_url_or_default(&self) -> String {
         self.surface_map_url
             .clone()
@@ -146,17 +178,17 @@ impl McpServerConfig {
     /// Per-server auth token: token_env > literal token > global fallback.
     pub fn effective_token(&self, global: &Option<String>) -> Option<String> {
         // 1. Per-server token from env var
-        if let Some(env) = &self.token_env {
-            if let Some(val) = std_env::var(env).ok().filter(|v| !v.is_empty()) {
-                return Some(val);
-            }
-            // env var set but empty — fall through to global (not deny-all)
+        if let Some(env) = &self.token_env
+            && let Some(val) = std_env::var(env).ok().filter(|v| !v.is_empty())
+        {
+            return Some(val);
         }
+        // env var set but empty — fall through to global (not deny-all)
         // 2. Per-server literal token
-        if let Some(t) = &self.token {
-            if !t.is_empty() {
-                return Some(t.clone());
-            }
+        if let Some(t) = &self.token
+            && !t.is_empty()
+        {
+            return Some(t.clone());
         }
         // 3. Global fallback
         global.clone()
@@ -302,19 +334,47 @@ impl Config {
         if self.upstreams.is_empty() {
             return bad("at least one upstream is required".into());
         }
-        let mut seen = std::collections::HashSet::new();
+        // Group by kind for per-kind validation
+        let mut by_kind: std::collections::HashMap<&str, Vec<&UpstreamConfig>> =
+            std::collections::HashMap::new();
         for u in &self.upstreams {
-            if u.name.is_empty() {
-                return bad("upstream name must not be empty".into());
+            by_kind.entry(u.kind.as_str()).or_default().push(u);
+        }
+        for (kind, ups) in &by_kind {
+            // Fail-fast: 2+ same kind must all have names
+            if ups.len() > 1 {
+                let missing_count = ups.iter().filter(|u| u.name.is_none()).count();
+                if missing_count >= 2 {
+                    let missing: Vec<String> = ups
+                        .iter()
+                        .filter(|u| u.name.is_none())
+                        .map(|u| u.effective_name().to_string())
+                        .collect();
+                    return bad(format!(
+                        "upstream kind '{kind}' has {} entries but {} are missing name (need unique names for 2+ same kind): {}",
+                        ups.len(),
+                        missing.len(),
+                        missing.join(", ")
+                    ));
+                }
+                // Check name uniqueness within kind
+                let mut seen = std::collections::HashSet::new();
+                for u in ups {
+                    let name = u.effective_name();
+                    if !seen.insert(name) {
+                        return bad(format!(
+                            "duplicate name '{name}' in kind '{kind}'"
+                        ));
+                    }
+                }
             }
-            if !seen.insert(u.name.as_str()) {
-                return bad(format!("duplicate upstream name: {}", u.name));
-            }
+        }
+        for u in &self.upstreams {
             for (model, surface) in &u.endpoint_by_model {
                 if !matches!(surface.as_str(), "chat" | "messages" | "responses") {
                     return bad(format!(
                         "upstream '{}': endpoint_by_model['{model}'] must be one of chat|messages|responses, got '{surface}'",
-                        u.name
+                        u.effective_name()
                     ));
                 }
             }
@@ -364,6 +424,24 @@ impl Config {
             return std_env::var(env).ok().filter(|v| !v.is_empty());
         }
         self.token.clone().filter(|v| !v.is_empty())
+    }
+
+    /// Compute provider IDs for all upstreams.
+    /// - Single upstream of kind: ID = kind name (e.g. "opencode-go")
+    /// - Multiple upstreams of kind: ID = kind=name (e.g. "opencode-go=alice")
+    pub fn provider_ids(&self) -> Vec<String> {
+        let mut by_kind: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for u in &self.upstreams {
+            *by_kind.entry(u.kind.as_str()).or_insert(0) += 1;
+        }
+        self.upstreams
+            .iter()
+            .map(|u| {
+                let count = by_kind[u.kind.as_str()];
+                u.provider_id(count)
+            })
+            .collect()
     }
 }
 
@@ -638,15 +716,102 @@ upstreams:
     }
 
     #[test]
-    fn duplicate_upstream_names_rejected() {
+    fn duplicate_names_within_kind_rejected() {
+        // Same kind, same name -> rejected
+        let yaml = r#"
+upstreams:
+  - { name: alice, kind: openai }
+  - { name: alice, kind: openai }
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn duplicate_names_across_kinds_allowed() {
+        // Different kinds, same name -> allowed (name is per-kind)
         let yaml = r#"
 upstreams:
   - { name: a, kind: openai }
   - { name: a, kind: anthropic }
 "#;
+        assert!(Config::from_yaml(yaml).is_ok());
+    }
+
+    #[test]
+    fn fail_fast_on_missing_names_in_multi_kind() {
+        // 2 upstreams of same kind, both missing name -> error
+        let yaml = r#"
+upstreams:
+  - { kind: openai }
+  - { kind: openai }
+"#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid(_)));
-        assert!(err.to_string().contains("duplicate"));
+        assert!(err.to_string().contains("missing name"));
+    }
+
+    #[test]
+    fn fail_fast_three_missing_names() {
+        // 3 upstreams of same kind, all missing name -> error
+        let yaml = r#"
+upstreams:
+  - { kind: openai }
+  - { kind: openai }
+  - { kind: openai }
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("missing name"));
+    }
+
+    #[test]
+    fn multi_kind_one_named_one_unnamed_ok() {
+        // 2 upstreams of same kind, one has name -> OK
+        let yaml = r#"
+upstreams:
+  - { name: alice, kind: openai }
+  - { kind: openai }
+"#;
+        assert!(Config::from_yaml(yaml).is_ok());
+    }
+
+    #[test]
+    fn provider_ids_single_kind() {
+        let cfg = Config::from_yaml(
+            "upstreams:\n  - { kind: opencode-go }\n",
+        )
+        .unwrap();
+        let ids = cfg.provider_ids();
+        assert_eq!(ids, vec!["opencode-go"]);
+    }
+
+    #[test]
+    fn provider_ids_multi_kind() {
+        let cfg = Config::from_yaml(
+            r#"
+upstreams:
+  - { name: alice, kind: opencode-go }
+  - { name: bob, kind: opencode-go }
+"#,
+        )
+        .unwrap();
+        let ids = cfg.provider_ids();
+        assert_eq!(ids, vec!["opencode-go=alice", "opencode-go=bob"]);
+    }
+
+    #[test]
+    fn provider_ids_mixed_kinds() {
+        let cfg = Config::from_yaml(
+            r#"
+upstreams:
+  - { kind: opencode-go }
+  - { name: alice, kind: openai }
+  - { name: bob, kind: openai }
+"#,
+        )
+        .unwrap();
+        let ids = cfg.provider_ids();
+        assert_eq!(ids, vec!["opencode-go", "openai=alice", "openai=bob"]);
     }
 
     #[test]

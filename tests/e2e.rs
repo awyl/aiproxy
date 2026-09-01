@@ -90,13 +90,13 @@ async fn full_stack_health_models_chat_auth() {
     let (status, body) = get(&base, "/v1/models", Some("e2e-tok")).await;
     assert_eq!(status, StatusCode::OK);
     let v: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["data"][0]["id"], "mock/gpt-4o");
+    assert_eq!(v["data"][0]["id"], "openai/gpt-4o");
 
     let (status, body) = post_json(
         &base,
         "/v1/chat/completions",
         Some("e2e-tok"),
-        json!({"model": "mock/gpt-4o", "messages": [{"role": "user", "content": "hi"}]}),
+        json!({"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -107,7 +107,7 @@ async fn full_stack_health_models_chat_auth() {
         &base,
         "/v1/chat/completions",
         None,
-        json!({"model": "mock/gpt-4o", "messages": []}),
+        json!({"model": "openai/gpt-4o", "messages": []}),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

@@ -15,13 +15,13 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(cfg: &UpstreamConfig) -> Self {
-        Self::new_with_key(cfg, cfg.api_key())
+    pub fn new(cfg: &UpstreamConfig, id: &str) -> Self {
+        Self::new_with_key(cfg, id, cfg.api_key())
     }
 
-    pub fn new_with_key(cfg: &UpstreamConfig, api_key: Option<String>) -> Self {
+    pub fn new_with_key(cfg: &UpstreamConfig, id: &str, api_key: Option<String>) -> Self {
         Self {
-            id: cfg.name.clone(),
+            id: id.to_string(),
             base_url: cfg.effective_base_url(),
             api_key,
             client: crate::providers::default_http_client(),
@@ -154,7 +154,7 @@ mod tests {
             discover: false,
             token_env: None,
             surface: None,
-            name: "mock".into(),
+            name: Some("mock".into()),
             kind: crate::config::UpstreamKind::Openai,
             base_url: Some(base.into()),
             api_key_env: None,
@@ -162,7 +162,7 @@ mod tests {
             endpoint_by_model: Default::default(),
             surface_map_url: None,
         };
-        OpenAiProvider::new_with_key(&cfg, key.map(String::from))
+        OpenAiProvider::new_with_key(&cfg, "mock", key.map(String::from))
     }
 
     #[tokio::test]

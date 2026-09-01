@@ -94,11 +94,11 @@ pub struct OpencodeGoProvider {
 }
 
 impl OpencodeGoProvider {
-    pub fn new(cfg: &UpstreamConfig) -> Self {
-        Self::new_with_key(cfg, cfg.api_key())
+    pub fn new(cfg: &UpstreamConfig, id: &str) -> Self {
+        Self::new_with_key(cfg, id, cfg.api_key())
     }
 
-    pub fn new_with_key(cfg: &UpstreamConfig, api_key: Option<String>) -> Self {
+    pub fn new_with_key(cfg: &UpstreamConfig, id: &str, api_key: Option<String>) -> Self {
         let overrides = cfg
             .endpoint_by_model
             .iter()
@@ -112,7 +112,7 @@ impl OpencodeGoProvider {
             })
             .collect();
         Self {
-            id: cfg.name.clone(),
+            id: id.to_string(),
             base_url: cfg.effective_base_url(),
             api_key,
             overrides,
@@ -417,7 +417,7 @@ mod tests {
             discover: false,
             token_env: None,
             surface: None,
-            name: "opencode-go".into(),
+            name: Some("opencode-go".into()),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some(base.into()),
             api_key_env: None,
@@ -428,7 +428,7 @@ mod tests {
                 .collect(),
             surface_map_url: docs_url.map(String::from),
         };
-        OpencodeGoProvider::new_with_key(&cfg, Some("go-sk-test".into()))
+        OpencodeGoProvider::new_with_key(&cfg, "opencode-go", Some("go-sk-test".into()))
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
             discover: false,
             token_env: None,
             surface: None,
-            name: "opencode-go".into(),
+            name: Some("opencode-go".into()),
             kind: crate::config::UpstreamKind::OpencodeGo,
             base_url: Some("http://x/v1".into()),
             api_key_env: None,
@@ -503,7 +503,7 @@ mod tests {
                 .collect(),
             surface_map_url: None,
         };
-        let p = OpencodeGoProvider::new_with_key(&cfg, None);
+        let p = OpencodeGoProvider::new_with_key(&cfg, "opencode-go", None);
         assert_eq!(p.surface_of("grok-4.6"), ModelSurface::ChatCompletions); // override wins
         assert_eq!(p.surface_of("minimax-m3"), ModelSurface::Messages); // builtin still works
         assert_eq!(p.surface_of("unknown-xyz"), ModelSurface::ChatCompletions); // default

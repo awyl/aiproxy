@@ -82,6 +82,15 @@ function loadCatalog(): Map<string, Record<string, unknown>> {
   return new Map();
 }
 
+/**
+ * Strip subscription suffix from provider ID for catalog lookup.
+ * "opencode-go=alice" → "opencode-go", "opencode-go" → "opencode-go"
+ */
+function stripSubSuffix(id: string): string {
+  const eq = id.indexOf('=');
+  return eq >= 0 ? id.slice(0, eq) : id;
+}
+
 /** Build a model entry from catalog metadata. */
 function fromCatalog(
   id: string,
@@ -135,7 +144,12 @@ export default async function (pi: ExtensionAPI) {
     authHeader: true,
     api: "openai-completions",
     models: models.map((m) => {
-      const meta = catalog.get(m.id);
+      // Strip subscription suffix (e.g. "opencode-go=alice" → "opencode-go")
+      // then look up in catalog by provider/modelId
+      const provider = stripSubSuffix(m.id.split('/')[0] ?? '');
+      const modelId = m.id.split('/').slice(1).join('/');
+      const catalogKey = `${provider}/${modelId}`;
+      const meta = catalog.get(catalogKey);
       return meta ? fromCatalog(m.id, meta, m.surface) : {
         id: m.id,
         name: m.display_name ?? m.id,

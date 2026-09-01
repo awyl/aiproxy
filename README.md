@@ -37,13 +37,19 @@ export OPENCODE_GO_API_KEY=your-go-key
 | `openrouter` | OpenAI chat completions | `openrouter.ai/api/v1` | Public, keyless | 396+ models aggregated |
 | `nvidia` | OpenAI chat completions | `integrate.api.nvidia.com/v1` | Public, keyless | NIM cloud; self-hosted via `base_url` |
 
-Agent-facing model ids are always `<upstream-name>/<model-id>`, e.g. `opencode-go/mimo-v2.5`.
+Agent-facing model ids are always `<provider-id>/<model-id>`, e.g. `opencode-go/mimo-v2.5`.
+
+Provider IDs follow a scheme:
+- **1 upstream of kind** → ID = kind name (e.g. `opencode-go`)
+- **2+ upstreams of kind** → ID = kind=name (e.g. `opencode-go=alice`)
+
+`name` is optional when only 1 upstream of a kind; required for multiples (must be unique within the kind).
 
 ## Docker
 
 ```bash
 # Build
-DOCKER_USER=yourhubuser ./docker-push.sh 0.2.2
+DOCKER_USER=yourhubuser ./docker-push.sh 0.2.3
 
 # Run
 docker run -d \
@@ -52,7 +58,7 @@ docker run -d \
   -e AIPROXY_TOKEN=secret \
   -e OPENCODE_GO_API_KEY=... \
   -p 8080:8080 \
-  yourhubuser/aiproxy:0.2.2
+  yourhubuser/aiproxy:0.2.3
 ```
 
 The image includes Node.js (`npx`), Python/uv (`uvx`) for MCP servers, and ONNX Runtime (via fastembed) for local embeddings. Embedding models auto-download to `/models` on first use.
@@ -67,13 +73,11 @@ token_env: AIPROXY_TOKEN             # bearer auth; omit both token_env/token = 
 model_refresh_secs: 0                # 0 = fetch once at startup; >0 = periodic refresh
 
 upstreams:
-  - name: opencode-go
-    kind: opencode-go
+  - kind: opencode-go              # name optional — provider ID = "opencode-go"
     api_key_env: OPENCODE_GO_API_KEY
     discover: true                   # public catalog, safe to enable
 
-  - name: minimax
-    kind: minimax
+  - kind: minimax                   # provider ID = "minimax"
     api_key_env: MINIMAX_API_KEY
     models: [MiniMax-M3]             # static list, no probing
 
