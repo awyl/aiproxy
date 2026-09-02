@@ -32,7 +32,8 @@ its connection settings from its **own per-machine config file**
 ```json
 {
   "baseUrl": "http://127.0.0.1:8080/v1",
-  "apiKey": "$AIPROXY_TOKEN"
+  "apiKey": "$AIPROXY_TOKEN",
+  "mcpServers": "searxng,ctx7,grep"
 }
 ```
 
@@ -40,10 +41,25 @@ its connection settings from its **own per-machine config file**
   put the proxy's real host here when it runs on another machine)
 - `apiKey` → bearer token; `$ENV` interpolation or a literal. Secret keeps
   living in env.
+- `mcpServers` (optional) → comma-separated MCP multiplexer selection
+  (`X-MCP-Servers` header value; per-server tokens in `name:token` form pass
+  through). Omit to stay model-provider only.
 
 `aiproxy.yaml` remains the **proxy server's own config** — the extension never
 touches it. With no `aiproxy.json` the extension falls back to localhost + no
 key.
+
+## MCP tools
+
+With `mcpServers` set, the extension connects to the proxy's `/mcp`
+multiplexer and registers its tools as **native pi tools** (`searxng__search`,
+`ctx7__docs`, ...) — no `mcp.json` needed. It does not touch the
+pi-mcp-extension; if you also configure the multiplexer there you'll see the
+tools twice (both work; pick one home).
+
+The MCP SDK (`@modelcontextprotocol/sdk`) is a runtime dependency — installed
+automatically by `pi install` (git package), but for loose-copy installs run
+`npm i @modelcontextprotocol/sdk` next to the extension files.
 
 Default thinking level is `high` for every model; override per model with
 `models.json` `modelOverrides` (e.g. `{"providers":{"aiproxy": {"modelOverrides":

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **pi package install** — the repo is now a pi package (`pi install git:github.com/awyl/aiproxy@v0.2.6`); no more manual copying of the extension file.
+- **Native MCP tools in the extension** — new `mcpServers` key in `aiproxy.json` (e.g. `"searxng,ctx7,grep"`) connects the extension to the proxy's `/mcp` multiplexer and registers its tools as native pi tools; no mcp.json needed. Split into `index.ts` (glue) + `provider.ts` + `mcp.ts`; 14 vitest tests.
 
 ### Changed
 - **aiproxy extension** — own config file: `~/.pi/agent/aiproxy.json` (or project `.pi/aiproxy.json`) with `baseUrl`/`apiKey`. No longer reads `models.json`; `{ "providers": {} }` there is now enough. Falls back to `http://127.0.0.1:8080/v1` + no key when the file is absent.
