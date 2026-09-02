@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **pi package install** — the repo is now a pi package (`pi install git:github.com/awyl/aiproxy@v0.2.6`); no more manual copying of the extension file.
+
 ### Changed
 - **aiproxy extension** — own config file: `~/.pi/agent/aiproxy.json` (or project `.pi/aiproxy.json`) with `baseUrl`/`apiKey`. No longer reads `models.json`; `{ "providers": {} }` there is now enough. Falls back to `http://127.0.0.1:8080/v1` + no key when the file is absent.
 

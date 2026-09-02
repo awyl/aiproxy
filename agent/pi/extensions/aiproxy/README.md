@@ -51,21 +51,25 @@ Default thinking level is `high` for every model; override per model with
 
 ## Install
 
-Persistent (adds to project settings, `.pi/settings.json`):
+Install as a pi package from git (recommended):
 
 ```bash
-pi install ./agent/pi/extensions/aiproxy -l
-pi list          # should show it under project packages
+pi install git:github.com/awyl/aiproxy@v0.2.6
 ```
 
-Ephemeral (this session only):
+Clones to `~/.pi/agent/git/github.com/awyl/aiproxy` and loads the extension.
+Move to a newer release with `pi install git:github.com/awyl/aiproxy@vX.Y.Z`;
+`pi update --extensions` reconciles the clone to the pinned ref.
+
+Or try it without installing:
 
 ```bash
-pi -e ./agent/pi/extensions/aiproxy
+pi -e git:github.com/awyl/aiproxy
 ```
 
-Or add `./agent/pi/extensions/aiproxy` to your settings' `packages` list
-manually. Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
+Or for a local checkout, add `./agent/pi/extensions/aiproxy` to your settings'
+`packages` list (or `pi install ./agent/pi/extensions/aiproxy -l`).
+Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
 
 ## Notes
 
