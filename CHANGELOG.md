@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - **MCP per-server auth** — `token`/`token_env` on MCP servers now works with both individual `/mcp/<name>` endpoints and the new `/mcp` multiplexer.
+- **aiproxy extension** sets `AIPROXY_TOKEN` env var from provider apiKey, so MCP and other tools can use it without repeating config.
 
 ## [0.2.4] - 2025-09-02
 

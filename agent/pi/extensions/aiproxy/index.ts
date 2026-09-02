@@ -117,6 +117,11 @@ function fromCatalog(
 export default async function (pi: ExtensionAPI) {
   const { base, apiKey, token } = loadConfig();
 
+  // Expose token as env so MCP and other tools can use it without repeating
+  if (token) {
+    process.env.AIPROXY_TOKEN = token;
+  }
+
   // Discover models from the proxy
   let models: ProxyModel[] = [];
   try {
