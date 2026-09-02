@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.2.5] - 2025-09-02
 
+### Fixed
+- **aiproxy extension** — two wire-routing bugs: (1) proxy-advertised surface is now fully authoritative over pi's catalog `api` (chat→openai-completions added to the map), so models whose native provider speaks a different wire than the proxy (e.g. `minimax/MiniMax-M3`: pi says anthropic-messages, proxy serves OpenAI chat) route correctly. (2) anthropic-messages models now get a per-model `baseUrl` with the trailing `/v1` stripped — pi's Anthropic client appends `/v1/messages` itself, so the provider base produced `/v1/v1/messages` → 404 (no body) on every messages-surface model.
+
 ### Added
 - **MCP multiplexer** — single `/mcp` endpoint aggregates multiple MCP servers. Use `X-MCP-Servers` header to select servers and pass per-server tokens (e.g. `X-MCP-Servers: searxng:tok,ctx7`). Auth check on every `tools/list` and `tools/call` call, not just connection. Tools namespaced as `<server>__<tool>`.
 

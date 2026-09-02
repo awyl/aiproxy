@@ -52,11 +52,21 @@ function loadConfig(): { base: string; apiKey: string; token?: string } {
 
 // ── model catalog ───────────────────────────────────────────────────────────
 
-/** Map proxy surface name → pi api id. */
+/** Map proxy surface name → pi api id. The proxy's surface is authoritative. */
 const SURFACE_API: Record<string, string> = {
+  chat: "openai-completions",
   messages: "anthropic-messages",
   responses: "openai-responses",
 };
+
+/**
+ * pi-ai's anthropic client appends `/v1/messages` to the base URL (the Anthropic
+ * SDK convention), while aiproxy mounts the messages route at `/v1/messages`.
+ * The provider baseUrl ends in `/v1`, so messages-wire models need the root.
+ */
+function wireBaseUrl(api: string, base: string): string | undefined {
+  return api === "anthropic-messages" ? base.replace(/\/v1\/?$/, "") : undefined;
+}
 
 function loadCatalog(): Map<string, Record<string, unknown>> {
   const candidates = [
@@ -95,12 +105,15 @@ function stripSubSuffix(id: string): string {
 function fromCatalog(
   id: string,
   meta: Record<string, unknown>,
-  fallbackSurface?: string,
+  surface?: string,
+  base = "http://127.0.0.1:8080/v1",
 ) {
+  const api = SURFACE_API[surface ?? ""] ?? (meta.api as string) ?? "openai-completions";
   return {
     id,
     name: (meta.name as string) ?? id,
-    api: (meta.api as string) ?? SURFACE_API[fallbackSurface ?? ""] ?? "openai-completions",
+    api,
+    ...(wireBaseUrl(api, base) ? { baseUrl: wireBaseUrl(api, base) } : {}),
     reasoning: (meta.reasoning as boolean) ?? false,
     thinkingLevelMap: (meta.thinkingLevelMap as Record<string, string | null>) ?? undefined,
     input: (meta.input as ("text" | "image")[]) ?? ["text"],
@@ -155,10 +168,13 @@ export default async function (pi: ExtensionAPI) {
       const modelId = m.id.split('/').slice(1).join('/');
       const catalogKey = `${provider}/${modelId}`;
       const meta = catalog.get(catalogKey);
-      return meta ? fromCatalog(m.id, meta, m.surface) : {
+      if (meta) return fromCatalog(m.id, meta, m.surface, base);
+      const api = SURFACE_API[m.surface ?? ""] ?? "openai-completions";
+      return {
         id: m.id,
         name: m.display_name ?? m.id,
-        api: SURFACE_API[m.surface ?? ""] ?? "openai-completions",
+        api,
+        ...(wireBaseUrl(api, base) ? { baseUrl: wireBaseUrl(api, base) } : {}),
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
