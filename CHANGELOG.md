@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - **aiproxy extension** — own config file: `~/.pi/agent/aiproxy.json` (or project `.pi/aiproxy.json`) with `baseUrl`/`apiKey`. No longer reads `models.json`; `{ "providers": {} }` there is now enough. Falls back to `http://127.0.0.1:8080/v1` + no key when the file is absent.
+- **aiproxy extension** — config precedence: global file is the default; project `.pi/aiproxy.json` overrides individual fields (per-field merge, like mcp.json).
 
 ## [0.2.5] - 2025-09-02
 

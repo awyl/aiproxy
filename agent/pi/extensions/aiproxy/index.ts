@@ -16,36 +16,44 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerProxyProvider } from "./provider.ts";
 import { registerMcpTools } from "./mcp.ts";
 
-function loadConfig(): {
+type RawConfig = {
+  baseUrl?: string;
+  apiKey?: string;
+  mcpServers?: string | string[];
+};
+
+function readConfigFile(path: string): RawConfig | undefined {
+  try {
+    if (!existsSync(path)) return undefined;
+    const raw = readFileSync(path, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+    return JSON.parse(raw) as RawConfig;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Global ~/.pi/agent/aiproxy.json is the default; project .pi/aiproxy.json
+ * overrides individual fields (per-field merge, like pi's mcp.json).
+ */
+export function loadConfig(cwd = process.cwd()): {
   base: string;
   apiKey: string;
   token?: string;
   mcpServers?: string | string[];
 } {
-  const candidates = [
-    join(homedir(), ".pi/agent/aiproxy.json"),
-    join(process.cwd(), ".pi/aiproxy.json"),
-  ];
-  for (const path of candidates) {
-    try {
-      if (!existsSync(path)) continue;
-      const raw = readFileSync(path, "utf8")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
-      const parsed = JSON.parse(raw) as {
-        baseUrl?: string;
-        apiKey?: string;
-        mcpServers?: string | string[];
-      };
-      const base = parsed.baseUrl?.trim() || "http://127.0.0.1:8080/v1";
-      const apiKey = parsed.apiKey?.trim() || "";
-      const token = apiKey.startsWith("$")
-        ? process.env[apiKey.slice(1)]?.trim()
-        : apiKey || undefined;
-      return { base, apiKey, token, mcpServers: parsed.mcpServers };
-    } catch { /* fall through */ }
-  }
-  return { base: "http://127.0.0.1:8080/v1", apiKey: "" };
+  const global = readConfigFile(join(homedir(), ".pi/agent/aiproxy.json")) ?? {};
+  const project = readConfigFile(join(cwd, ".pi/aiproxy.json")) ?? {};
+  const merged = { ...global, ...project };
+
+  const base = merged.baseUrl?.trim() || "http://127.0.0.1:8080/v1";
+  const apiKey = merged.apiKey?.trim() || "";
+  const token = apiKey.startsWith("$")
+    ? process.env[apiKey.slice(1)]?.trim()
+    : apiKey || undefined;
+  return { base, apiKey, token, mcpServers: merged.mcpServers };
 }
 
 export default async function (pi: ExtensionAPI) {

@@ -45,6 +45,12 @@ its connection settings from its **own per-machine config file**
   (`X-MCP-Servers` header value; per-server tokens in `name:token` form pass
   through). Omit to stay model-provider only.
 
+### Precedence
+
+The global `~/.pi/agent/aiproxy.json` is the **default**; a project-level
+`.pi/aiproxy.json` **overrides individual fields** (per-field merge, like
+pi's mcp.json) — e.g. set just `apiKey` per project and inherit `baseUrl`.
+
 `aiproxy.yaml` remains the **proxy server's own config** — the extension never
 touches it. With no `aiproxy.json` the extension falls back to localhost + no
 key.
