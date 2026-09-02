@@ -5,6 +5,9 @@
   "keywords": ["pi-package"],
   "type": "module",
   "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
   "pi": {
     "extensions": ["agent/pi/extensions/aiproxy"]
   }
