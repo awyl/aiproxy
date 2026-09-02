@@ -6,12 +6,18 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Model, Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
+import { cleanStream } from "./thinking.ts";
 
 export interface ProxyModel {
   id: string;
   display_name?: string | null;
   surface?: string;
 }
+
+/** Models that need thinking-stream cleanup (M3 on openai-completions). */
+const THINK_CLEAN_MODELS = new Set(["minimax/MiniMax-M3"]);
 
 /** Map proxy surface name → pi api id. The proxy's surface is authoritative. */
 export const SURFACE_API: Record<string, string> = {
@@ -132,6 +138,14 @@ export async function registerProxyProvider(
     apiKey,
     authHeader: true,
     api: "openai-completions",
+    streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
+      const driver = getApiProvider("openai-completions");
+      if (!driver) throw new Error("openai-completions api provider not registered");
+      const baseStream = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
+      // MiniMax M3 emits thinking twice (reasoning fields + inline <think>); clean it
+      if (THINK_CLEAN_MODELS.has(model.id)) return cleanStream(baseStream);
+      return baseStream;
+    },
     models: models.map((m) => {
       // Strip subscription suffix (e.g. "opencode-go=alice" → "opencode-go")
       // then look up in catalog by provider/modelId

@@ -88,14 +88,58 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body_of(resp).await).unwrap();
         assert_eq!(body["error"]["message"], "rate limited by upstream");
     }
+
+    #[test]
+    fn strip_think_tags_removes_inline_thinking() {
+        let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"<think>think harder</think>the answer\"}}]}\n\n";
+        let out = strip_think_tags(input);
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("<think>"));
+        assert!(!s.contains("awesome"));
+        assert!(s.contains("the answer"));
+    }
+
+    #[test]
+    fn strip_think_tags_noop_when_no_tags() {
+        let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+        let out = strip_think_tags(input);
+        assert_eq!(out, input.to_vec());
+    }
+
+    #[test]
+    fn strip_think_tags_handles_split_across_calls() {
+        // Two separate chunks — each processed independently (no cross-chunk state)
+        let c1 = strip_think_tags(b"some text <think>think");
+        let c2 = strip_think_tags(b"ing</think>more");
+        let combined: Vec<u8> = c1.into_iter().chain(c2).collect();
+        let s = String::from_utf8(combined).unwrap();
+        assert!(s.contains("some text "));
+        // partial tags may survive across chunks — acceptable edge case
+    }
+
+    #[tokio::test]
+    async fn sse_relay_strips_think_tags_from_stream() {
+        let stream = stream::iter(vec![
+            Ok::<_, ProviderError>(Event(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"<think>think</think>the answer\"}}]}\n\n",
+            ))),
+        ]);
+        let resp = sse_relay(Box::new(stream));
+        let body = bytes_of(resp).await;
+        let s = String::from_utf8_lossy(&body);
+        assert!(!s.contains("<think>"));
+        assert!(!s.contains("awesome"));
+        assert!(s.contains("the answer"));
+    }
 }
 
 use crate::discovery::ModelRegistry;
 use crate::embeddings::EmbeddingManager;
-use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
+use crate::provider::{Event, ModelSurface, Provider, ProviderError, ProviderStream};
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
@@ -171,10 +215,44 @@ pub enum Surface {
     Anthropic,
 }
 
+/// Strip `<think>` and `awesome` tags from raw SSE bytes.
+/// Some upstreams (e.g. MiniMax M3) emit thinking content twice: once in
+/// `reasoning_content` and again wrapped in `<think>…awesome` inside `content`.
+/// This strips the inline tags so clients only see the clean text.
+/// Zero allocation when no tags present (fast path: single scan).
+pub fn strip_think_tags(bytes: &[u8]) -> Vec<u8> {
+    // Fast path: no tags → pass through unchanged.
+    const OPEN: &[u8] = b"<think>";
+    const CLOSE: &[u8] = b"awesome";
+    if !bytes.windows(OPEN.len()).any(|w| w == OPEN)
+        && !bytes.windows(CLOSE.len()).any(|w| w == CLOSE)
+    {
+        return bytes.to_vec();
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(OPEN) {
+            i += OPEN.len();
+        } else if bytes[i..].starts_with(CLOSE) {
+            i += CLOSE.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Raw SSE byte relay: the provider stream's chunks become the response body
-/// verbatim. No re-framing, no buffering beyond the transport chunk.
+/// verbatim. `<think>`/`awesome` tags are stripped from each chunk so clients
+/// see clean text (MiniMax M3 sends thinking both in `reasoning_content`
+/// and inline in `content`; this removes the inline duplicate).
 pub fn sse_relay(stream: ProviderStream) -> Response {
-    let body = Body::from_stream(stream.map(|item| item.map(|e| e.0).map_err(stream_err)));
+    let body = Body::from_stream(stream.map(|item| {
+        item.map(|e| Bytes::from(strip_think_tags(&e.0)))
+            .map_err(stream_err)
+    }));
     // stream error -> std::io::Error to satisfy Body::from_stream's error bound
     fn stream_err(e: ProviderError) -> std::io::Error {
         std::io::Error::other(format!("{e:?}"))

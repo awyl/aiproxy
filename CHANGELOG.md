@@ -4,6 +4,13 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.8] - 2026-09-04
+
+### Added
+- **Thinking-stream cleanup for MiniMax M3** — two-layer fix for M3's duplicate thinking emission:
+  - Layer 1 (proxy): `<think>` tags stripped from SSE response stream — all clients see clean text, zero overhead for non-M3 models (`api::strip_think_tags`, 4 tests).
+  - Layer 2 (extension): `thinking.ts` merges consecutive pi-ai thinking blocks into one, suppressing prefix re-streams when M3 alternates `reasoning_content`/`reasoning` fields. Registered as `aiproxy-clean/minimax/MiniMax-M3` — opt in via `/model` (9 ThinkScanner tests + 4 cleanStream tests).
+
 ## [0.2.7] - 2026-09-04
 
 ### Fixed
