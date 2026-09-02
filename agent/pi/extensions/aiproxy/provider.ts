@@ -105,11 +105,6 @@ export async function registerProxyProvider(
 ): Promise<void> {
   const { base, apiKey, token } = cfg;
 
-  // Expose token as env so MCP and other tools can use it without repeating
-  if (token) {
-    process.env.AIPROXY_TOKEN = token;
-  }
-
   const fetchImpl = opts.fetchImpl ?? fetch;
   const catalog = opts.catalog ?? loadCatalog();
   if (catalog.size > 0) {

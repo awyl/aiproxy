@@ -50,6 +50,12 @@ function loadConfig(): {
 
 export default async function (pi: ExtensionAPI) {
   const cfg = loadConfig();
+
+  // Expose token as env so MCP and other tools can use it without repeating
+  if (cfg.token) {
+    process.env.AIPROXY_TOKEN = cfg.token;
+  }
+
   await registerProxyProvider(pi, cfg);
   await registerMcpTools(pi, cfg);
 }

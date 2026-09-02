@@ -73,15 +73,4 @@ describe("registerProxyProvider", () => {
     const cfg = pi.registerProvider.mock.calls[0][1];
     expect(cfg.models).toHaveLength(0);
   });
-
-  it("exposes the token as AIPROXY_TOKEN env for MCP and tools", async () => {
-    const before = process.env.AIPROXY_TOKEN;
-    try {
-      await registerWith(modelsResponse);
-      expect(process.env.AIPROXY_TOKEN).toBe("k");
-    } finally {
-      if (before === undefined) delete process.env.AIPROXY_TOKEN;
-      else process.env.AIPROXY_TOKEN = before;
-    }
-  });
 });
