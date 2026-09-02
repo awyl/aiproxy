@@ -25,29 +25,25 @@ npm install          # pull pi-ai + pi-coding-agent for types (edit-time only)
 ```
 
 No extension env vars, no dependency on the proxy's yaml. The extension reads
-its connection settings from **pi's own per-machine provider config**
-(`models.json` — user-level `~/.pi/agent/models.json`, or project
-`.pi/models.json`):
+its connection settings from its **own per-machine config file**
+(`aiproxy.json` — user-level `~/.pi/agent/aiproxy.json`, or project
+`.pi/aiproxy.json`):
 
 ```json
 {
-  "providers": {
-    "aiproxy": {
-      "baseUrl": "http://127.0.0.1:8080/v1",
-      "apiKey": "$AIPROXY_TOKEN"
-    }
-  }
+  "baseUrl": "http://127.0.0.1:8080/v1",
+  "apiKey": "$AIPROXY_TOKEN"
 }
 ```
 
 - `baseUrl` → where the proxy listens (default `http://127.0.0.1:8080/v1`;
   put the proxy's real host here when it runs on another machine)
-- `apiKey` → bearer token; `$ENV` interpolation, a command, or a literal —
-  the same syntax pi uses for every provider. Secret keeps living in env.
+- `apiKey` → bearer token; `$ENV` interpolation or a literal. Secret keeps
+  living in env.
 
 `aiproxy.yaml` remains the **proxy server's own config** — the extension never
-touches it. With no `providers.aiproxy` entry the extension falls back to
-localhost + no key.
+touches it. With no `aiproxy.json` the extension falls back to localhost + no
+key.
 
 Default thinking level is `high` for every model; override per model with
 `models.json` `modelOverrides` (e.g. `{"providers":{"aiproxy": {"modelOverrides":

@@ -2,9 +2,9 @@
  * aiproxy provider extension for pi.
  *
  * Fronts an aiproxy gateway: one provider entry, models discovered from the
- * gateway at startup. Configuration lives in PI's own per-machine config
- * (`models.json`, user-level `~/.pi/agent/models.json` or project `.pi/`),
- * not in the proxy's yaml — the proxy and pi can run on different machines.
+ * gateway at startup. Configuration lives in pi's own per-machine config file
+ * (`~/.pi/agent/aiproxy.json` or project `.pi/aiproxy.json`), not in the
+ * proxy's yaml — the proxy and pi can run on different machines.
  *
  * Model metadata (contextWindow, maxTokens, reasoning, cost, etc.) is resolved
  * from pi's live model store (models-store.json) so context sizes match what pi
@@ -25,26 +25,22 @@ interface ProxyModel {
 
 function loadConfig(): { base: string; apiKey: string; token?: string } {
   const candidates = [
-    join(homedir(), ".pi/agent/models.json"),
-    join(process.cwd(), ".pi/models.json"),
+    join(homedir(), ".pi/agent/aiproxy.json"),
+    join(process.cwd(), ".pi/aiproxy.json"),
   ];
   for (const path of candidates) {
     try {
+      if (!existsSync(path)) continue;
       const raw = readFileSync(path, "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/.*$/gm, "$1");
-      const parsed = JSON.parse(raw) as {
-        providers?: Record<string, { baseUrl?: string; apiKey?: string }>;
-      };
-      const e = parsed.providers?.["aiproxy"];
-      if (e) {
-        const base = e.baseUrl?.trim() || "http://127.0.0.1:8080/v1";
-        const apiKey = e.apiKey?.trim() || "";
-        const token = apiKey.startsWith("$")
-          ? process.env[apiKey.slice(1)]?.trim()
-          : apiKey || undefined;
-        return { base, apiKey, token };
-      }
+      const parsed = JSON.parse(raw) as { baseUrl?: string; apiKey?: string };
+      const base = parsed.baseUrl?.trim() || "http://127.0.0.1:8080/v1";
+      const apiKey = parsed.apiKey?.trim() || "";
+      const token = apiKey.startsWith("$")
+        ? process.env[apiKey.slice(1)]?.trim()
+        : apiKey || undefined;
+      return { base, apiKey, token };
     } catch { /* fall through */ }
   }
   return { base: "http://127.0.0.1:8080/v1", apiKey: "" };
