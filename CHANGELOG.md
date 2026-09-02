@@ -4,6 +4,11 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.7] - 2026-09-04
+
+### Fixed
+- **Byte-faithful request relay** — chat/messages/responses handlers now relay the client's raw request body byte-for-byte, patching only the top-level `model` id (prefix strip). Previously axum parsed into `serde_json::Value` and re-serialized, alphabetizing object keys and reformatting numbers — breaking upstream passive prompt caching (e.g. MiniMax M3: 95%+ cache hit → 0% via proxy). All upstreams unaffected (same bytes in, same bytes out); the `api::body::replace_model_field` scanner is byte-level and tested independently.
+
 ## [0.2.6] - 2026-09-03
 
 ### Added

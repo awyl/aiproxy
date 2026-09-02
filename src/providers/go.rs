@@ -7,6 +7,7 @@ use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
+use bytes::Bytes;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -187,12 +188,20 @@ impl OpencodeGoProvider {
     async fn relay(
         &self,
         path: &str,
-        req: Value,
+        req: Bytes,
         key_header: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
+        use axum::http::header;
         let url = format!("{}{path}", self.base_url);
-        let mut builder = self.client.post(&url).json(&req);
+        let mut builder = self
+            .client
+            .post(&url)
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            )
+            .body(req);
         if let Some(k) = &self.api_key {
             builder = match key_header {
                 Some(h) => builder.header(h, k),
@@ -273,7 +282,7 @@ impl Provider for OpencodeGoProvider {
 
     async fn chat_completions(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.require_surface(&ctx.model, ModelSurface::ChatCompletions)?;
@@ -282,7 +291,7 @@ impl Provider for OpencodeGoProvider {
 
     async fn messages(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.require_surface(&ctx.model, ModelSurface::Messages)?;
@@ -290,7 +299,11 @@ impl Provider for OpencodeGoProvider {
         let mut builder = self
             .client
             .post(&url)
-            .json(&req)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::HeaderValue::from_static("application/json"),
+            )
+            .body(req)
             .header("anthropic-version", ANTHROPIC_VERSION);
         if let Some(k) = &self.api_key {
             builder = builder.header("x-api-key", k);
@@ -318,7 +331,7 @@ impl Provider for OpencodeGoProvider {
 
     async fn responses(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.require_surface(&ctx.model, ModelSurface::Responses)?;
@@ -342,6 +355,10 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use serde_json::json;
+
+    fn jb(v: serde_json::Value) -> Bytes {
+        Bytes::from(v.to_string())
+    }
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -528,7 +545,7 @@ mod tests {
 
         let mut s1 = p
             .chat_completions(
-                json!({"model": "kimi-k3"}),
+                jb(json!({"model": "kimi-k3"})),
                 &RequestContext {
                     model: "kimi-k3".into(),
                 },
@@ -550,7 +567,7 @@ mod tests {
 
         let mut s2 = p
             .messages(
-                json!({"model": "minimax-m3"}),
+                jb(json!({"model": "minimax-m3"})),
                 &RequestContext {
                     model: "minimax-m3".into(),
                 },
@@ -570,7 +587,7 @@ mod tests {
 
         let mut s3 = p
             .responses(
-                json!({"model": "grok-4.6"}),
+                jb(json!({"model": "grok-4.6"})),
                 &RequestContext {
                     model: "grok-4.6".into(),
                 },
@@ -591,7 +608,7 @@ mod tests {
         let p = provider(&base, None, &[]);
         let err = p
             .chat_completions(
-                json!({"model": "grok-4.6"}),
+                jb(json!({"model": "grok-4.6"})),
                 &RequestContext {
                     model: "grok-4.6".into(),
                 },
@@ -609,7 +626,7 @@ mod tests {
         );
         let err2 = p
             .messages(
-                json!({"model": "kimi-k3"}),
+                jb(json!({"model": "kimi-k3"})),
                 &RequestContext {
                     model: "kimi-k3".into(),
                 },

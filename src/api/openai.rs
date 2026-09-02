@@ -5,6 +5,8 @@
 use crate::api::{AppState, Surface, check_surface, openai_error, relay_or_error};
 use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
+use crate::api::body::replace_model_field;
+use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -70,17 +72,24 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
 /// between the chat and responses handlers).
 async fn route_one(
     state: &AppState,
-    req: Value,
+    raw: Bytes,
     token: Option<String>,
     required: ModelSurface,
     surface: Surface,
     call: impl FnOnce(
         Arc<dyn Provider>,
-        Value,
+        Bytes,
         String,
     )
         -> Pin<Box<dyn Future<Output = Result<ProviderStream, ProviderError>> + Send>>,
 ) -> Result<ProviderStream, axum::response::Response> {
+    let Ok(req) = serde_json::from_slice::<Value>(&raw) else {
+        return Err(openai_error(
+            StatusCode::BAD_REQUEST,
+            "request body is not valid JSON",
+            "invalid_request_error",
+        ));
+    };
     let Some(model) = req.get("model").and_then(Value::as_str) else {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
@@ -113,9 +122,12 @@ async fn route_one(
     }
     let provider = state.registry.provider(&pid).unwrap();
     check_surface(provider.as_ref(), &mid, required, surface)?;
-    let mut stripped = req.clone();
-    stripped["model"] = json!(mid);
-    call(provider, stripped, mid).await.map_err(|e| match e {
+    // Byte-faithful relay: patch only the model id in the raw body so the
+    // upstream sees the client's exact serialization (key order, spacing,
+    // number formatting) — some upstreams key request caching on it.
+    let stripped = replace_model_field(&raw, &mid)
+        .unwrap_or_else(|| raw.to_vec());
+    call(provider, Bytes::from(stripped), mid).await.map_err(|e| match e {
         ProviderError::Transport(msg) if msg.contains("surface") => {
             openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
         }
@@ -143,11 +155,11 @@ fn relay_error(e: ProviderError, surface: Surface) -> axum::response::Response {
 async fn chat_completions(
     State(state): State<AppState>,
     Extension(token): Extension<Option<String>>,
-    Json(req): Json<Value>,
+    body: Bytes,
 ) -> axum::response::Response {
     match route_one(
         &state,
-        req,
+        body,
         token,
         ModelSurface::ChatCompletions,
         Surface::Openai,
@@ -165,11 +177,11 @@ async fn chat_completions(
 async fn responses(
     State(state): State<AppState>,
     Extension(token): Extension<Option<String>>,
-    Json(req): Json<Value>,
+    body: Bytes,
 ) -> axum::response::Response {
     match route_one(
         &state,
-        req,
+        body,
         token,
         ModelSurface::Responses,
         Surface::Openai,

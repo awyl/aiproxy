@@ -8,13 +8,13 @@ pub mod openai;
 pub mod test_mock_upstream;
 
 use crate::config::{Config, UpstreamConfig, UpstreamKind};
+use bytes::Bytes;
 use crate::provider::{
     Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::go::OpencodeGoProvider;
 use crate::providers::openai::OpenAiProvider;
-use serde_json::Value;
 use std::sync::Arc;
 
 /// Upstream whose `models:` list is static: serves discovery; streams when a
@@ -66,7 +66,7 @@ impl Provider for StaticProvider {
     }
     async fn chat_completions(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -75,7 +75,7 @@ impl Provider for StaticProvider {
     }
     async fn messages(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -84,7 +84,7 @@ impl Provider for StaticProvider {
     }
     async fn responses(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -132,21 +132,21 @@ impl Provider for NoDiscoveryProvider {
     }
     async fn chat_completions(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.inner.chat_completions(req, ctx).await
     }
     async fn messages(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.inner.messages(req, ctx).await
     }
     async fn responses(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         self.inner.responses(req, ctx).await

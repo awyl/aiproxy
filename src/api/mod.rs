@@ -101,6 +101,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub mod anthropic;
+pub mod body;
 pub mod openai;
 
 /// Gate a route on the model's wire surface. Returns a 400 naming the

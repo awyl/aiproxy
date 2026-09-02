@@ -1,6 +1,6 @@
 {
   "name": "pi-extension-aiproxy",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Pi provider that fronts an aiproxy gateway: one provider, auto-discovered models across all three wire surfaces",
   "type": "module",
   "private": true,

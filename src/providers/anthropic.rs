@@ -5,9 +5,11 @@ use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
+use axum::http::header;
+use bytes::Bytes;
 use futures::StreamExt;
+use serde_json::{json, Value};
 use reqwest::Client;
-use serde_json::{Value, json};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -86,12 +88,16 @@ impl Provider for AnthropicProvider {
 
     async fn messages(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         let resp = self
             .authed(self.client.post(format!("{}/messages", self.base_url)))
-            .json(&req)
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            )
+            .body(req)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(format!("upstream {}: {e}", ctx.model)))?;
@@ -114,7 +120,7 @@ impl Provider for AnthropicProvider {
 
     async fn chat_completions(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -124,7 +130,7 @@ impl Provider for AnthropicProvider {
 
     async fn responses(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -138,6 +144,10 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jb(v: serde_json::Value) -> Bytes {
+        Bytes::from(v.to_string())
+    }
     use crate::provider::RequestContext;
     use crate::providers::test_mock_upstream::{Capture, SharedCapture};
     use axum::Router;
@@ -169,7 +179,7 @@ mod tests {
     async fn relay_messages(
         State(state): State<SharedCapture>,
         headers: HeaderMap,
-        axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+        body: bytes::Bytes,
     ) -> Response {
         let mut map: HashMap<String, String> = HashMap::new();
         for (k, v) in headers.iter() {
@@ -225,7 +235,7 @@ mod tests {
             json!({"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "hi"}]});
         let mut stream = p
             .messages(
-                req,
+                jb(req),
                 &RequestContext {
                     model: "claude-sonnet-4".into(),
                 },
@@ -247,7 +257,7 @@ mod tests {
             headers.get("anthropic-version").map(String::as_str),
             Some("2023-06-01")
         );
-        let body = state.body.lock().unwrap().clone().unwrap();
+        let body: Value = serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4");
     }
 
@@ -258,13 +268,13 @@ mod tests {
         let p = provider(&base);
         assert_eq!(p.surface_of("claude-sonnet-4"), ModelSurface::Messages);
         let err = p
-            .chat_completions(json!({"model": "x"}), &RequestContext { model: "x".into() })
+            .chat_completions(jb(json!({"model": "x"})), &RequestContext { model: "x".into() })
             .await
             .err()
             .expect("expected unsupported-surface error");
         assert!(matches!(err, ProviderError::Transport(_)));
         let err2 = p
-            .responses(json!({"model": "x"}), &RequestContext { model: "x".into() })
+            .responses(jb(json!({"model": "x"})), &RequestContext { model: "x".into() })
             .await
             .err()
             .expect("expected unsupported-surface error");

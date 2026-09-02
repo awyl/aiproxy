@@ -92,24 +92,26 @@ pub trait Provider: Send + Sync + 'static {
     /// Auto-discovery: fetch this upstream's model list.
     async fn list_models(&self) -> Result<Vec<Model>, ProviderError>;
 
-    /// OpenAI chat-completions surface (request JSON passthrough).
+    /// OpenAI chat-completions surface. The raw request body is relayed
+    /// byte-for-byte (only the top-level model id is prefix-stripped) so
+    /// upstream-side request caching sees the client's exact serialization.
     async fn chat_completions(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError>;
 
-    /// Anthropic messages surface (request JSON passthrough).
+    /// Anthropic messages surface (raw byte passthrough, see above).
     async fn messages(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError>;
 
-    /// OpenAI Responses surface (request JSON passthrough).
+    /// OpenAI Responses surface (raw byte passthrough, see above).
     async fn responses(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError>;
 }
@@ -184,21 +186,21 @@ pub mod testutil {
         }
         async fn chat_completions(
             &self,
-            _req: Value,
+            _req: Bytes,
             _ctx: &RequestContext,
         ) -> Result<ProviderStream, ProviderError> {
             Ok(ok_stream())
         }
         async fn messages(
             &self,
-            _req: Value,
+            _req: Bytes,
             _ctx: &RequestContext,
         ) -> Result<ProviderStream, ProviderError> {
             Ok(ok_stream())
         }
         async fn responses(
             &self,
-            _req: Value,
+            _req: Bytes,
             _ctx: &RequestContext,
         ) -> Result<ProviderStream, ProviderError> {
             Ok(ok_stream())
@@ -211,6 +213,10 @@ mod tests {
     use super::*;
     use crate::provider::testutil::MockProvider;
     use futures::StreamExt;
+
+    fn jb(v: serde_json::Value) -> Bytes {
+        Bytes::from(v.to_string())
+    }
 
     #[test]
     fn model_round_trips_through_json() {
@@ -272,14 +278,14 @@ mod tests {
         assert_eq!(models[0].surface, ModelSurface::Messages);
         let ctx = RequestContext { model: "m1".into() };
         let mut stream = p
-            .messages(serde_json::json!({"model": "m1"}), &ctx)
+            .messages(jb(serde_json::json!({"model": "m1"})), &ctx)
             .await
             .unwrap();
         let ev = stream.next().await.unwrap().unwrap();
         assert_eq!(String::from_utf8_lossy(&ev.0), "data: {\"ok\":true}\n\n");
         // responses surface also streams on the mock
         let mut rstream = p
-            .responses(serde_json::json!({"model": "m1"}), &ctx)
+            .responses(jb(serde_json::json!({"model": "m1"})), &ctx)
             .await
             .unwrap();
         let rev = rstream.next().await.unwrap().unwrap();

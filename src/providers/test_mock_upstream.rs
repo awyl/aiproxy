@@ -15,12 +15,17 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 pub struct Capture {
     pub headers: Mutex<HashMap<String, String>>,
-    pub body: Mutex<Option<serde_json::Value>>,
+    pub body: Mutex<Option<bytes::Bytes>>,
 }
 
 pub type SharedCapture = Arc<Capture>;
 
 pub const MODELS_JSON: &str = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model","created":1720000000,"owned_by":"openai"}]}"#;
+
+/// Convert a serde_json::Value to Bytes for test convenience (preserves json! macro usage).
+pub fn jb(v: serde_json::Value) -> bytes::Bytes {
+    bytes::Bytes::from(v.to_string())
+}
 
 fn capture_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
@@ -41,7 +46,7 @@ fn sse(body: &'static [u8]) -> Response {
 async fn relay_chat(
     State(state): State<SharedCapture>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    body: axum::body::Bytes,
 ) -> Response {
     *state.headers.lock().unwrap() = capture_headers(&headers);
     *state.body.lock().unwrap() = Some(body);

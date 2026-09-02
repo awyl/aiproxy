@@ -2,9 +2,11 @@ use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
+use axum::body::Bytes;
+use axum::http::header;
+use serde_json::{json, Value};
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -80,7 +82,7 @@ impl Provider for OpenAiProvider {
 
     async fn chat_completions(
         &self,
-        req: Value,
+        req: Bytes,
         ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         let resp = self
@@ -88,7 +90,8 @@ impl Provider for OpenAiProvider {
                 self.client
                     .post(format!("{}/chat/completions", self.base_url)),
             )
-            .json(&req)
+            .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+            .body(req)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(format!("upstream {}: {e}", ctx.model)))?;
@@ -112,7 +115,7 @@ impl Provider for OpenAiProvider {
 
     async fn messages(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -122,7 +125,7 @@ impl Provider for OpenAiProvider {
 
     async fn responses(
         &self,
-        _req: Value,
+        _req: Bytes,
         _ctx: &RequestContext,
     ) -> Result<ProviderStream, ProviderError> {
         Err(ProviderError::Transport(
@@ -135,7 +138,7 @@ impl Provider for OpenAiProvider {
 mod tests {
     use super::*;
     use crate::provider::RequestContext;
-    use crate::providers::test_mock_upstream::{Capture, SharedCapture, mock_openai_server};
+    use crate::providers::test_mock_upstream::{Capture, SharedCapture, mock_openai_server, jb};
     use futures::StreamExt;
     use serde_json::json;
     use std::sync::Arc;
@@ -182,7 +185,7 @@ mod tests {
         let req = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
         let mut stream = p
             .chat_completions(
-                req,
+                jb(req),
                 &RequestContext {
                     model: "gpt-4o".into(),
                 },
@@ -202,7 +205,7 @@ mod tests {
             headers.get("authorization").map(String::as_str),
             Some("Bearer sk-test")
         );
-        let body = state.body.lock().unwrap().clone().unwrap();
+        let body: Value = serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
         assert_eq!(body["model"], "gpt-4o");
     }
 
@@ -213,7 +216,7 @@ mod tests {
         let p = provider(&base, None);
         let err = match p
             .chat_completions(
-                json!({"model": "gpt-4o"}),
+                jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
                 },
@@ -239,7 +242,7 @@ mod tests {
         assert_eq!(p.surface_of("gpt-4o"), ModelSurface::ChatCompletions);
         let err = p
             .messages(
-                json!({"model": "gpt-4o"}),
+                jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
                 },
@@ -250,7 +253,7 @@ mod tests {
         assert!(matches!(err, ProviderError::Transport(_)));
         let err2 = p
             .responses(
-                json!({"model": "gpt-4o"}),
+                jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
                 },
