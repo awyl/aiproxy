@@ -19,6 +19,16 @@ export interface ProxyModel {
 /** Models that need thinking-stream cleanup (M3 on openai-completions). */
 const THINK_CLEAN_MODELS = new Set(["minimax/MiniMax-M3"]);
 
+/** Map aiproxy model ID prefix → pi provider id (for provider-attribution headers). */
+function attributionProvider(id: string): string {
+  const prefix = stripSubSuffix(id.split('/')[0] ?? '');
+  // pi's attribution recognizes these provider ids for header injection
+  if (prefix === "opencode-go") return "opencode-go";
+  if (prefix === "openrouter") return "openrouter";
+  if (prefix === "nvidia") return "nvidia";
+  return "openai";
+}
+
 /** Map proxy surface name → pi api id. The proxy's surface is authoritative. */
 export const SURFACE_API: Record<string, string> = {
   chat: "openai-completions",
@@ -152,12 +162,13 @@ export async function registerProxyProvider(
       const provider = stripSubSuffix(m.id.split('/')[0] ?? '');
       const modelId = m.id.split('/').slice(1).join('/');
       const meta = catalog.get(`${provider}/${modelId}`);
-      if (meta) return fromCatalog(m.id, meta, m.surface, base);
+      if (meta) return { ...fromCatalog(m.id, meta, m.surface, base), provider: attributionProvider(m.id) as any };
       const api = SURFACE_API[m.surface ?? ""] ?? "openai-completions";
       const msgBase = wireBaseUrl(api, base);
       return {
         id: m.id,
         name: m.display_name ?? m.id,
+        provider: attributionProvider(m.id) as any,
         api,
         ...(msgBase ? { baseUrl: msgBase } : {}),
         reasoning: false,
