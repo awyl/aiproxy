@@ -4,6 +4,11 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.9] - 2026-09-05
+
+### Fixed
+- **Faithful header relay** — client request headers now reach upstreams verbatim (`x-opencode-session`, `x-opencode-client`, custom `x-*`, user-agent, …). Previously the gateways built fresh requests with only auth + content-type, silently dropping `x-opencode-session` — breaking OpenCode's conversation→backend affinity (prompt-cache warmth; some Go backends 400 without it). Stripped only what must be: aiproxy-owned headers (`authorization`, `x-api-key`, `content-type`, `anthropic-version` — reqwest appends, never replaces) and hop-by-hop/transport-managed fields (`host`, `content-length`, `connection`, `keep-alive`, `transfer-encoding`, `upgrade`, `expect`, `accept-encoding`) per RFC 9110. Body relay unchanged: byte-for-byte, only the model id patched.
+
 ## [0.2.8] - 2026-09-04
 
 ### Added
