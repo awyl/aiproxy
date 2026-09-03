@@ -29,7 +29,7 @@ describe("index (glue)", () => {
     const before = process.env.AIPROXY_TOKEN;
     try {
       const { default: factory } = await import("../index.ts");
-      const pi = { registerTool: vi.fn(), registerProvider: vi.fn() };
+      const pi = { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
       await factory(pi as never);
       expect(process.env.AIPROXY_TOKEN).toBe("cfgtok");
       expect(pi.registerProvider).toHaveBeenCalledTimes(1);
@@ -45,7 +45,7 @@ describe("index (glue)", () => {
     try {
       vi.resetModules();
       const { default: factory } = await import("../index.ts");
-      const pi = { registerTool: vi.fn(), registerProvider: vi.fn() };
+      const pi = { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
       delete process.env.AIPROXY_TOKEN;
       await factory(pi as never);
       expect(process.env.AIPROXY_TOKEN).toBeUndefined();

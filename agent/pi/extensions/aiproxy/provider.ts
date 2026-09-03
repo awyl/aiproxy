@@ -16,8 +16,40 @@ export interface ProxyModel {
   surface?: string;
 }
 
-/** Models that need thinking-stream cleanup (M3 on openai-completions). */
+/**
+ * Models that need thinking-stream cleanup (M3 on openai-completions).
+ */
 const THINK_CLEAN_MODELS = new Set(["minimax/MiniMax-M3"]);
+
+/**
+ * MIRRORS pi's provider attribution — dist/core/provider-attribution.js in
+ * @earendil-works/pi-coding-agent. pi only fires these for provider ids
+ * "opencode"/"opencode-go"/"openrouter"/"nvidia" (or their hosts); models
+ * registered by this extension get provider="aiproxy" hardcoded by pi's
+ * applyExtension(), so pi's attribution never fires for us and we replicate
+ * it here via the before_provider_headers hook.
+ *
+ * !!! MAINTENANCE: re-check provider-attribution.js whenever pi is upgraded —
+ * header names, gates, or new providers must be mirrored here. !!!
+ *
+ * Known deviations from pi:
+ * - openrouter/nvidia attribution is telemetry-gated in pi
+ *   (isInstallTelemetryEnabled); we mirror the gate conservatively and do NOT
+ *   send those headers for now — revisit if telemetry opt-in is ever wired up.
+ */
+export function attributionHeaders(
+  kind: string,
+  sessionId: string | undefined,
+): Record<string, string> | undefined {
+  // getSessionHeaders: session affinity for opencode backends (prompt cache)
+  if (kind === "opencode-go") {
+    if (!sessionId) return undefined;
+    return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
+  }
+  // getDefaultAttributionHeaders (openrouter/nvidia) — telemetry-gated in pi;
+  // gated off here too (see deviation note above).
+  return undefined;
+}
 
 /** Map aiproxy model ID prefix → pi provider id (for provider-attribution headers). */
 function attributionProvider(id: string): string {
@@ -162,13 +194,12 @@ export async function registerProxyProvider(
       const provider = stripSubSuffix(m.id.split('/')[0] ?? '');
       const modelId = m.id.split('/').slice(1).join('/');
       const meta = catalog.get(`${provider}/${modelId}`);
-      if (meta) return { ...fromCatalog(m.id, meta, m.surface, base), provider: attributionProvider(m.id) as any };
+      if (meta) return fromCatalog(m.id, meta, m.surface, base);
       const api = SURFACE_API[m.surface ?? ""] ?? "openai-completions";
       const msgBase = wireBaseUrl(api, base);
       return {
         id: m.id,
         name: m.display_name ?? m.id,
-        provider: attributionProvider(m.id) as any,
         api,
         ...(msgBase ? { baseUrl: msgBase } : {}),
         reasoning: false,
@@ -178,6 +209,22 @@ export async function registerProxyProvider(
         maxTokens: 16_384,
       };
     }),
+  });
+
+  // Fire pi's attribution for aiproxy models — see attributionHeaders above.
+  // The hook runs inside pi's transformHeaders for EVERY provider request;
+  // ctx carries the current model + session id, so this covers all wire
+  // surfaces (chat / messages / responses), unlike a streamSimple capture.
+  pi.on("before_provider_headers", (event, ctx) => {
+    const model = ctx.model;
+    if (!model || model.provider !== "aiproxy") return;
+    const kind = stripSubSuffix(model.id.split("/")[0] ?? "");
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    const extra = attributionHeaders(kind, sessionId);
+    if (!extra) return;
+    for (const [k, v] of Object.entries(extra)) {
+      if (event.headers[k] == null) event.headers[k] = v; // pi's own value wins
+    }
   });
 
   if (models.length > 0) {

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { registerProxyProvider } from "../provider.ts";
+import { registerProxyProvider, attributionHeaders } from "../provider.ts";
 
 function stubPi() {
-  return { registerTool: vi.fn(), registerProvider: vi.fn() };
+  return { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
 }
 
 const modelsResponse = {
@@ -72,5 +72,73 @@ describe("registerProxyProvider", () => {
     );
     const cfg = pi.registerProvider.mock.calls[0][1];
     expect(cfg.models).toHaveLength(0);
+  });
+});
+
+describe("attributionHeaders — mirrors pi provider-attribution.js", () => {
+  it("opencode-go: session + client headers from sessionId", () => {
+    expect(attributionHeaders("opencode-go", "sess-1")).toEqual({
+      "x-opencode-session": "sess-1",
+      "x-opencode-client": "pi",
+    });
+  });
+
+  it("opencode-go: no sessionId → no headers (mirrors getSessionHeaders gate)", () => {
+    expect(attributionHeaders("opencode-go", undefined)).toBeUndefined();
+  });
+
+  it("openrouter/nvidia: telemetry-gated headers not sent (mirrors pi gate)", () => {
+    expect(attributionHeaders("openrouter", undefined)).toBeUndefined();
+    expect(attributionHeaders("nvidia", undefined)).toBeUndefined();
+  });
+
+  it("kinds without attribution → undefined", () => {
+    expect(attributionHeaders("minimax", "sess-1")).toBeUndefined();
+    expect(attributionHeaders("zai", "sess-1")).toBeUndefined();
+    expect(attributionHeaders("openai", "sess-1")).toBeUndefined();
+    expect(attributionHeaders("anthropic", "sess-1")).toBeUndefined();
+  });
+});
+
+describe("before_provider_headers wiring", () => {
+  it("registers the hook and injects opencode session headers for aiproxy models", async () => {
+    const { pi } = await registerWith(modelsResponse);
+    expect(pi.on).toHaveBeenCalledWith("before_provider_headers", expect.any(Function));
+    const hook = pi.on.mock.calls.find((c) => c[0] === "before_provider_headers")![1];
+    const headers: Record<string, string | null> = {};
+    hook(
+      { type: "before_provider_headers", headers },
+      {
+        model: { provider: "aiproxy", id: "opencode-go/mimo-v2.5" },
+        sessionManager: { getSessionId: () => "sess-42" },
+      },
+    );
+    expect(headers["x-opencode-session"]).toBe("sess-42");
+    expect(headers["x-opencode-client"]).toBe("pi");
+  });
+
+  it("ignores non-aiproxy models and never overwrites existing headers", async () => {
+    const { pi } = await registerWith(modelsResponse);
+    const hook = pi.on.mock.calls.find((c) => c[0] === "before_provider_headers")![1];
+    // builtin provider: untouched
+    const h1: Record<string, string | null> = {};
+    hook(
+      { type: "before_provider_headers", headers: h1 },
+      {
+        model: { provider: "opencode-go", id: "mimo-v2.5" },
+        sessionManager: { getSessionId: () => "sess-42" },
+      },
+    );
+    expect(Object.keys(h1)).toHaveLength(0);
+    // existing value wins
+    const h2: Record<string, string | null> = { "x-opencode-session": "pi-set-this" };
+    hook(
+      { type: "before_provider_headers", headers: h2 },
+      {
+        model: { provider: "aiproxy", id: "opencode-go/mimo-v2.5" },
+        sessionManager: { getSessionId: () => "ours" },
+      },
+    );
+    expect(h2["x-opencode-session"]).toBe("pi-set-this");
   });
 });
