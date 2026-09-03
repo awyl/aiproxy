@@ -58,9 +58,43 @@ pub struct Event(pub Bytes);
 
 /// Per-request context passed to providers. `model` is the id as sent upstream
 /// (the `{prefix}/` has already been stripped by the API layer).
-#[derive(Debug, Clone)]
+/// `client_headers` are the client's request headers minus hop-by-hop fields;
+/// gateways forward them verbatim and override only the headers they own
+/// (auth, content-type, anthropic-version, OAuth signing).
+#[derive(Debug, Clone, Default)]
 pub struct RequestContext {
     pub model: String,
+    pub client_headers: axum::http::HeaderMap,
+}
+
+/// Headers aiproxy owns (or that are unsafe/unmanaged to forward). Stripped
+/// from the client's forwarded set so the gateway's own values are the only
+/// ones sent — reqwest `.header()` appends, never replaces.
+const NON_FORWARDED_HEADERS: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "content-type",
+    "content-length",
+    "anthropic-version",
+    "host",
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "upgrade",
+    "expect",
+    "accept-encoding",
+];
+
+impl RequestContext {
+    /// Client headers to forward upstream: everything the client sent minus
+    /// aiproxy-owned, hop-by-hop, and transport-managed fields.
+    pub fn forwarded_headers(&self) -> axum::http::HeaderMap {
+        let mut out = self.client_headers.clone();
+        for name in NON_FORWARDED_HEADERS {
+            out.remove(*name);
+        }
+        out
+    }
 }
 
 #[derive(Debug)]
@@ -276,7 +310,10 @@ mod tests {
         let models = p.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].surface, ModelSurface::Messages);
-        let ctx = RequestContext { model: "m1".into() };
+        let ctx = RequestContext {
+            model: "m1".into(),
+            ..Default::default()
+        };
         let mut stream = p
             .messages(jb(serde_json::json!({"model": "m1"})), &ctx)
             .await

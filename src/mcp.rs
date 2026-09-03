@@ -57,10 +57,7 @@ pub fn mcp_router(
         let mut server_router = Router::new().nest_service(path.as_str(), service);
         // Wrap this server's routes with its own auth layer.
         if let Some(tok) = effective_token {
-            server_router = apply_auth(
-                server_router,
-                crate::auth::auth_state(Some(tok), &[]),
-            );
+            server_router = apply_auth(server_router, crate::auth::auth_state(Some(tok), &[]));
         }
         router = router.merge(server_router);
     }
@@ -200,27 +197,22 @@ pub fn parse_mcp_servers_header(value: &str) -> Vec<McpServerEntry> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|entry| {
-            match entry.split_once(':') {
-                Some((name, token)) => McpServerEntry {
-                    name: name.trim().to_string(),
-                    token: Some(token.trim().to_string()),
-                },
-                None => McpServerEntry {
-                    name: entry.to_string(),
-                    token: None,
-                },
-            }
+        .map(|entry| match entry.split_once(':') {
+            Some((name, token)) => McpServerEntry {
+                name: name.trim().to_string(),
+                token: Some(token.trim().to_string()),
+            },
+            None => McpServerEntry {
+                name: entry.to_string(),
+                token: None,
+            },
         })
         .collect()
 }
 
 /// Resolve the token to check against a server's effective_token.
 /// Priority: header token > Authorization header fallback.
-pub fn resolve_check_token(
-    entry: &McpServerEntry,
-    auth_header: Option<&str>,
-) -> Option<String> {
+pub fn resolve_check_token(entry: &McpServerEntry, auth_header: Option<&str>) -> Option<String> {
     entry
         .token
         .clone()
@@ -228,10 +220,7 @@ pub fn resolve_check_token(
 }
 
 /// Check if a token grants access to a server.
-pub fn check_server_auth(
-    check_token: Option<&str>,
-    effective_token: &Option<String>,
-) -> bool {
+pub fn check_server_auth(check_token: Option<&str>, effective_token: &Option<String>) -> bool {
     match effective_token {
         // Server is open (no token required) → always grant
         None => true,

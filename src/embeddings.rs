@@ -53,8 +53,7 @@ impl EmbeddingBackend for FastembedBackend {
                 .parse()
                 .map_err(|_| format!("unknown fastembed model variant: {model_name}"))?;
             let opts = fastembed::InitOptions::new(variant);
-            let te = fastembed::TextEmbedding::try_new(opts)
-                .map_err(|e| format!("init: {e}"))?;
+            let te = fastembed::TextEmbedding::try_new(opts).map_err(|e| format!("init: {e}"))?;
             Ok::<_, String>(te)
         })
         .await
@@ -166,7 +165,9 @@ impl EmbeddingManager {
             let mut st = slot.state.lock().await;
             self.ensure_loaded(slot, &mut st).await?;
             if let SlotState::Loaded {
-                instance, last_used, ..
+                instance,
+                last_used,
+                ..
             } = &mut *st
             {
                 *last_used = Instant::now();
@@ -174,9 +175,10 @@ impl EmbeddingManager {
                 drop(st); // release lock before embed call
 
                 let refs: Vec<&str> = input_texts.iter().map(|s| s.as_str()).collect();
-                let (vecs, d) = inst.embed(&refs).await.map_err(|e| {
-                    EmbedError::EmbedFailed(slot.id.clone(), e)
-                })?;
+                let (vecs, d) = inst
+                    .embed(&refs)
+                    .await
+                    .map_err(|e| EmbedError::EmbedFailed(slot.id.clone(), e))?;
                 let dim_override = slot.dimensions.unwrap_or(d as u32);
                 (vecs, dim_override)
             } else {
@@ -287,14 +289,9 @@ fn extract_input_texts(req: &Value) -> Result<Vec<String>, EmbedError> {
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                v.as_str()
-                    .map(String::from)
-                    .ok_or_else(|| {
-                        EmbedError::EmbedFailed(
-                            "?".into(),
-                            format!("input[{i}] is not a string"),
-                        )
-                    })
+                v.as_str().map(String::from).ok_or_else(|| {
+                    EmbedError::EmbedFailed("?".into(), format!("input[{i}] is not a string"))
+                })
             })
             .collect(),
         _ => Err(EmbedError::EmbedFailed(
@@ -346,10 +343,7 @@ pub(crate) mod testutil {
         }
     }
 
-    pub fn manager_with_fake(
-        ttl_secs: u64,
-        ids: &[&str],
-    ) -> (EmbeddingManager, Arc<FakeBackend>) {
+    pub fn manager_with_fake(ttl_secs: u64, ids: &[&str]) -> (EmbeddingManager, Arc<FakeBackend>) {
         let backend = Arc::new(FakeBackend::new());
         let models: Vec<EmbeddingModelConfig> = ids
             .iter()
@@ -477,7 +471,10 @@ mod tests {
         mgr.shutdown_all().await;
 
         // Next request must reload
-        let _ = mgr.embed("nomic", &req).await.expect("embed after shutdown");
+        let _ = mgr
+            .embed("nomic", &req)
+            .await
+            .expect("embed after shutdown");
         assert_eq!(backend.load_count.load(Ordering::SeqCst), 2);
     }
 

@@ -1,12 +1,14 @@
 // ── MCP multiplexer: aggregate multiple backends under /mcp ────────────────
 
 use crate::config::McpServerConfig;
+use crate::mcp::{
+    Backend, McpServerEntry, check_server_auth, parse_mcp_servers_header, resolve_check_token,
+};
 use axum::Router;
 use axum::extract::{Json, State};
 use axum::http::HeaderMap;
 use axum::http::{HeaderName, StatusCode};
 use axum::response::IntoResponse;
-use crate::mcp::{McpServerEntry, parse_mcp_servers_header, resolve_check_token, check_server_auth, Backend};
 use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -33,8 +35,7 @@ fn extract_auth_token(headers: &HeaderMap) -> Option<String> {
 
 /// Build the multiplexed /mcp route.
 pub fn mcp_multiplex_route() -> Router<McpMultiplexState> {
-    Router::new()
-        .route("/mcp", axum::routing::post(mcp_multiplex_handler))
+    Router::new().route("/mcp", axum::routing::post(mcp_multiplex_handler))
 }
 
 /// POST /mcp — aggregate MCP endpoint with per-server auth via X-MCP-Servers header.
@@ -99,8 +100,7 @@ async fn mcp_multiplex_handler(
                             match b.list_tools(None).await {
                                 Ok(result) => {
                                     for tool in result.tools {
-                                        let prefixed =
-                                            format!("{}__{}", server.name, tool.name);
+                                        let prefixed = format!("{}__{}", server.name, tool.name);
                                         all_tools.push(json!({
                                             "name": prefixed,
                                             "description": tool.description,
@@ -136,9 +136,7 @@ async fn mcp_multiplex_handler(
                     return jsonrpc_error(
                         id,
                         -32602,
-                        &format!(
-                            "tool name must be prefixed: <server>__<tool>, got '{tool_name}'"
-                        ),
+                        &format!("tool name must be prefixed: <server>__<tool>, got '{tool_name}'"),
                     );
                 }
             };
@@ -150,9 +148,7 @@ async fn mcp_multiplex_handler(
                     return jsonrpc_error(
                         id,
                         -32602,
-                        &format!(
-                            "no access to server '{prefix}' (check X-MCP-Servers header)"
-                        ),
+                        &format!("no access to server '{prefix}' (check X-MCP-Servers header)"),
                     );
                 }
             };
@@ -162,10 +158,7 @@ async fn mcp_multiplex_handler(
                 Ok(backend) => {
                     let mut guard = backend.lock().await;
                     if let Some(b) = guard.as_mut() {
-                        let arguments = params
-                            .get("arguments")
-                            .and_then(Value::as_object)
-                            .cloned();
+                        let arguments = params.get("arguments").and_then(Value::as_object).cloned();
                         let mut call_params = CallToolRequestParams::new(real_name.to_string());
                         if let Some(args) = arguments {
                             call_params = call_params.with_arguments(args);
@@ -191,9 +184,7 @@ async fn mcp_multiplex_handler(
 }
 
 /// Connect to a server's backend (lazy, cached).
-async fn connect_backend(
-    server: &McpServerConfig,
-) -> Result<Arc<Mutex<Option<Backend>>>, String> {
+async fn connect_backend(server: &McpServerConfig) -> Result<Arc<Mutex<Option<Backend>>>, String> {
     let info = ClientInfo::new(
         ClientCapabilities::default(),
         Implementation::new("aiproxy", env!("CARGO_PKG_VERSION")),
@@ -246,8 +237,8 @@ fn jsonrpc_error(id: Option<&Value>, code: i64, message: &str) -> axum::response
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::Request;
     use axum::body::Body;
+    use axum::http::Request;
     use tower::ServiceExt;
 
     fn test_state(servers: Vec<McpServerConfig>, token: Option<String>) -> McpMultiplexState {
@@ -283,10 +274,7 @@ mod tests {
         }
     }
 
-    async fn send(
-        app: axum::Router<()>,
-        req: Request<Body>,
-    ) -> (StatusCode, Value) {
+    async fn send(app: axum::Router<()>, req: Request<Body>) -> (StatusCode, Value) {
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -301,7 +289,9 @@ mod tests {
             .uri("/mcp")
             .method("POST")
             .header("content-type", "application/json")
-            .body(Body::from(json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string()))
+            .body(Body::from(
+                json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string(),
+            ))
             .unwrap()
     }
 
@@ -314,7 +304,9 @@ mod tests {
             builder = builder.header(*k, *v);
         }
         builder
-            .body(Body::from(json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string()))
+            .body(Body::from(
+                json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string(),
+            ))
             .unwrap()
     }
 
@@ -334,7 +326,12 @@ mod tests {
         let app = mcp_multiplex_route().with_state(state);
         let (status, body) = send(app, mcp_request("bogus")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["error"]["message"].as_str().unwrap().contains("not found"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not found")
+        );
     }
 
     #[tokio::test]
@@ -351,10 +348,8 @@ mod tests {
         let servers = vec![test_server("a"), test_server("b"), test_server("c")];
         let state = test_state(servers, None);
         let app = mcp_multiplex_route().with_state(state);
-        let req = mcp_request_with_headers("tools/list", &[
-            ("x-mcp-servers", "a,c"),
-        ]);
-        let (status, body) = send(app, req).await;
+        let req = mcp_request_with_headers("tools/list", &[("x-mcp-servers", "a,c")]);
+        let (status, _body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -363,9 +358,7 @@ mod tests {
         let servers = vec![test_server_with_token("sec", "right-token")];
         let state = test_state(servers, Some("global-tok".into()));
         let app = mcp_multiplex_route().with_state(state);
-        let req = mcp_request_with_headers("tools/list", &[
-            ("x-mcp-servers", "sec:wrong-token"),
-        ]);
+        let req = mcp_request_with_headers("tools/list", &[("x-mcp-servers", "sec:wrong-token")]);
         let (status, body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["tools"], json!([]));
@@ -376,9 +369,7 @@ mod tests {
         let servers = vec![test_server_with_token("sec", "right-token")];
         let state = test_state(servers, Some("global-tok".into()));
         let app = mcp_multiplex_route().with_state(state);
-        let req = mcp_request_with_headers("tools/list", &[
-            ("x-mcp-servers", "sec:right-token"),
-        ]);
+        let req = mcp_request_with_headers("tools/list", &[("x-mcp-servers", "sec:right-token")]);
         let (status, _body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
     }
@@ -388,9 +379,7 @@ mod tests {
         let servers = vec![test_server_with_token("sec", "my-tok")];
         let state = test_state(servers, None);
         let app = mcp_multiplex_route().with_state(state);
-        let req = mcp_request_with_headers("tools/list", &[
-            ("authorization", "Bearer my-tok"),
-        ]);
+        let req = mcp_request_with_headers("tools/list", &[("authorization", "Bearer my-tok")]);
         let (status, _body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
     }
@@ -400,10 +389,13 @@ mod tests {
         let servers = vec![test_server_with_token("sec", "header-tok")];
         let state = test_state(servers, None);
         let app = mcp_multiplex_route().with_state(state);
-        let req = mcp_request_with_headers("tools/list", &[
-            ("x-mcp-servers", "sec:header-tok"),
-            ("authorization", "Bearer auth-tok"),
-        ]);
+        let req = mcp_request_with_headers(
+            "tools/list",
+            &[
+                ("x-mcp-servers", "sec:header-tok"),
+                ("authorization", "Bearer auth-tok"),
+            ],
+        );
         let (status, _body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
     }
@@ -426,16 +418,24 @@ mod tests {
             .uri("/mcp")
             .method("POST")
             .header("content-type", "application/json")
-            .body(Body::from(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "no_prefix"}
-            }).to_string()))
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "no_prefix"}
+                })
+                .to_string(),
+            ))
             .unwrap();
         let (status, body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["error"]["message"].as_str().unwrap().contains("prefixed"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("prefixed")
+        );
     }
 
     #[tokio::test]
@@ -446,15 +446,23 @@ mod tests {
             .uri("/mcp")
             .method("POST")
             .header("content-type", "application/json")
-            .body(Body::from(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "unknown__tool"}
-            }).to_string()))
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "unknown__tool"}
+                })
+                .to_string(),
+            ))
             .unwrap();
         let (status, body) = send(app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["error"]["message"].as_str().unwrap().contains("no access"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no access")
+        );
     }
 }

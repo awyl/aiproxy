@@ -221,7 +221,6 @@ pub struct EmbeddingModelConfig {
     pub dimensions: Option<u32>,
 }
 
-
 fn default_idle_ttl() -> u64 {
     3600 // drop model after 1h with no traffic
 }
@@ -362,9 +361,7 @@ impl Config {
                 for u in ups {
                     let name = u.effective_name();
                     if !seen.insert(name) {
-                        return bad(format!(
-                            "duplicate name '{name}' in kind '{kind}'"
-                        ));
+                        return bad(format!("duplicate name '{name}' in kind '{kind}'"));
                     }
                 }
             }
@@ -430,8 +427,7 @@ impl Config {
     /// - Single upstream of kind: ID = kind name (e.g. "opencode-go")
     /// - Multiple upstreams of kind: ID = kind=name (e.g. "opencode-go=alice")
     pub fn provider_ids(&self) -> Vec<String> {
-        let mut by_kind: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+        let mut by_kind: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for u in &self.upstreams {
             *by_kind.entry(u.kind.as_str()).or_insert(0) += 1;
         }
@@ -777,10 +773,7 @@ upstreams:
 
     #[test]
     fn provider_ids_single_kind() {
-        let cfg = Config::from_yaml(
-            "upstreams:\n  - { kind: opencode-go }\n",
-        )
-        .unwrap();
+        let cfg = Config::from_yaml("upstreams:\n  - { kind: opencode-go }\n").unwrap();
         let ids = cfg.provider_ids();
         assert_eq!(ids, vec!["opencode-go"]);
     }

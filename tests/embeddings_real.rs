@@ -9,8 +9,8 @@
 //! To test with a custom cache dir:
 //!   FASTEMBED_CACHE_DIR=/tmp/models cargo test --test embeddings_real -- --nocapture
 
+use aiproxy::embeddings::{EmbedError, EmbeddingBackend, FastembedBackend};
 use std::sync::Mutex;
-use aiproxy::embeddings::{EmbeddingBackend, EmbedError, FastembedBackend};
 
 /// Serializes tests that share the fastembed cache dir to prevent download races.
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
@@ -43,20 +43,30 @@ async fn real_download_load_and_embed() {
 
         // Step 2: Embed sample texts
         let t1 = std::time::Instant::now();
-        let refs: Vec<&str> = sample_texts.iter().map(|s| *s).collect();
+        let refs: Vec<&str> = sample_texts.iter().copied().collect();
         let (embeddings, dims) = instance.embed(&refs).await.unwrap_or_else(|e| {
             panic!("failed to embed with {variant}: {e}");
         });
         let embed_ms = t1.elapsed().as_millis();
-        eprintln!("  embed: {embed_ms}ms, got {} vectors of dim {dims}", embeddings.len());
+        eprintln!(
+            "  embed: {embed_ms}ms, got {} vectors of dim {dims}",
+            embeddings.len()
+        );
 
         // Step 3: Validate output shape
-        assert_eq!(embeddings.len(), sample_texts.len(), "{variant}: wrong number of vectors");
+        assert_eq!(
+            embeddings.len(),
+            sample_texts.len(),
+            "{variant}: wrong number of vectors"
+        );
         assert_eq!(dims, *expected_dims, "{variant}: unexpected dimensions");
 
         // Step 4: Validate embeddings are not all zeros (model actually ran)
         let all_zero = embeddings.iter().all(|v| v.iter().all(|x| *x == 0.0));
-        assert!(!all_zero, "{variant}: all-zero embeddings — model may not have loaded");
+        assert!(
+            !all_zero,
+            "{variant}: all-zero embeddings — model may not have loaded"
+        );
 
         // Step 5: Validate embeddings differ between inputs (model is actually computing)
         assert_ne!(
@@ -88,8 +98,8 @@ async fn real_download_load_and_embed() {
 #[tokio::test]
 async fn real_manager_embed_flow() {
     let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    use aiproxy::embeddings::EmbeddingManager;
     use aiproxy::config::{EmbeddingModelConfig, EmbeddingsConfig};
+    use aiproxy::embeddings::EmbeddingManager;
 
     let cfg = EmbeddingsConfig {
         idle_ttl_secs: 60,
@@ -104,7 +114,13 @@ async fn real_manager_embed_flow() {
     };
 
     let mgr = EmbeddingManager::new(&cfg);
-    assert_eq!(mgr.model_ids(), TEST_MODELS.iter().map(|(_, id, _)| id.to_string()).collect::<Vec<_>>());
+    assert_eq!(
+        mgr.model_ids(),
+        TEST_MODELS
+            .iter()
+            .map(|(_, id, _)| id.to_string())
+            .collect::<Vec<_>>()
+    );
 
     // Embed through each model via the manager
     for (_, id, expected_dims) in TEST_MODELS {
@@ -119,7 +135,7 @@ async fn real_manager_embed_flow() {
         assert_eq!(out["object"], "list");
         assert_eq!(out["model"], format!("embeddings-local/{id}"));
         assert_eq!(out["data"].as_array().unwrap().len(), 1);
-        assert_eq!(out["dimensions"], *expected_dims as usize);
+        assert_eq!(out["dimensions"], *expected_dims);
 
         let embedding = &out["data"][0]["embedding"];
         assert!(embedding.is_array(), "{id}: embedding is not an array");
@@ -140,7 +156,10 @@ async fn real_unknown_model_rejected() {
     match err {
         EmbedError::LoadFailed(model, msg) => {
             assert_eq!(model, "NonExistentModel999");
-            assert!(msg.contains("unknown fastembed model variant"), "unexpected error: {msg}");
+            assert!(
+                msg.contains("unknown fastembed model variant"),
+                "unexpected error: {msg}"
+            );
         }
         other => panic!("unexpected error variant: {other}"),
     }

@@ -8,8 +8,8 @@ use crate::provider::{
 use axum::http::header;
 use bytes::Bytes;
 use futures::StreamExt;
-use serde_json::{json, Value};
 use reqwest::Client;
+use serde_json::{Value, json};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -93,6 +93,7 @@ impl Provider for AnthropicProvider {
     ) -> Result<ProviderStream, ProviderError> {
         let resp = self
             .authed(self.client.post(format!("{}/messages", self.base_url)))
+            .headers(ctx.forwarded_headers())
             .header(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/json"),
@@ -238,6 +239,7 @@ mod tests {
                 jb(req),
                 &RequestContext {
                     model: "claude-sonnet-4".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -257,7 +259,8 @@ mod tests {
             headers.get("anthropic-version").map(String::as_str),
             Some("2023-06-01")
         );
-        let body: Value = serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4");
     }
 
@@ -268,13 +271,25 @@ mod tests {
         let p = provider(&base);
         assert_eq!(p.surface_of("claude-sonnet-4"), ModelSurface::Messages);
         let err = p
-            .chat_completions(jb(json!({"model": "x"})), &RequestContext { model: "x".into() })
+            .chat_completions(
+                jb(json!({"model": "x"})),
+                &RequestContext {
+                    model: "x".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .err()
             .expect("expected unsupported-surface error");
         assert!(matches!(err, ProviderError::Transport(_)));
         let err2 = p
-            .responses(jb(json!({"model": "x"})), &RequestContext { model: "x".into() })
+            .responses(
+                jb(json!({"model": "x"})),
+                &RequestContext {
+                    model: "x".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .err()
             .expect("expected unsupported-surface error");

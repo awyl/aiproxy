@@ -105,8 +105,8 @@ pub async fn build_with_port(
         servers: config.mcp.servers.clone(),
         global_token: token.clone(),
     };
-    let multiplex_router = crate::mcp_multiplexer::mcp_multiplex_route()
-        .with_state(multiplex_state);
+    let multiplex_router =
+        crate::mcp_multiplexer::mcp_multiplex_route().with_state(multiplex_state);
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))

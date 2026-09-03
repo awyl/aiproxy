@@ -2,10 +2,10 @@
 //! surface gating. Handlers resolve the prefixed model, strip the prefix,
 //! verify the wire surface, then relay the provider's SSE stream.
 
+use crate::api::body::replace_model_field;
 use crate::api::{AppState, Surface, check_surface, openai_error, relay_or_error};
 use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
-use crate::api::body::replace_model_field;
 use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -74,12 +74,14 @@ async fn route_one(
     state: &AppState,
     raw: Bytes,
     token: Option<String>,
+    client_headers: axum::http::HeaderMap,
     required: ModelSurface,
     surface: Surface,
     call: impl FnOnce(
         Arc<dyn Provider>,
         Bytes,
         String,
+        axum::http::HeaderMap,
     )
         -> Pin<Box<dyn Future<Output = Result<ProviderStream, ProviderError>> + Send>>,
 ) -> Result<ProviderStream, axum::response::Response> {
@@ -125,15 +127,16 @@ async fn route_one(
     // Byte-faithful relay: patch only the model id in the raw body so the
     // upstream sees the client's exact serialization (key order, spacing,
     // number formatting) — some upstreams key request caching on it.
-    let stripped = replace_model_field(&raw, &mid)
-        .unwrap_or_else(|| raw.to_vec());
-    call(provider, Bytes::from(stripped), mid).await.map_err(|e| match e {
-        ProviderError::Transport(msg) if msg.contains("surface") => {
-            openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
-        }
-        // upstream Http/transport failures translate to the surface's error shape
-        other => relay_error(other, surface),
-    })
+    let stripped = replace_model_field(&raw, &mid).unwrap_or_else(|| raw.to_vec());
+    call(provider, Bytes::from(stripped), mid, client_headers)
+        .await
+        .map_err(|e| match e {
+            ProviderError::Transport(msg) if msg.contains("surface") => {
+                openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
+            }
+            // upstream Http/transport failures translate to the surface's error shape
+            other => relay_error(other, surface),
+        })
 }
 
 /// Non-streaming variant of `relay_or_error` for the error path of `route_one`.
@@ -155,16 +158,27 @@ fn relay_error(e: ProviderError, surface: Surface) -> axum::response::Response {
 async fn chat_completions(
     State(state): State<AppState>,
     Extension(token): Extension<Option<String>>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
     match route_one(
         &state,
         body,
         token,
+        headers,
         ModelSurface::ChatCompletions,
         Surface::Openai,
-        |p, body, model| {
-            Box::pin(async move { p.chat_completions(body, &RequestContext { model }).await })
+        |p, body, model, client_headers| {
+            Box::pin(async move {
+                p.chat_completions(
+                    body,
+                    &RequestContext {
+                        model,
+                        client_headers,
+                    },
+                )
+                .await
+            })
         },
     )
     .await
@@ -177,16 +191,27 @@ async fn chat_completions(
 async fn responses(
     State(state): State<AppState>,
     Extension(token): Extension<Option<String>>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
     match route_one(
         &state,
         body,
         token,
+        headers,
         ModelSurface::Responses,
         Surface::Openai,
-        |p, body, model| {
-            Box::pin(async move { p.responses(body, &RequestContext { model }).await })
+        |p, body, model, client_headers| {
+            Box::pin(async move {
+                p.responses(
+                    body,
+                    &RequestContext {
+                        model,
+                        client_headers,
+                    },
+                )
+                .await
+            })
         },
     )
     .await
@@ -268,10 +293,7 @@ mod tests {
         ];
         let reg = crate::discovery::ModelRegistry::new(providers);
         reg.refresh().await;
-        let (embed, _backend) = crate::embeddings::testutil::manager_with_fake(
-            3600,
-            &["nomic"],
-        );
+        let (embed, _backend) = crate::embeddings::testutil::manager_with_fake(3600, &["nomic"]);
         AppState {
             registry: std::sync::Arc::new(reg),
             embeddings: std::sync::Arc::new(embed),

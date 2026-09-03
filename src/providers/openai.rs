@@ -4,9 +4,9 @@ use crate::provider::{
 };
 use axum::body::Bytes;
 use axum::http::header;
-use serde_json::{json, Value};
 use futures::StreamExt;
 use reqwest::Client;
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -90,7 +90,11 @@ impl Provider for OpenAiProvider {
                 self.client
                     .post(format!("{}/chat/completions", self.base_url)),
             )
-            .header(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"))
+            .headers(ctx.forwarded_headers())
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            )
             .body(req)
             .send()
             .await
@@ -138,7 +142,7 @@ impl Provider for OpenAiProvider {
 mod tests {
     use super::*;
     use crate::provider::RequestContext;
-    use crate::providers::test_mock_upstream::{Capture, SharedCapture, mock_openai_server, jb};
+    use crate::providers::test_mock_upstream::{Capture, SharedCapture, jb, mock_openai_server};
     use futures::StreamExt;
     use serde_json::json;
     use std::sync::Arc;
@@ -188,6 +192,7 @@ mod tests {
                 jb(req),
                 &RequestContext {
                     model: "gpt-4o".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -205,7 +210,8 @@ mod tests {
             headers.get("authorization").map(String::as_str),
             Some("Bearer sk-test")
         );
-        let body: Value = serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_slice(&state.body.lock().unwrap().clone().unwrap()).unwrap();
         assert_eq!(body["model"], "gpt-4o");
     }
 
@@ -219,6 +225,7 @@ mod tests {
                 jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -245,6 +252,7 @@ mod tests {
                 jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -256,6 +264,7 @@ mod tests {
                 jb(json!({"model": "gpt-4o"})),
                 &RequestContext {
                     model: "gpt-4o".into(),
+                    ..Default::default()
                 },
             )
             .await

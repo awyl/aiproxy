@@ -8,13 +8,13 @@ pub mod openai;
 pub mod test_mock_upstream;
 
 use crate::config::{Config, UpstreamConfig, UpstreamKind};
-use bytes::Bytes;
 use crate::provider::{
     Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::go::OpencodeGoProvider;
 use crate::providers::openai::OpenAiProvider;
+use bytes::Bytes;
 use std::sync::Arc;
 
 /// Upstream whose `models:` list is static: serves discovery; streams when a
@@ -159,15 +159,19 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
         .iter()
         .zip(ids)
         .map(|(u, id)| match u.kind {
-            UpstreamKind::Openai => discoverable(u, &id, |u, id| Arc::new(OpenAiProvider::new(u, id))),
-            UpstreamKind::Anthropic => discoverable(u, &id, |u, id| Arc::new(AnthropicProvider::new(u, id))),
-            UpstreamKind::OpencodeGo => discoverable(u, &id, |u, id| Arc::new(OpencodeGoProvider::new(u, id))),
+            UpstreamKind::Openai => {
+                discoverable(u, &id, |u, id| Arc::new(OpenAiProvider::new(u, id)))
+            }
+            UpstreamKind::Anthropic => {
+                discoverable(u, &id, |u, id| Arc::new(AnthropicProvider::new(u, id)))
+            }
+            UpstreamKind::OpencodeGo => {
+                discoverable(u, &id, |u, id| Arc::new(OpencodeGoProvider::new(u, id)))
+            }
             UpstreamKind::Minimax
             | UpstreamKind::Zai
             | UpstreamKind::Openrouter
-            | UpstreamKind::Nvidia => {
-                chat_kind(u, &id)
-            }
+            | UpstreamKind::Nvidia => chat_kind(u, &id),
         })
         .collect()
 }

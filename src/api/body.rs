@@ -114,9 +114,18 @@ fn read_value(raw: &[u8], i: usize) -> Option<Span> {
             }
             None
         }
-        b't' => raw.get(i..i + 4).filter(|s| s == b"true").map(|_| (i, i + 4)),
-        b'f' => raw.get(i..i + 5).filter(|s| s == b"false").map(|_| (i, i + 5)),
-        b'n' => raw.get(i..i + 4).filter(|s| s == b"null").map(|_| (i, i + 4)),
+        b't' => raw
+            .get(i..i + 4)
+            .filter(|s| s == b"true")
+            .map(|_| (i, i + 4)),
+        b'f' => raw
+            .get(i..i + 5)
+            .filter(|s| s == b"false")
+            .map(|_| (i, i + 5)),
+        b'n' => raw
+            .get(i..i + 4)
+            .filter(|s| s == b"null")
+            .map(|_| (i, i + 4)),
         _ => {
             // Number: consume until a delimiter.
             let mut j = i;
@@ -127,11 +136,7 @@ fn read_value(raw: &[u8], i: usize) -> Option<Span> {
                     break;
                 }
             }
-            if j == i {
-                None
-            } else {
-                Some((i, j))
-            }
+            if j == i { None } else { Some((i, j)) }
         }
     }
 }
@@ -146,7 +151,9 @@ fn escape_json_string(s: &str) -> Vec<u8> {
             '\n' => out.extend_from_slice(b"\\n"),
             '\r' => out.extend_from_slice(b"\\r"),
             '\t' => out.extend_from_slice(b"\\t"),
-            c if (c as u32) < 0x20 => out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes()),
+            c if (c as u32) < 0x20 => {
+                out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes())
+            }
             c => out.extend_from_slice(c.to_string().as_bytes()),
         }
     }

@@ -135,7 +135,7 @@ mod tests {
 
 use crate::discovery::ModelRegistry;
 use crate::embeddings::EmbeddingManager;
-use crate::provider::{Event, ModelSurface, Provider, ProviderError, ProviderStream};
+use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream};
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -182,7 +182,11 @@ pub fn check_surface(
 /// Gate a route on a per-upstream subscription token. Returns `Ok` when the
 /// upstream has no subscription gate, `Err` when the request token does not
 /// match the upstream's subscription token (or the gate is misconfigured).
-pub fn check_subscription(state: &AppState, prefix: &str, token: Option<&str>) -> Result<(), &'static str> {
+pub fn check_subscription(
+    state: &AppState,
+    prefix: &str,
+    token: Option<&str>,
+) -> Result<(), &'static str> {
     let Some(gate) = state.subscriptions.get(prefix) else {
         return Ok(()); // no gate for this upstream
     };

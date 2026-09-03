@@ -4,11 +4,11 @@ use crate::api::body::replace_model_field;
 use crate::api::{AppState, Surface, anthropic_error, check_surface, relay_or_error};
 use crate::auth::apply_auth;
 use crate::provider::{ModelSurface, ProviderError, RequestContext};
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use axum::Router;
 use serde_json::Value;
 
 pub fn anthropic_router(token: Option<String>) -> Router<AppState> {
@@ -29,6 +29,7 @@ pub fn anthropic_router_with_subs(token: Option<String>, subs: &[String]) -> Rou
 pub async fn messages(
     State(state): State<AppState>,
     Extension(token): Extension<Option<String>>,
+    headers: axum::http::HeaderMap,
     raw: Bytes,
 ) -> axum::response::Response {
     let Ok(req) = serde_json::from_slice::<Value>(&raw) else {
@@ -76,9 +77,11 @@ pub async fn messages(
         return resp;
     }
     // Byte-faithful relay (see api::body): patch only the model id.
-    let stripped = replace_model_field(&raw, &mid)
-        .unwrap_or_else(|| raw.to_vec());
-    let ctx = RequestContext { model: mid };
+    let stripped = replace_model_field(&raw, &mid).unwrap_or_else(|| raw.to_vec());
+    let ctx = RequestContext {
+        model: mid,
+        client_headers: headers,
+    };
     match provider.messages(Bytes::from(stripped), &ctx).await {
         Ok(stream) => relay_or_error(Ok(stream), Surface::Anthropic),
         Err(ProviderError::Transport(msg)) if msg.contains("surface") => {

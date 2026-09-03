@@ -201,6 +201,7 @@ impl OpencodeGoProvider {
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/json"),
             )
+            .headers(ctx.forwarded_headers())
             .body(req);
         if let Some(k) = &self.api_key {
             builder = match key_header {
@@ -303,6 +304,7 @@ impl Provider for OpencodeGoProvider {
                 axum::http::header::CONTENT_TYPE,
                 axum::http::header::HeaderValue::from_static("application/json"),
             )
+            .headers(ctx.forwarded_headers())
             .body(req)
             .header("anthropic-version", ANTHROPIC_VERSION);
         if let Some(k) = &self.api_key {
@@ -548,6 +550,7 @@ mod tests {
                 jb(json!({"model": "kimi-k3"})),
                 &RequestContext {
                     model: "kimi-k3".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -570,6 +573,7 @@ mod tests {
                 jb(json!({"model": "minimax-m3"})),
                 &RequestContext {
                     model: "minimax-m3".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -590,6 +594,7 @@ mod tests {
                 jb(json!({"model": "grok-4.6"})),
                 &RequestContext {
                     model: "grok-4.6".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -611,6 +616,7 @@ mod tests {
                 jb(json!({"model": "grok-4.6"})),
                 &RequestContext {
                     model: "grok-4.6".into(),
+                    ..Default::default()
                 },
             )
             .await
@@ -629,11 +635,49 @@ mod tests {
                 jb(json!({"model": "kimi-k3"})),
                 &RequestContext {
                     model: "kimi-k3".into(),
+                    ..Default::default()
                 },
             )
             .await
             .err()
             .expect("expected ding on messages");
         assert!(matches!(err2, ProviderError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn client_headers_forwarded_auth_overrides_client() {
+        let state = Arc::new(Capture::default());
+        let (base, _) = spawn_go_mock(state.clone(), None).await;
+        let p = provider(&base, None, &[]);
+        let mut client_headers = axum::http::HeaderMap::new();
+        client_headers.insert("x-opencode-session", "sess-123".parse().unwrap());
+        client_headers.insert("x-opencode-client", "pi".parse().unwrap());
+        client_headers.insert("x-custom-thing", "yes".parse().unwrap());
+        client_headers.insert("authorization", "Bearer client-sent".parse().unwrap());
+        let mut s = p
+            .chat_completions(
+                jb(json!({"model": "kimi-k3"})),
+                &RequestContext {
+                    model: "kimi-k3".into(),
+                    client_headers,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        while s.next().await.is_some() {}
+        let h = state.headers.lock().unwrap();
+        // Client headers forwarded verbatim...
+        assert_eq!(
+            h.get("x-opencode-session").map(String::as_str),
+            Some("sess-123")
+        );
+        assert_eq!(h.get("x-opencode-client").map(String::as_str), Some("pi"));
+        assert_eq!(h.get("x-custom-thing").map(String::as_str), Some("yes"));
+        // ...but aiproxy-owned auth wins over anything the client sent.
+        assert_eq!(
+            h.get("authorization").map(String::as_str),
+            Some("Bearer go-sk-test")
+        );
     }
 }
