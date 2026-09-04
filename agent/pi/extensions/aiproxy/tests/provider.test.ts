@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { registerProxyProvider, attributionHeaders } from "../provider.ts";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { registerProxyProvider, attributionHeaders, loadCatalog } from "../provider.ts";
 
 function stubPi() {
   return { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
@@ -140,5 +140,50 @@ describe("before_provider_headers wiring", () => {
       },
     );
     expect(h2["x-opencode-session"]).toBe("pi-set-this");
+  });
+});
+
+describe("loadCatalog — fetches from pi.dev and caches", () => {
+  const piDevResponse = {
+    ok: true,
+    json: async () => ({
+      "mimo-v2.5": {
+        id: "mimo-v2.5",
+        name: "MiMo",
+        contextWindow: 1_000_000,
+        maxTokens: 32_000,
+        reasoning: true,
+      },
+    }),
+  };
+
+  it("fetches from pi.dev for each upstream kind and merges results", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(piDevResponse);
+    const catalog = await loadCatalog(["opencode-go"], fetchImpl as unknown as typeof fetch);
+    expect(catalog.get("opencode-go/mimo-v2.5")).toMatchObject({
+      contextWindow: 1_000_000,
+      reasoning: true,
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining("pi.dev/api/models/providers/opencode-go"),
+      expect.anything(),
+    );
+  });
+
+  it("degrades gracefully when pi.dev is unreachable", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error("ENOTFOUND"));
+    const catalog = await loadCatalog(["opencode-go"], fetchImpl as unknown as typeof fetch);
+    // no crash, just empty (or from models-store.json)
+    expect(catalog).toBeInstanceOf(Map);
+  });
+
+  it("merges multiple upstream kinds in parallel", async () => {
+    const kinds = ["opencode-go", "minimax"];
+    const fetchImpl = vi.fn().mockResolvedValue(piDevResponse);
+    const catalog = await loadCatalog(kinds, fetchImpl as unknown as typeof fetch);
+    // Both kinds fetched
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(catalog.has("opencode-go/mimo-v2.5")).toBe(true);
+    expect(catalog.has("minimax/mimo-v2.5")).toBe(true);
   });
 });

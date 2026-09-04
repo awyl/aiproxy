@@ -1,9 +1,9 @@
 /**
  * aiproxy provider registration: one provider entry fronting the gateway,
- * models discovered from the proxy at startup, metadata resolved from pi's
- * live model store (models-store.json).
+ * models discovered from the proxy at startup, metadata resolved from pi.dev
+ * catalog API (same source pi's built-in providers use) with local cache.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -77,7 +77,128 @@ export function wireBaseUrl(api: string, base: string): string | undefined {
   return api === "anthropic-messages" ? base.replace(/\/v1\/?$/, "") : undefined;
 }
 
-export function loadCatalog(): Map<string, Record<string, unknown>> {
+const PI_CATALOG_BASE = "https://pi.dev";
+const PI_CATALOG_TIMEOUT_MS = 4_000;
+const CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4h, matches pi's REMOTE_CATALOG_REFRESH_INTERVAL_MS
+const CACHE_DIR = join(homedir(), ".pi/agent");
+const CACHE_PATH = join(CACHE_DIR, "aiproxy-models.json");
+
+/** Upstream kinds that aiproxy supports — used to fetch metadata from pi.dev. */
+const UPSTREAM_KINDS = ["opencode-go", "minimax", "zai", "openrouter", "nvidia"];
+
+/** Fetch model metadata from pi.dev catalog API for one upstream kind. */
+async function fetchPiDevCatalog(
+  kind: string,
+  fetchImpl: typeof fetch,
+): Promise<Map<string, Record<string, unknown>>> {
+  const map = new Map<string, Record<string, unknown>>();
+  try {
+    const url = `${PI_CATALOG_BASE}/api/models/providers/${encodeURIComponent(kind)}`;
+    const res = await fetchImpl(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(PI_CATALOG_TIMEOUT_MS),
+    });
+    if (!res.ok) return map;
+    const data = await res.json();
+    const entries: Record<string, unknown>[] = Array.isArray(data)
+      ? data
+      : typeof data === "object" && data !== null && "models" in data
+        ? (data as { models: unknown[] }).models as Record<string, unknown>[]
+        : typeof data === "object" && data !== null
+          ? Object.values(data) as Record<string, unknown>[]
+          : [];
+    for (const entry of entries) {
+      if (entry && typeof entry === "object" && "id" in entry) {
+        map.set(`${kind}/${entry.id}`, entry);
+      }
+    }
+  } catch {
+    // pi.dev unreachable — degrade gracefully
+  }
+  return map;
+}
+
+/** Read cached catalog from disk. */
+function readCache(): Map<string, Record<string, unknown>> | undefined {
+  try {
+    if (!existsSync(CACHE_PATH)) return undefined;
+    const stat = statSync(CACHE_PATH);
+    if (Date.now() - stat.mtimeMs > CACHE_MAX_AGE_MS) return undefined;
+    const raw = JSON.parse(readFileSync(CACHE_PATH, "utf8")) as Record<string, Record<string, unknown>>;
+    const map = new Map<string, Record<string, unknown>>();
+    for (const [k, v] of Object.entries(raw)) map.set(k, v);
+    return map;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Write catalog cache to disk. */
+function writeCache(catalog: Map<string, Record<string, unknown>>): void {
+  try {
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(CACHE_DIR, { recursive: true });
+    const obj: Record<string, Record<string, unknown>> = {};
+    for (const [k, v] of catalog) obj[k] = v;
+    writeFileSync(CACHE_PATH, JSON.stringify(obj, null, 2));
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Build catalog: try cache first (unless testing with custom fetchImpl), then
+ * fetch from pi.dev for each upstream kind, merge, and persist.
+ */
+export async function loadCatalog(
+  kinds: string[] = UPSTREAM_KINDS,
+  fetchImpl?: typeof fetch,
+): Promise<Map<string, Record<string, unknown>> > {
+  // When a custom fetchImpl is provided (tests), skip cache entirely
+  if (!fetchImpl) {
+    const cached = readCache();
+    if (cached && cached.size > 0) {
+      console.log(`[aiproxy] loaded ${cached.size} model(s) from cache`);
+      // Background: re-fetch and update cache (non-blocking)
+      refreshCatalog(kinds, fetch).catch(() => {});
+      return cached;
+    }
+  }
+
+  // No cache or stale, or test mode — fetch from pi.dev
+  return refreshCatalog(kinds, fetchImpl ?? fetch);
+}
+
+/** Fetch from pi.dev for all upstream kinds, merge, write cache. */
+async function refreshCatalog(
+  kinds: string[],
+  fetchImpl: typeof fetch,
+): Promise<Map<string, Record<string, unknown>> > {
+  const catalog = new Map<string, Record<string, unknown>>();
+
+  // Also read models-store.json as fallback for any models pi did refresh
+  const storeCatalog = readModelsStore();
+  for (const [k, v] of storeCatalog) catalog.set(k, v);
+
+  // Fetch from pi.dev for each upstream kind (parallel)
+  const results = await Promise.allSettled(
+    kinds.map((kind) => fetchPiDevCatalog(kind, fetchImpl)),
+  );
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      for (const [k, v] of r.value) catalog.set(k, v);
+    }
+  }
+
+  if (catalog.size > 0) {
+    console.log(`[aiproxy] loaded ${catalog.size} model metadata(s) from pi.dev`);
+    writeCache(catalog);
+  }
+  return catalog;
+}
+
+/** Read models-store.json (pi's built-in provider catalog, best-effort). */
+function readModelsStore(): Map<string, Record<string, unknown>> {
   const candidates = [
     join(homedir(), ".pi/agent/models-store.json"),
     join(process.cwd(), ".pi/models-store.json"),
@@ -142,7 +263,7 @@ export interface ProxyProviderConfig {
 }
 
 export interface ProxyProviderOptions {
-  catalog?: Map<string, Record<string, unknown>>;
+  catalog?: Map<string, Record<string, unknown>> | Promise<Map<string, Record<string, unknown>>>;
   fetchImpl?: typeof fetch;
 }
 
@@ -154,7 +275,8 @@ export async function registerProxyProvider(
   const { base, apiKey, token } = cfg;
 
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const catalog = opts.catalog ?? loadCatalog();
+  const catalogRaw = opts.catalog ?? (await loadCatalog(UPSTREAM_KINDS, fetchImpl));
+  const catalog = catalogRaw instanceof Map ? catalogRaw : new Map();
   if (catalog.size > 0) {
     console.log(`[aiproxy] loaded ${catalog.size} model(s) from pi model store`);
   }
