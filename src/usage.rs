@@ -258,13 +258,11 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// Normalize percent: values in 0..=1 are treated as fractions and scaled to 0..100.
+/// Clamp percent to 0..100. Upstream values are always percent-scale
+/// (0.3 means 0.3%, never a 0-1 fraction): scaling sub-1.0 values by 100
+/// turned 0.3% into 30%. Consistent with zai/minimax/header paths,
+/// which never rescale.
 fn normalize_percent(p: f64) -> f64 {
-    let p = if (0.0..=1.0).contains(&p) {
-        p * 100.0
-    } else {
-        p
-    };
     p.clamp(0.0, 100.0)
 }
 
@@ -1557,6 +1555,22 @@ mod tests {
         let monthly = usage.windows.iter().find(|w| w.label == "30d").unwrap();
         assert_eq!(monthly.used_percent, Some(3.0));
         assert_eq!(monthly.reset_secs, None);
+    }
+
+    #[test]
+    fn opencode_sub_one_percent_stays_percent_scale() {
+        // 0.3 means 0.3%, not a 0-1 fraction: must not become 30.0.
+        let json = r#"{"rollingUsage":{"usagePercent":0.3,"resetInSec":100}}"#;
+        let usage = parse_opencode_go(json).unwrap();
+        assert_eq!(usage.windows[0].used_percent, Some(0.3));
+    }
+
+    #[test]
+    fn opencode_sub_one_percent_js_stays_percent_scale() {
+        // Same for the JS-notation path.
+        let text = "rollingUsage: { usagePercent: 0.3, resetInSec: 100 }";
+        let usage = parse_opencode_go(text).unwrap();
+        assert_eq!(usage.windows[0].used_percent, Some(0.3));
     }
 
     #[test]
