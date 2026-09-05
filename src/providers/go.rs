@@ -224,6 +224,13 @@ impl OpencodeGoProvider {
                 body,
             });
         }
+        // Extract rate-limit headers (OpenAI-compatible format)
+        if let Some(tracker) = &ctx.usage_tracker {
+            let snapshot = crate::providers::openai::extract_openai_limits(&resp);
+            if !snapshot.windows.is_empty() {
+                tracker.update(&self.id, snapshot).await;
+            }
+        }
         let stream = resp.bytes_stream().map(|chunk| match chunk {
             Ok(b) => Ok(Event(b)),
             Err(e) => Err(ProviderError::Transport(e.to_string())),
@@ -323,6 +330,13 @@ impl Provider for OpencodeGoProvider {
                 status: status.as_u16(),
                 body,
             });
+        }
+        // Extract rate-limit headers
+        if let Some(tracker) = &ctx.usage_tracker {
+            let snapshot = crate::providers::openai::extract_openai_limits(&resp);
+            if !snapshot.windows.is_empty() {
+                tracker.update(&self.id, snapshot).await;
+            }
         }
         let stream = resp.bytes_stream().map(|chunk| match chunk {
             Ok(b) => Ok(Event(b)),

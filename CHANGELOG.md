@@ -4,14 +4,19 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.9] - 2026-09-05
+## [0.3.0] - 2026-09-05
 
-### Fixed
-- **Faithful header relay** — client request headers now reach upstreams verbatim (`x-opencode-session`, `x-opencode-client`, custom `x-*`, user-agent, …). Previously the gateways built fresh requests with only auth + content-type, silently dropping `x-opencode-session` — breaking OpenCode's conversation→backend affinity (prompt-cache warmth; some Go backends 400 without it). Stripped only what must be: aiproxy-owned headers (`authorization`, `x-api-key`, `content-type`, `anthropic-version` — reqwest appends, never replaces) and hop-by-hop/transport-managed fields (`host`, `content-length`, `connection`, `keep-alive`, `transfer-encoding`, `upgrade`, `expect`, `accept-encoding`) per RFC 9110. Body relay unchanged: byte-for-byte, only the model id patched.
+### Added
+- **Usage tracking** — `GET /v1/usage` returns per-provider rate-limit data captured from upstream response headers. Supports requests + tokens windows with used_percent, remaining, reset_secs. In-memory only (lost on restart). Extension shows the most-pressured provider on startup and every 60s: `[aiproxy] opencode-go 68% (reset 32m)`.
 
 ### Changed
 - **Extension: pi.dev catalog fetch** — `loadCatalog()` now fetches model metadata from `pi.dev/api/models/providers/{kind}` (same API pi's built-in providers use) instead of reading pi's `models-store.json`. Results cached to `~/.pi/agent/aiproxy-models.json` (4h TTL). On startup: cache first, background refresh. No dependency on pi's refresh cycle for extension-registered providers.
 - **Extension: provider attribution mirror** — `attributionHeaders()` replicates pi's `provider-attribution.js` via the `before_provider_headers` hook. Covers opencode-go session headers (`x-opencode-session` + `x-opencode-client`). Openrouter/nvidia attribution gated off (mirrors pi's telemetry gate).
+
+## [0.2.9] - 2026-09-05
+
+### Fixed
+- **Faithful header relay** — client request headers now reach upstreams verbatim (`x-opencode-session`, `x-opencode-client`, custom `x-*`, user-agent, …). Previously the gateways built fresh requests with only auth + content-type, silently dropping `x-opencode-session` — breaking OpenCode's conversation→backend affinity (prompt-cache warmth; some Go backends 400 without it). Stripped only what must be: aiproxy-owned headers (`authorization`, `x-api-key`, `content-type`, `anthropic-version` — reqwest appends, never replaces) and hop-by-hop/transport-managed fields (`host`, `content-length`, `connection`, `keep-alive`, `transfer-encoding`, `upgrade`, `expect`, `accept-encoding`) per RFC 9110. Body relay unchanged: byte-for-byte, only the model id patched.
 
 ## [0.2.8] - 2026-09-04
 

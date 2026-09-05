@@ -267,6 +267,8 @@ export interface ProxyProviderOptions {
   fetchImpl?: typeof fetch;
 }
 
+
+
 export async function registerProxyProvider(
   pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
   cfg: ProxyProviderConfig,

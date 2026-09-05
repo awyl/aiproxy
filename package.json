@@ -1,6 +1,6 @@
 {
   "name": "aiproxy",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "Setup-once LLM gateway: one OpenAI-compatible endpoint over many upstreams, plus MCP multiplexer, embeddings, and the pi provider extension",
   "keywords": ["pi-package"],
   "type": "module",

@@ -2,11 +2,53 @@ use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
+use crate::usage::{UsageData, UsageWindow};
 use axum::body::Bytes;
 use axum::http::header;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
+
+pub fn extract_openai_limits(resp: &reqwest::Response) -> UsageData {
+    let get = |name: &str| -> Option<u64> { resp.headers().get(name)?.to_str().ok()?.parse().ok() };
+    let mut windows = Vec::new();
+    if let (Some(limit), Some(remaining)) = (
+        get("x-ratelimit-limit-requests"),
+        get("x-ratelimit-remaining-requests"),
+    ) {
+        let used_percent = if limit > 0 {
+            Some(((limit - remaining) as f64 / limit as f64) * 100.0)
+        } else {
+            None
+        };
+        windows.push(UsageWindow {
+            label: "requests".into(),
+            used_percent,
+            reset_secs: get("x-ratelimit-reset-requests"),
+            window_minutes: None,
+        });
+    }
+    if let (Some(limit), Some(remaining)) = (
+        get("x-ratelimit-limit-tokens"),
+        get("x-ratelimit-remaining-tokens"),
+    ) {
+        let used_percent = if limit > 0 {
+            Some(((limit - remaining) as f64 / limit as f64) * 100.0)
+        } else {
+            None
+        };
+        windows.push(UsageWindow {
+            label: "tokens".into(),
+            used_percent,
+            reset_secs: get("x-ratelimit-reset-tokens"),
+            window_minutes: None,
+        });
+    }
+    UsageData {
+        windows,
+        pools: vec![],
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -109,6 +151,13 @@ impl Provider for OpenAiProvider {
                 status: status.as_u16(),
                 body,
             });
+        }
+        // Extract rate-limit headers before consuming the response
+        if let Some(tracker) = &ctx.usage_tracker {
+            let snapshot = extract_openai_limits(&resp);
+            if !snapshot.windows.is_empty() {
+                tracker.update(&self.id, snapshot).await;
+            }
         }
         let stream = resp.bytes_stream().map(|chunk| match chunk {
             Ok(b) => Ok(Event(b)),

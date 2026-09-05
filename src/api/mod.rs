@@ -210,6 +210,9 @@ pub struct AppState {
     /// Upstream prefix -> subscription token (from `token_env`).
     /// Missing entry: no gate. `Some(None)`: deny-all (misconfig).
     pub subscriptions: std::collections::HashMap<String, Option<String>>,
+    pub usage: crate::usage::UsageTracker,
+    pub cookie_path: std::path::PathBuf,
+    pub upstream_names: Vec<String>,
 }
 
 /// Which agent-facing error schema to speak when translating failures.

@@ -65,6 +65,7 @@ pub struct Event(pub Bytes);
 pub struct RequestContext {
     pub model: String,
     pub client_headers: axum::http::HeaderMap,
+    pub usage_tracker: Option<crate::usage::UsageTracker>,
 }
 
 /// Headers aiproxy owns (or that are unsafe/unmanaged to forward). Stripped

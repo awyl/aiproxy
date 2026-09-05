@@ -8,3 +8,5 @@ pub mod mcp_multiplexer;
 pub mod provider;
 pub mod providers;
 pub mod server;
+pub mod setup;
+pub mod usage;

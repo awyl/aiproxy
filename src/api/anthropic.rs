@@ -81,6 +81,7 @@ pub async fn messages(
     let ctx = RequestContext {
         model: mid,
         client_headers: headers,
+        usage_tracker: Some(state.usage.clone()),
     };
     match provider.messages(Bytes::from(stripped), &ctx).await {
         Ok(stream) => relay_or_error(Ok(stream), Surface::Anthropic),
@@ -129,6 +130,9 @@ mod tests {
             )),
             token: Some("tok".into()),
             subscriptions: Default::default(),
+            usage: crate::usage::UsageTracker::new(),
+            cookie_path: std::path::PathBuf::from("/tmp/test-cookie"),
+            upstream_names: vec![],
         }
     }
 

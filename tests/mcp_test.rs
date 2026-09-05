@@ -23,7 +23,9 @@ fn echo_cfg(exe: &str) -> Config {
 #[tokio::test]
 async fn stdio_backend_serves_tools_through_http() {
     let exe = env!("CARGO_BIN_EXE_echo_mcp_server");
-    let (listener, router) = server::build(echo_cfg(exe)).await.expect("daemon build");
+    let cfg = echo_cfg(exe);
+    let config_path = std::path::PathBuf::from("/tmp/test-mcp-config.yaml");
+    let (listener, router) = server::build(cfg, config_path).await.expect("daemon build");
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 

@@ -17,7 +17,8 @@ mod mock_upstream {
         std::sync::Mutex::new(None);
 
     /// Serializes tests that touch the process-global capture.
-    pub static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     pub fn app() -> Router {
         Router::new()
@@ -57,8 +58,8 @@ async fn spawn_daemon(tag: &str) -> (String, tokio::task::JoinHandle<()>) {
     let path = std::env::temp_dir().join(format!("aiproxy-e2e-{tag}.yaml"));
     std::fs::write(&path, yaml).unwrap();
     let cfg = Config::load(&path).unwrap();
+    let (listener, router) = server::build(cfg, path.clone()).await.unwrap();
     std::fs::remove_file(&path).unwrap();
-    let (listener, router) = server::build(cfg).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (format!("http://{addr}"), handle)
@@ -91,7 +92,7 @@ async fn post_json(
 
 #[tokio::test]
 async fn full_stack_health_models_chat_auth() {
-    let _guard = mock_upstream::TEST_LOCK.lock().unwrap();
+    let _guard = mock_upstream::TEST_LOCK.lock().await;
     let (base, handle) = spawn_daemon("main").await;
 
     let (status, body) = get(&base, "/healthz", None).await;

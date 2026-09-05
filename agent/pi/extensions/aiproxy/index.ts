@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerProxyProvider } from "./provider.ts";
 import { registerMcpTools } from "./mcp.ts";
+import { registerUsage } from "./usage.ts";
 
 type RawConfig = {
   baseUrl?: string;
@@ -66,4 +67,5 @@ export default async function (pi: ExtensionAPI) {
 
   await registerProxyProvider(pi, cfg);
   await registerMcpTools(pi, cfg);
+  registerUsage(pi, cfg);
 }

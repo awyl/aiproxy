@@ -5,11 +5,74 @@ use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
 };
+use crate::usage::{UsageData, UsageWindow};
 use axum::http::header;
 use bytes::Bytes;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
+
+fn extract_anthropic_limits(resp: &reqwest::Response) -> UsageData {
+    let get = |name: &str| -> Option<u64> { resp.headers().get(name)?.to_str().ok()?.parse().ok() };
+    let mut windows = Vec::new();
+    if let (Some(limit), Some(remaining)) = (
+        get("anthropic-ratelimit-requests-limit"),
+        get("anthropic-ratelimit-requests-remaining"),
+    ) {
+        let used_percent = if limit > 0 {
+            Some(((limit - remaining) as f64 / limit as f64) * 100.0)
+        } else {
+            None
+        };
+        // Anthropic reset is ISO timestamp — convert to seconds
+        let reset_secs = resp
+            .headers()
+            .get("anthropic-ratelimit-requests-reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+                    let now = chrono::Utc::now();
+                    dt.signed_duration_since(now).num_seconds().max(0) as u64
+                })
+            });
+        windows.push(UsageWindow {
+            label: "requests".into(),
+            used_percent,
+            reset_secs,
+            window_minutes: None,
+        });
+    }
+    if let (Some(limit), Some(remaining)) = (
+        get("anthropic-ratelimit-tokens-limit"),
+        get("anthropic-ratelimit-tokens-remaining"),
+    ) {
+        let used_percent = if limit > 0 {
+            Some(((limit - remaining) as f64 / limit as f64) * 100.0)
+        } else {
+            None
+        };
+        let reset_secs = resp
+            .headers()
+            .get("anthropic-ratelimit-tokens-reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+                    let now = chrono::Utc::now();
+                    dt.signed_duration_since(now).num_seconds().max(0) as u64
+                })
+            });
+        windows.push(UsageWindow {
+            label: "tokens".into(),
+            used_percent,
+            reset_secs,
+            window_minutes: None,
+        });
+    }
+    UsageData {
+        windows,
+        pools: vec![],
+    }
+}
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -111,6 +174,13 @@ impl Provider for AnthropicProvider {
                 status: status.as_u16(),
                 body,
             });
+        }
+        // Extract rate-limit headers before consuming the response
+        if let Some(tracker) = &ctx.usage_tracker {
+            let snapshot = extract_anthropic_limits(&resp);
+            if !snapshot.windows.is_empty() {
+                tracker.update(&self.id, snapshot).await;
+            }
         }
         let stream = resp.bytes_stream().map(|chunk| match chunk {
             Ok(b) => Ok(Event(b)),

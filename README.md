@@ -199,6 +199,30 @@ Models download automatically on first use — no manual GGUF management needed.
 
 Exposed as `embeddings-local/<model-id>` in the catalog (surface: `embedding`). Standard `POST /v1/embeddings` endpoint.
 
+## Usage tracking
+
+`GET /v1/usage` returns per-provider rate-limit data captured from upstream response headers:
+
+```json
+[
+  {
+    "provider": "opencode-go",
+    "windows": [
+      { "resource": "requests", "limit": 100, "remaining": 65, "used_percent": 35.0, "reset_secs": 1800 },
+      { "resource": "tokens", "limit": 1000000, "remaining": 400000, "used_percent": 60.0, "reset_secs": 3600 }
+    ],
+    "updated_at": 1725547200000
+  }
+]
+```
+
+In-memory only (lost on restart). Auth-gated like other `/v1/*` endpoints.
+
+The pi extension shows the most-pressured provider on startup and every 60s:
+```
+[aiproxy] opencode-go 60% (reset 1h)
+```
+
 ## Connecting pi
 
 Install the pi aiproxy extension:

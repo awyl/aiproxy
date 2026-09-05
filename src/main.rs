@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("config error: {e}"))?;
     let port = cli.port.unwrap_or(port);
     tracing::info!(host = %host, port, "starting aiproxy");
-    aiproxy::server::run_with_port(config, cli.port)
+    aiproxy::server::run_with_port(config, cli.config, cli.port)
         .await
         .map_err(Into::into)
 }

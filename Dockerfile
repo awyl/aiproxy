@@ -37,8 +37,8 @@ ENV PATH="/root/.local/bin:${PATH}"
 # Copy binary from build stage
 COPY --from=rust-builder /usr/local/bin/aiproxy /usr/local/bin/aiproxy
 
-RUN mkdir -p /etc/aiproxy /models
-VOLUME ["/etc/aiproxy", "/models"]
+RUN mkdir -p /etc/aiproxy /models /runtime
+VOLUME ["/etc/aiproxy", "/models", "/runtime"]
 ENV FASTEMBED_CACHE_DIR=/models
 EXPOSE 8080
 

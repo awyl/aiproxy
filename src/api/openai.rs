@@ -23,14 +23,17 @@ pub fn openai_router(token: Option<String>) -> Router<AppState> {
 
 /// Router builder that additionally accepts subscription tokens for auth.
 pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router<AppState> {
+    let auth_state = crate::auth::auth_state(token, subs);
+    let usage_router = Router::new().route("/v1/usage", get(usage_handler));
     apply_auth(
         Router::new()
             .route("/v1/models", get(list_models))
             .route("/v1/chat/completions", post(chat_completions))
             .route("/v1/responses", post(responses))
             .route("/v1/embeddings", post(embeddings)),
-        crate::auth::auth_state(token, subs),
+        auth_state.clone(),
     )
+    .merge(usage_router)
 }
 
 pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
@@ -67,6 +70,10 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
         .into_response()
 }
 
+async fn usage_handler(State(state): State<AppState>) -> axum::response::Response {
+    axum::Json(state.usage.snapshot().await).into_response()
+}
+
 /// Resolve prefixed model -> provider + stripped id, verify the wire surface,
 /// then invoke the provider method (passed as a closure to share this prelude
 /// between the chat and responses handlers).
@@ -84,58 +91,60 @@ async fn route_one(
         axum::http::HeaderMap,
     )
         -> Pin<Box<dyn Future<Output = Result<ProviderStream, ProviderError>> + Send>>,
-) -> Result<ProviderStream, axum::response::Response> {
+) -> Result<ProviderStream, Box<axum::response::Response>> {
     let Ok(req) = serde_json::from_slice::<Value>(&raw) else {
-        return Err(openai_error(
+        return Err(Box::new(openai_error(
             StatusCode::BAD_REQUEST,
             "request body is not valid JSON",
             "invalid_request_error",
-        ));
+        )));
     };
     let Some(model) = req.get("model").and_then(Value::as_str) else {
-        return Err(openai_error(
+        return Err(Box::new(openai_error(
             StatusCode::BAD_REQUEST,
             "missing 'model' field",
             "invalid_request_error",
-        ));
+        )));
     };
     let Some((pid, mid)) = state.registry.resolve(model) else {
         let prefixes: Vec<&str> = state.registry.prefixes().collect();
-        return Err(openai_error(
+        return Err(Box::new(openai_error(
             StatusCode::BAD_REQUEST,
             format!(
                 "unknown model '{model}'; use a prefixed model id (upstream/model); known prefixes: {}",
                 prefixes.join(", ")
             ),
             "invalid_request_error",
-        ));
+        )));
     };
     // Per-upstream subscription gate: subscription tokens (token_env) lock
     // each upstream to the holder. Global auth already accepted this request;
     // this checks the subscription-scoped token.
     if crate::api::check_subscription(state, &pid, token.as_deref()).is_err() {
-        return Err(openai_error(
+        return Err(Box::new(openai_error(
             StatusCode::UNAUTHORIZED,
             format!(
                 "upstream '{pid}' is subscription-gated; this token does not own it (or its token_env is not set)"
             ),
             "authentication_error",
-        ));
+        )));
     }
     let provider = state.registry.provider(&pid).unwrap();
-    check_surface(provider.as_ref(), &mid, required, surface)?;
+    check_surface(provider.as_ref(), &mid, required, surface).map_err(Box::new)?;
     // Byte-faithful relay: patch only the model id in the raw body so the
     // upstream sees the client's exact serialization (key order, spacing,
     // number formatting) — some upstreams key request caching on it.
     let stripped = replace_model_field(&raw, &mid).unwrap_or_else(|| raw.to_vec());
     call(provider, Bytes::from(stripped), mid, client_headers)
         .await
-        .map_err(|e| match e {
-            ProviderError::Transport(msg) if msg.contains("surface") => {
-                openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
-            }
-            // upstream Http/transport failures translate to the surface's error shape
-            other => relay_error(other, surface),
+        .map_err(|e| {
+            Box::new(match e {
+                ProviderError::Transport(msg) if msg.contains("surface") => {
+                    openai_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
+                }
+                // upstream Http/transport failures translate to the surface's error shape
+                other => relay_error(other, surface),
+            })
         })
 }
 
@@ -161,6 +170,7 @@ async fn chat_completions(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    let usage = state.usage.clone();
     match route_one(
         &state,
         body,
@@ -169,12 +179,14 @@ async fn chat_completions(
         ModelSurface::ChatCompletions,
         Surface::Openai,
         |p, body, model, client_headers| {
+            let usage = usage.clone();
             Box::pin(async move {
                 p.chat_completions(
                     body,
                     &RequestContext {
                         model,
                         client_headers,
+                        usage_tracker: Some(usage),
                     },
                 )
                 .await
@@ -184,7 +196,7 @@ async fn chat_completions(
     .await
     {
         Ok(stream) => relay_or_error(Ok(stream), Surface::Openai),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -194,6 +206,7 @@ async fn responses(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    let usage = state.usage.clone();
     match route_one(
         &state,
         body,
@@ -202,12 +215,14 @@ async fn responses(
         ModelSurface::Responses,
         Surface::Openai,
         |p, body, model, client_headers| {
+            let usage = usage.clone();
             Box::pin(async move {
                 p.responses(
                     body,
                     &RequestContext {
                         model,
                         client_headers,
+                        usage_tracker: Some(usage),
                     },
                 )
                 .await
@@ -217,7 +232,7 @@ async fn responses(
     .await
     {
         Ok(stream) => relay_or_error(Ok(stream), Surface::Openai),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -299,6 +314,9 @@ mod tests {
             embeddings: std::sync::Arc::new(embed),
             token: Some("tok".into()),
             subscriptions: Default::default(),
+            usage: crate::usage::UsageTracker::new(),
+            cookie_path: std::path::PathBuf::from("/tmp/test-cookie"),
+            upstream_names: vec![],
         }
     }
 

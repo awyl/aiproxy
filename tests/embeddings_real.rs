@@ -10,10 +10,10 @@
 //!   FASTEMBED_CACHE_DIR=/tmp/models cargo test --test embeddings_real -- --nocapture
 
 use aiproxy::embeddings::{EmbedError, EmbeddingBackend, FastembedBackend};
-use std::sync::Mutex;
 
 /// Serializes tests that share the fastembed cache dir to prevent download races.
-static CACHE_LOCK: Mutex<()> = Mutex::new(());
+static CACHE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// All three models configured in aiproxy.yaml.example.
 const TEST_MODELS: &[(&str, &str, usize)] = &[
@@ -26,7 +26,7 @@ const TEST_MODELS: &[(&str, &str, usize)] = &[
 /// Test that each model can be downloaded, loaded, and produces valid embeddings.
 #[tokio::test]
 async fn real_download_load_and_embed() {
-    let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE_LOCK.lock().await;
     let backend = FastembedBackend;
     let sample_texts = ["Hello, world!", "This is a test sentence."];
 
@@ -43,7 +43,7 @@ async fn real_download_load_and_embed() {
 
         // Step 2: Embed sample texts
         let t1 = std::time::Instant::now();
-        let refs: Vec<&str> = sample_texts.iter().copied().collect();
+        let refs: Vec<&str> = sample_texts.to_vec();
         let (embeddings, dims) = instance.embed(&refs).await.unwrap_or_else(|e| {
             panic!("failed to embed with {variant}: {e}");
         });
@@ -97,7 +97,7 @@ async fn real_download_load_and_embed() {
 /// Test that the EmbeddingManager (with real backend) works end-to-end.
 #[tokio::test]
 async fn real_manager_embed_flow() {
-    let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CACHE_LOCK.lock().await;
     use aiproxy::config::{EmbeddingModelConfig, EmbeddingsConfig};
     use aiproxy::embeddings::EmbeddingManager;
 
