@@ -2,26 +2,23 @@
 
 use crate::config::McpServerConfig;
 use crate::mcp::{
-    Backend, McpServerEntry, check_server_auth, parse_mcp_servers_header, resolve_check_token,
+    BackendCache, McpServerEntry, check_server_auth, parse_mcp_servers_header, resolve_check_token,
 };
 use axum::Router;
 use axum::extract::{Json, State};
 use axum::http::HeaderMap;
 use axum::http::{HeaderName, StatusCode};
 use axum::response::IntoResponse;
-use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::model::CallToolRequestParams;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::process::Command;
-use tokio::sync::Mutex;
 
 /// Shared state for the multiplexed /mcp endpoint.
 #[derive(Clone)]
 pub struct McpMultiplexState {
     pub servers: Vec<McpServerConfig>,
     pub global_token: Option<String>,
+    /// Same cache the per-server `/mcp/<name>` routes use: one backend per server.
+    pub cache: BackendCache,
 }
 
 /// Extract auth token from Authorization header (Bearer <token>).
@@ -93,32 +90,37 @@ async fn mcp_multiplex_handler(
         "tools/list" => {
             let mut all_tools: Vec<Value> = Vec::new();
             for server in &matched {
-                match connect_backend(server).await {
-                    Ok(backend) => {
-                        let mut guard = backend.lock().await;
-                        if let Some(b) = guard.as_mut() {
-                            match b.list_tools(None).await {
-                                Ok(result) => {
-                                    for tool in result.tools {
-                                        let prefixed = format!("{}__{}", server.name, tool.name);
-                                        all_tools.push(json!({
-                                            "name": prefixed,
-                                            "description": tool.description,
-                                            "inputSchema": tool.input_schema,
-                                        }));
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        server = %server.name,
-                                        "list_tools failed: {e}"
-                                    );
-                                }
-                            }
+                // Shared cache: same backend session the /mcp/<name> route uses.
+                let slot = state.cache.slot(&server.name);
+                let mut guard = slot.lock().await;
+                if guard.is_none() {
+                    match crate::mcp::connect_backend(server).await {
+                        Ok(b) => *guard = Some(b),
+                        Err(e) => {
+                            tracing::warn!(server = %server.name, "connect failed: {e}");
+                            continue;
+                        }
+                    }
+                }
+                let Some(b) = guard.as_mut() else {
+                    continue;
+                };
+                match b.list_tools(None).await {
+                    Ok(result) => {
+                        for tool in result.tools {
+                            let prefixed = format!("{}__{}", server.name, tool.name);
+                            all_tools.push(json!({
+                                "name": prefixed,
+                                "description": tool.description,
+                                "inputSchema": tool.input_schema,
+                            }));
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(server = %server.name, "connect failed: {e}");
+                        tracing::warn!(
+                            server = %server.name,
+                            "list_tools failed: {e}"
+                        );
                     }
                 }
             }
@@ -153,67 +155,34 @@ async fn mcp_multiplex_handler(
                 }
             };
 
-            // Route to backend
-            match connect_backend(server).await {
-                Ok(backend) => {
-                    let mut guard = backend.lock().await;
-                    if let Some(b) = guard.as_mut() {
-                        let arguments = params.get("arguments").and_then(Value::as_object).cloned();
-                        let mut call_params = CallToolRequestParams::new(real_name.to_string());
-                        if let Some(args) = arguments {
-                            call_params = call_params.with_arguments(args);
-                        }
-                        match b.call_tool(call_params).await {
-                            Ok(call_result) => {
-                                let val = serde_json::to_value(&call_result).unwrap_or(json!({}));
-                                jsonrpc_response(id, &val)
-                            }
-                            Err(e) => {
-                                jsonrpc_error(id, -32603, &format!("backend call failed: {e}"))
-                            }
-                        }
-                    } else {
-                        jsonrpc_error(id, -32603, "backend not connected")
-                    }
+            // Route to backend via the shared cache (same session as /mcp/<name>).
+            let slot = state.cache.slot(&server.name);
+            let mut guard = slot.lock().await;
+            if guard.is_none()
+                && let Err(e) = crate::mcp::connect_backend(server)
+                    .await
+                    .map(|b| *guard = Some(b))
+            {
+                return jsonrpc_error(id, -32603, &format!("connect failed: {e}"));
+            }
+            let Some(b) = guard.as_mut() else {
+                return jsonrpc_error(id, -32603, "backend not connected");
+            };
+            let arguments = params.get("arguments").and_then(Value::as_object).cloned();
+            let mut call_params = CallToolRequestParams::new(real_name.to_string());
+            if let Some(args) = arguments {
+                call_params = call_params.with_arguments(args);
+            }
+            match b.call_tool(call_params).await {
+                Ok(call_result) => {
+                    let val = serde_json::to_value(&call_result).unwrap_or(json!({}));
+                    jsonrpc_response(id, &val)
                 }
-                Err(e) => jsonrpc_error(id, -32603, &format!("connect failed: {e}")),
+                Err(e) => jsonrpc_error(id, -32603, &format!("backend call failed: {e}")),
             }
         }
         _ => jsonrpc_error(id, -32601, &format!("method not found: {method}")),
     }
-}
-
-/// Connect to a server's backend (lazy, cached).
-async fn connect_backend(server: &McpServerConfig) -> Result<Arc<Mutex<Option<Backend>>>, String> {
-    let info = ClientInfo::new(
-        ClientCapabilities::default(),
-        Implementation::new("aiproxy", env!("CARGO_PKG_VERSION")),
-    );
-    let backend: Backend = if let Some(cmd) = &server.command {
-        let mut command = Command::new(cmd);
-        command.args(&server.args).envs(&server.env);
-        let transport = TokioChildProcess::builder(command)
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("stdio spawn failed: {e}"))?
-            .0;
-        rmcp::serve_client(info, transport)
-            .await
-            .map_err(|e| format!("stdio backend: {e}"))?
-    } else if let Some(url) = &server.url {
-        let config = StreamableHttpClientTransportConfig::with_uri(url.clone());
-        let config = match server.api_key() {
-            Some(k) => config.auth_header(k),
-            None => config,
-        };
-        let transport = StreamableHttpClientTransport::from_config(config);
-        rmcp::serve_client(info, transport)
-            .await
-            .map_err(|e| format!("remote backend: {e}"))?
-    } else {
-        return Err("server has neither command nor url".into());
-    };
-    Ok(Arc::new(Mutex::new(Some(backend))))
 }
 
 fn jsonrpc_response(id: Option<&Value>, result: &Value) -> axum::response::Response {
@@ -245,6 +214,7 @@ mod tests {
         McpMultiplexState {
             servers,
             global_token: token,
+            cache: BackendCache::default(),
         }
     }
 

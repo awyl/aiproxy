@@ -167,11 +167,15 @@ pub async fn build_with_port(
         }
     });
 
+    // MCP backend cache: one backend session per server, shared by the
+    // per-server /mcp/<name> routes and the /mcp multiplexer.
+    let mcp_cache = crate::mcp::BackendCache::default();
     let mcp_router = crate::mcp::mcp_router(
         &config.mcp.servers,
         &token,
         &host,
         &config.mcp.allowed_hosts,
+        &mcp_cache,
     )
     .map_err(ServerError::Mcp)?;
 
@@ -179,6 +183,7 @@ pub async fn build_with_port(
     let multiplex_state = crate::mcp_multiplexer::McpMultiplexState {
         servers: config.mcp.servers.clone(),
         global_token: token.clone(),
+        cache: mcp_cache,
     };
     let multiplex_router =
         crate::mcp_multiplexer::mcp_multiplex_route().with_state(multiplex_state);

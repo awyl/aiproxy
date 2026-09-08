@@ -16,17 +16,83 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ErrorData, ServerHandler};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
 pub type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
 
+/// One lazily-connected backend handle, shared by every route serving a server.
+/// Dropped (→ reconnect on next use) only on failure; never on idle.
+pub type BackendSlot = Arc<Mutex<Option<Backend>>>;
+
+/// Process-wide backend cache keyed by server name. Built once in `server.rs`
+/// and shared by the per-server `/mcp/<name>` routes and the `/mcp` multiplexer
+/// so each configured server has exactly one backend session.
+#[derive(Debug, Clone, Default)]
+pub struct BackendCache {
+    inner: Arc<std::sync::Mutex<HashMap<String, BackendSlot>>>,
+}
+
+impl BackendCache {
+    /// Return the shared slot for `name`, creating it empty on first use.
+    /// Sync-safe (also callable from non-async factories): the critical
+    /// section only does a HashMap lookup/insert, never I/O. The slots
+    /// themselves stay async (`tokio::sync::Mutex`) for the connect path.
+    pub fn slot(&self, name: &str) -> BackendSlot {
+        let mut inner = self.inner.lock().expect("BackendCache poisoned");
+        inner
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    }
+}
+
+/// Lazily connect a backend (stdio child or remote streamable-HTTP server).
+/// Shared by `ProxyHandler` and the multiplexer.
+pub(crate) async fn connect_backend(cfg: &McpServerConfig) -> Result<Backend, ErrorData> {
+    let info = ClientInfo::new(
+        ClientCapabilities::default(),
+        Implementation::new("aiproxy", env!("CARGO_PKG_VERSION")),
+    );
+    if let Some(cmd) = &cfg.command {
+        let mut command = Command::new(cmd);
+        command.args(&cfg.args).envs(&cfg.env);
+        // stderr -> null: children must not inherit the daemon's stderr
+        // (a long-lived child would otherwise hold the terminal pipe open).
+        let transport = TokioChildProcess::builder(command)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| ErrorData::internal_error(format!("stdio spawn failed: {e}"), None))?
+            .0;
+        rmcp::serve_client(info, transport)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("stdio backend: {e}"), None))
+    } else if let Some(url) = &cfg.url {
+        let config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+        let config = match cfg.api_key() {
+            Some(k) => config.auth_header(k), // reqwest adds the "Bearer " prefix
+            None => config,
+        };
+        let transport = StreamableHttpClientTransport::from_config(config);
+        rmcp::serve_client(info, transport)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("remote backend: {e}"), None))
+    } else {
+        Err(ErrorData::invalid_params(
+            "server has neither command nor url",
+            None,
+        ))
+    }
+}
+
 pub fn mcp_router(
     servers: &[McpServerConfig],
     global_token: &Option<String>,
     bind_host: &str,
     allowed_hosts: &[String],
+    cache: &BackendCache,
 ) -> Result<Router<AppState>, String> {
     let mut router = Router::<AppState>::new();
     let mut allowed: Vec<String> = if allowed_hosts.is_empty() {
@@ -42,6 +108,7 @@ pub fn mcp_router(
         let effective_token = server.effective_token(global_token);
 
         let name = server.clone();
+        let cache = cache.clone();
         let mut server_config = StreamableHttpServerConfig::default();
         server_config.allowed_hosts = allowed.clone();
         // Stateless mode: no session IDs, no DNS-rebinding-like session lookup.
@@ -49,7 +116,7 @@ pub fn mcp_router(
         // which avoids "Session not found" when SSE streams reconnect.
         server_config.legacy_session_mode = false;
         let service: StreamableHttpService<ProxyHandler, _> = StreamableHttpService::new(
-            move || Ok(ProxyHandler::new(name.clone())),
+            move || Ok(ProxyHandler::new(name.clone(), &cache)),
             LocalSessionManager::default().into(),
             server_config,
         );
@@ -67,59 +134,21 @@ pub fn mcp_router(
 #[derive(Debug, Clone)]
 pub struct ProxyHandler {
     cfg: McpServerConfig,
-    backend: Arc<Mutex<Option<Backend>>>,
+    backend: BackendSlot,
 }
 
 impl ProxyHandler {
-    pub fn new(cfg: McpServerConfig) -> Self {
-        Self {
-            cfg,
-            backend: Arc::new(Mutex::new(None)),
-        }
+    pub fn new(cfg: McpServerConfig, cache: &BackendCache) -> Self {
+        let backend = cache.slot(&cfg.name);
+        Self { cfg, backend }
     }
 
     async fn backend(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Backend>>, ErrorData> {
         let mut guard = self.backend.lock().await;
         if guard.is_none() {
-            *guard = Some(self.connect().await?);
+            *guard = Some(connect_backend(&self.cfg).await?);
         }
         Ok(guard)
-    }
-
-    async fn connect(&self) -> Result<Backend, ErrorData> {
-        let info = ClientInfo::new(
-            ClientCapabilities::default(),
-            Implementation::new("aiproxy", env!("CARGO_PKG_VERSION")),
-        );
-        if let Some(cmd) = &self.cfg.command {
-            let mut command = Command::new(cmd);
-            command.args(&self.cfg.args).envs(&self.cfg.env);
-            // stderr -> null: children must not inherit the daemon's stderr
-            // (a long-lived child would otherwise hold the terminal pipe open).
-            let transport = TokioChildProcess::builder(command)
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|e| ErrorData::internal_error(format!("stdio spawn failed: {e}"), None))?
-                .0;
-            rmcp::serve_client(info, transport)
-                .await
-                .map_err(|e| ErrorData::internal_error(format!("stdio backend: {e}"), None))
-        } else if let Some(url) = &self.cfg.url {
-            let config = StreamableHttpClientTransportConfig::with_uri(url.clone());
-            let config = match self.cfg.api_key() {
-                Some(k) => config.auth_header(k), // reqwest adds the "Bearer " prefix
-                None => config,
-            };
-            let transport = StreamableHttpClientTransport::from_config(config);
-            rmcp::serve_client(info, transport)
-                .await
-                .map_err(|e| ErrorData::internal_error(format!("remote backend: {e}"), None))
-        } else {
-            Err(ErrorData::invalid_params(
-                "server has neither command nor url",
-                None,
-            ))
-        }
     }
 }
 
@@ -327,5 +356,15 @@ mod multiplexer_tests {
     #[test]
     fn auth_required_no_token_denies() {
         assert!(!check_server_auth(None, &Some("secret".into())));
+    }
+
+    #[test]
+    fn backend_cache_returns_same_slot_per_server() {
+        let cache = BackendCache::default();
+        let a1 = cache.slot("echo");
+        let a2 = cache.slot("echo");
+        let b = cache.slot("other");
+        assert!(Arc::ptr_eq(&a1, &a2), "same server must share one slot");
+        assert!(!Arc::ptr_eq(&a1, &b), "different servers must not share");
     }
 }

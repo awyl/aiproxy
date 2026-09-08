@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - **Usage sub-1% display** — opencode-go windows under 1% (e.g. 0.3%) no longer show 100x (30%). `normalize_percent` treated any 0..=1 value as a 0-1 fraction and scaled it; upstream values are always percent-scale, so it now clamps only — consistent with zai/minimax/header paths which never rescale.
+- **MCP shared backend cache** — `/mcp` multiplexer now shares the per-server backend cache with `/mcp/<name>` routes: one backend session per server instead of spawning a fresh backend on every multiplexed request.
 
 ## [0.3.0] - 2026-09-05
 
