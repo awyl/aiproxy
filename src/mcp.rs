@@ -47,6 +47,19 @@ impl BackendCache {
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
     }
+
+    /// Return the shared slot for `cfg`, connecting first on cold start.
+    /// One call site for the lock-connect pattern both routers share.
+    pub async fn ensure(&self, cfg: &McpServerConfig) -> Result<BackendSlot, ErrorData> {
+        let slot = self.slot(&cfg.name);
+        {
+            let mut guard = slot.lock().await;
+            if guard.is_none() {
+                *guard = Some(connect_backend(cfg).await?);
+            }
+        }
+        Ok(slot)
+    }
 }
 
 /// Lazily connect a backend (stdio child or remote streamable-HTTP server).

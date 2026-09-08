@@ -91,17 +91,14 @@ async fn mcp_multiplex_handler(
             let mut all_tools: Vec<Value> = Vec::new();
             for server in &matched {
                 // Shared cache: same backend session the /mcp/<name> route uses.
-                let slot = state.cache.slot(&server.name);
-                let mut guard = slot.lock().await;
-                if guard.is_none() {
-                    match crate::mcp::connect_backend(server).await {
-                        Ok(b) => *guard = Some(b),
-                        Err(e) => {
-                            tracing::warn!(server = %server.name, "connect failed: {e}");
-                            continue;
-                        }
+                let slot = match state.cache.ensure(server).await {
+                    Ok(slot) => slot,
+                    Err(e) => {
+                        tracing::warn!(server = %server.name, "connect failed: {e}");
+                        continue;
                     }
-                }
+                };
+                let mut guard = slot.lock().await;
                 let Some(b) = guard.as_mut() else {
                     continue;
                 };
@@ -156,15 +153,11 @@ async fn mcp_multiplex_handler(
             };
 
             // Route to backend via the shared cache (same session as /mcp/<name>).
-            let slot = state.cache.slot(&server.name);
+            let slot = match state.cache.ensure(server).await {
+                Ok(slot) => slot,
+                Err(e) => return jsonrpc_error(id, -32603, &format!("connect failed: {e}")),
+            };
             let mut guard = slot.lock().await;
-            if guard.is_none()
-                && let Err(e) = crate::mcp::connect_backend(server)
-                    .await
-                    .map(|b| *guard = Some(b))
-            {
-                return jsonrpc_error(id, -32603, &format!("connect failed: {e}"));
-            }
             let Some(b) = guard.as_mut() else {
                 return jsonrpc_error(id, -32603, "backend not connected");
             };

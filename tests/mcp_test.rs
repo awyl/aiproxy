@@ -15,11 +15,7 @@ fn echo_cfg(exe: &str) -> Config {
     );
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "aiproxy-mcp-{}-{}.yaml",
-        std::process::id(),
-        n
-    ));
+    let path = std::env::temp_dir().join(format!("aiproxy-mcp-{}-{}.yaml", std::process::id(), n));
     std::fs::write(&path, yaml).unwrap();
     let cfg = Config::load(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
