@@ -26,8 +26,7 @@ fn echo_cfg(exe: &str) -> Config {
 async fn stdio_backend_serves_tools_through_http() {
     let exe = env!("CARGO_BIN_EXE_echo_mcp_server");
     let cfg = echo_cfg(exe);
-    let config_path = std::path::PathBuf::from("/tmp/test-mcp-config.yaml");
-    let (listener, router) = server::build(cfg, config_path).await.expect("daemon build");
+    let (listener, router) = server::build(cfg).await.expect("daemon build");
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
@@ -82,8 +81,7 @@ async fn stdio_backend_serves_tools_through_http() {
 async fn multiplexer_lists_and_calls_through_shared_backend() {
     let exe = env!("CARGO_BIN_EXE_echo_mcp_server");
     let cfg = echo_cfg(exe);
-    let config_path = std::path::PathBuf::from("/tmp/test-mcp-multiplex-config.yaml");
-    let (listener, router) = server::build(cfg, config_path).await.expect("daemon build");
+    let (listener, router) = server::build(cfg).await.expect("daemon build");
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();

@@ -9,7 +9,6 @@ use crate::discovery::ModelRegistry;
 use crate::providers::build_providers;
 use axum::Router;
 use axum::routing::get;
-use axum::routing::post;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -28,7 +27,6 @@ pub enum ServerError {
 /// (CLI `--port`), which replaces the port portion of the bind string.
 pub async fn build_with_port(
     config: Config,
-    config_path: std::path::PathBuf,
     port_override: Option<u16>,
 ) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
@@ -76,24 +74,6 @@ pub async fn build_with_port(
         tracing::warn!("no auth token configured — API is unauthenticated");
     }
     let usage = crate::usage::UsageTracker::new();
-    let setup_cookie_path = crate::setup::cookie_dir(&config_path);
-    let upstream_names: Vec<String> = config
-        .upstreams
-        .iter()
-        .map(|u| {
-            if config
-                .upstreams
-                .iter()
-                .filter(|u2| u2.kind == u.kind)
-                .count()
-                > 1
-            {
-                format!("{}={}", u.kind.as_str(), u.name.as_deref().unwrap_or(""))
-            } else {
-                u.kind.as_str().to_string()
-            }
-        })
-        .collect();
     let state = AppState {
         registry,
         embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(
@@ -102,8 +82,6 @@ pub async fn build_with_port(
         token: token.clone(),
         subscriptions,
         usage: usage.clone(),
-        cookie_path: setup_cookie_path.clone(),
-        upstream_names,
     };
 
     // Background usage fetcher for upstreams with billing endpoints.
@@ -183,11 +161,7 @@ pub async fn build_with_port(
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/setup", get(crate::setup::setup_page))
-        .route("/usage", get(crate::setup::usage_page))
-        .route("/api/cookie", post(crate::setup::set_cookie))
-        .route("/api/cookie/status", get(crate::setup::cookie_status))
-        .route("/api/upstreams", get(crate::setup::upstreams_list))
+        .route("/usage", get(crate::pages::usage_page))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
         .merge(anthropic_router_with_subs(
             token.clone(),
@@ -201,24 +175,17 @@ pub async fn build_with_port(
     Ok((listener, app))
 }
 
-pub async fn build(
-    config: Config,
-    config_path: std::path::PathBuf,
-) -> Result<(TcpListener, Router), ServerError> {
-    build_with_port(config, config_path, None).await
+pub async fn build(config: Config) -> Result<(TcpListener, Router), ServerError> {
+    build_with_port(config, None).await
 }
 
-pub async fn run(config: Config, config_path: std::path::PathBuf) -> Result<(), ServerError> {
-    let (listener, app) = build(config, config_path).await?;
+pub async fn run(config: Config) -> Result<(), ServerError> {
+    let (listener, app) = build(config).await?;
     serve(listener, app).await
 }
 
-pub async fn run_with_port(
-    config: Config,
-    config_path: std::path::PathBuf,
-    port_override: Option<u16>,
-) -> Result<(), ServerError> {
-    let (listener, app) = build_with_port(config, config_path, port_override).await?;
+pub async fn run_with_port(config: Config, port_override: Option<u16>) -> Result<(), ServerError> {
+    let (listener, app) = build_with_port(config, port_override).await?;
     serve(listener, app).await
 }
 

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **opencode-go cookie plumbing** — the `/setup` page, `POST /api/cookie`, `GET /api/cookie/status` and `GET /api/upstreams` are gone, along with the cookie read/write/list helpers, `AppState.cookie_path`, `AppState.upstream_names`, and the now-unused `config_path` parameter threaded through `server::build`/`run`. Nothing read `/runtime/opencode-cookie_*` after the usage fetcher moved to the Zen usage API, so the page was still advertising "Cookie saved successfully" for a write no code consumed. `/usage` is unchanged; `src/setup.rs` became `src/pages.rs`.
+
 ## [0.3.2] - 2026-10-02
 
 ### Changed

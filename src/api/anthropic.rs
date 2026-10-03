@@ -131,8 +131,6 @@ mod tests {
             token: Some("tok".into()),
             subscriptions: Default::default(),
             usage: crate::usage::UsageTracker::new(),
-            cookie_path: std::path::PathBuf::from("/tmp/test-cookie"),
-            upstream_names: vec![],
         }
     }
 

@@ -58,7 +58,7 @@ async fn spawn_daemon(tag: &str) -> (String, tokio::task::JoinHandle<()>) {
     let path = std::env::temp_dir().join(format!("aiproxy-e2e-{tag}.yaml"));
     std::fs::write(&path, yaml).unwrap();
     let cfg = Config::load(&path).unwrap();
-    let (listener, router) = server::build(cfg, path.clone()).await.unwrap();
+    let (listener, router) = server::build(cfg).await.unwrap();
     std::fs::remove_file(&path).unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
