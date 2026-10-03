@@ -140,18 +140,11 @@ pub async fn build_with_port(
             } else {
                 u.kind.as_str().to_string()
             };
-            let cookie = if matches!(u.kind, crate::config::UpstreamKind::OpencodeGo) {
-                let path = crate::setup::cookie_path(&setup_cookie_path, &provider_name);
-                crate::setup::read_cookie(&path)
-            } else {
-                None
-            };
             crate::usage::FetcherConfig {
                 kind: u.kind.as_str().to_string(),
                 provider_name: provider_name.clone(),
                 api_key,
                 base_url: u.base_url.clone(),
-                cookie,
             }
         })
         .collect();

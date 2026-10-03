@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-02
+
+### Changed
+- **opencode-go usage uses the official Zen usage API** — `GET <base_url>/usage` (`https://opencode.ai/zen/go/v1/usage`), authenticated with the same inference API key the upstream already uses for model traffic (`Authorization: Bearer`). It is a supported route in opencode's inference proxy (`packages/console/app/src/lib/inference-proxy.ts`: `"GET /zen/go/v1/usage": "/go/v1/usage"`) and returns `{usage: {rolling, weekly, monthly}}` with percent-scale `percent` and RFC3339 `resetsAt` → 5h / 7d / 30d windows.
+
+### Fixed
+- **opencode-go usage no longer needs a browser session cookie** — the usage path drops the `/setup`-pasted opencode.ai cookie entirely. The original scrape (`GET /_server?id=<hash>` → `GET /workspace/{id}/go` + regex) was retired by opencode.ai's console rebuild, and its replacement (`GET /console/api/go/status`) is a console-UI route that rejects session cookies — so every fetch reported "opencode session expired" against a perfectly valid session. No cookie, no session, no expiry, no HTML, no micro-cent arithmetic. `FetcherConfig.cookie_path` is gone; opencode-go now takes `api_key` + `base_url` like every other billing fetcher.
+
 ## [0.3.1] - 2026-09-08
 
 ### Fixed

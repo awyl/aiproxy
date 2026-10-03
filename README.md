@@ -218,6 +218,13 @@ Exposed as `embeddings-local/<model-id>` in the catalog (surface: `embedding`). 
 
 In-memory only (lost on restart). Auth-gated like other `/v1/*` endpoints.
 
+Sources differ per upstream: OpenAI-style gateways report rate-limit headers;
+minimax/zai/openrouter have billing endpoints; **opencode-go** calls the official
+Zen usage route (`GET <base_url>/usage` → `opencode.ai/zen/go/v1/usage`)
+authenticated with the same inference API key the upstream already uses, and
+reports its 5h / 7d / 30d subscription windows as percent. No browser cookie,
+session or HTML scraping is involved.
+
 The pi extension shows the most-pressured provider on startup and every 60s:
 ```
 [aiproxy] opencode-go 60% (reset 1h)
