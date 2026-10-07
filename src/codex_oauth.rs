@@ -47,6 +47,294 @@ pub enum CodexError {
     DeviceFlow(String),
 }
 
+// ── Token manager ──────────────────────────────────────────────────────────
+
+/// Refresh once the access token is within this margin of expiry.
+pub const REFRESH_MARGIN_MS: u64 = 60 * 60 * 1000;
+const BACKOFF_START_MS: u64 = 60 * 1000;
+const BACKOFF_MAX_MS: u64 = 32 * 60 * 1000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexStatus {
+    LoggedOut,
+    LoggedIn { expires_at_ms: u64 },
+}
+
+#[derive(Debug)]
+struct ManagerInner {
+    tokens: Option<Tokens>,
+    /// Refresh token that produced `invalid_grant` — a differing token in the
+    /// state file means a fresh login happened and the latch is cleared.
+    bad_refresh: Option<String>,
+    backoff_ms: u64,
+    backoff_until_ms: u64,
+    last_error: Option<String>,
+}
+
+/// Owns the Codex credential lifecycle: load, single-flight refresh, rotation
+/// persistence, `invalid_grant` latch, and backoff.
+pub struct CodexTokenManager {
+    state_path: std::path::PathBuf,
+    token_url: String,
+    client: reqwest::Client,
+    inner: tokio::sync::Mutex<ManagerInner>,
+}
+
+impl std::fmt::Debug for CodexTokenManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexTokenManager")
+            .field("state_path", &self.state_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CodexTokenManager {
+    pub fn new(state_path: &std::path::Path, token_url: &str) -> Self {
+        Self {
+            state_path: state_path.to_path_buf(),
+            token_url: token_url.to_string(),
+            client: crate::providers::default_http_client(),
+            inner: tokio::sync::Mutex::new(ManagerInner {
+                tokens: None,
+                bad_refresh: None,
+                backoff_ms: 0,
+                backoff_until_ms: 0,
+                last_error: None,
+            }),
+        }
+    }
+
+    pub fn state_path(&self) -> &std::path::Path {
+        &self.state_path
+    }
+
+    /// A valid access token, refreshing when needed (single-flight).
+    pub async fn access(&self) -> Result<String, CodexError> {
+        let mut inner = self.inner.lock().await;
+        self.adopt_relogin(&mut inner);
+        if inner.bad_refresh.is_some() {
+            // Logged-out latch: no file/refresh work until /setup writes new state.
+            return Err(CodexError::LoggedOut);
+        }
+        let now = now_ms();
+        if let Some(tokens) = inner.tokens.clone() {
+            if tokens.expires_at_ms > now + REFRESH_MARGIN_MS {
+                return Ok(tokens.access);
+            }
+            if now < inner.backoff_until_ms {
+                return Err(backoff_error(&inner));
+            }
+            return self.refresh_locked(&mut inner).await;
+        }
+        match load_persisted(&self.state_path) {
+            Some(tokens) => {
+                let usable = tokens.expires_at_ms > now + REFRESH_MARGIN_MS;
+                inner.tokens = Some(tokens.clone());
+                if usable {
+                    inner.bad_refresh = None;
+                    return Ok(tokens.access);
+                }
+                if now < inner.backoff_until_ms {
+                    return Err(backoff_error(&inner));
+                }
+                self.refresh_locked(&mut inner).await
+            }
+            None => Err(CodexError::LoggedOut),
+        }
+    }
+
+    /// Refresh regardless of expiry, still single-flight.
+    pub async fn force_refresh(&self) -> Result<String, CodexError> {
+        let mut inner = self.inner.lock().await;
+        self.adopt_relogin(&mut inner);
+        if inner.bad_refresh.is_some() {
+            return Err(CodexError::LoggedOut);
+        }
+        inner.backoff_until_ms = 0;
+        if inner.tokens.is_none() {
+            inner.tokens = load_persisted(&self.state_path);
+        }
+        if inner.tokens.is_none() {
+            return Err(CodexError::LoggedOut);
+        }
+        self.refresh_locked(&mut inner).await
+    }
+
+    /// `chatgpt_account_id` of the current access token.
+    pub async fn account_id(&self) -> Result<String, CodexError> {
+        let access = self.access().await?;
+        account_id_from_token(&access)
+            .ok_or_else(|| CodexError::Transport("access token has no chatgpt_account_id".into()))
+    }
+
+    /// Credential status for the /setup page.
+    pub async fn status(&self) -> CodexStatus {
+        {
+            let inner = self.inner.lock().await;
+            if inner.bad_refresh.is_some() {
+                return CodexStatus::LoggedOut;
+            }
+            if let Some(tokens) = &inner.tokens {
+                return CodexStatus::LoggedIn {
+                    expires_at_ms: tokens.expires_at_ms,
+                };
+            }
+        }
+        match load_persisted(&self.state_path) {
+            Some(tokens) => CodexStatus::LoggedIn {
+                expires_at_ms: tokens.expires_at_ms,
+            },
+            None => CodexStatus::LoggedOut,
+        }
+    }
+
+    /// Persist freshly exchanged tokens (after a device-code login).
+    pub async fn store_tokens(&self, tokens: Tokens) -> Result<(), CodexError> {
+        save_persisted(&self.state_path, &tokens).map_err(|e| CodexError::Transport(e.to_string()))?;
+        let mut inner = self.inner.lock().await;
+        inner.tokens = Some(tokens);
+        inner.bad_refresh = None;
+        inner.backoff_ms = 0;
+        inner.backoff_until_ms = 0;
+        inner.last_error = None;
+        Ok(())
+    }
+
+    /// Drop in-memory tokens so the next call re-reads the state file.
+    pub async fn reload(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.tokens = None;
+        inner.bad_refresh = None;
+        inner.backoff_ms = 0;
+        inner.backoff_until_ms = 0;
+        inner.last_error = None;
+    }
+
+    /// Background refresh: refresh when inside the margin. Errors are recorded,
+    /// never surfaced (the request path reports them).
+    pub async fn background_tick(&self) {
+        let mut inner = self.inner.lock().await;
+        if inner.bad_refresh.is_some() {
+            return;
+        }
+        if inner.tokens.is_none() {
+            inner.tokens = load_persisted(&self.state_path);
+        }
+        let Some(tokens) = inner.tokens.clone() else {
+            return;
+        };
+        if tokens.expires_at_ms > now_ms() + REFRESH_MARGIN_MS {
+            return;
+        }
+        if let Err(e) = self.refresh_locked(&mut inner).await {
+            tracing::warn!(error = %e, "codex background token refresh failed");
+        }
+    }
+
+    /// Adopt credentials written by a later login while the manager holds an
+    /// `invalid_grant` latch from the previous refresh token.
+    fn adopt_relogin(&self, inner: &mut ManagerInner) -> bool {
+        let Some(bad) = inner.bad_refresh.clone() else {
+            return false;
+        };
+        let Some(loaded) = load_persisted(&self.state_path) else {
+            return false;
+        };
+        if loaded.refresh == bad {
+            return false;
+        }
+        inner.tokens = Some(loaded);
+        inner.bad_refresh = None;
+        inner.backoff_ms = 0;
+        inner.backoff_until_ms = 0;
+        inner.last_error = None;
+        true
+    }
+
+    /// Single-flight refresh: the caller holds the manager lock for the whole
+    /// HTTP round trip, so concurrent 401s coalesce into one refresh.
+    async fn refresh_locked(&self, inner: &mut ManagerInner) -> Result<String, CodexError> {
+        let current = match inner.tokens.clone().or_else(|| load_persisted(&self.state_path)) {
+            Some(tokens) => tokens,
+            None => {
+                inner.tokens = None;
+                return Err(CodexError::LoggedOut);
+            }
+        };
+        inner.tokens = Some(current.clone());
+        match refresh_tokens(&self.client, &self.token_url, &current.refresh).await {
+            Ok(fresh) => {
+                // Rotation safety: the new refresh token hits the disk before any
+                // caller can see the new access token.
+                save_persisted(&self.state_path, &fresh)
+                    .map_err(|e| CodexError::Transport(format!("saving oauth state: {e}")))?;
+                let access = fresh.access.clone();
+                inner.tokens = Some(fresh);
+                inner.bad_refresh = None;
+                inner.backoff_ms = 0;
+                inner.backoff_until_ms = 0;
+                inner.last_error = None;
+                Ok(access)
+            }
+            Err(CodexError::InvalidGrant) => {
+                inner.tokens = None;
+                inner.bad_refresh = Some(current.refresh);
+                inner.last_error = Some("refresh token rejected".into());
+                Err(CodexError::LoggedOut)
+            }
+            Err(e) => {
+                inner.backoff_ms = if inner.backoff_ms == 0 {
+                    BACKOFF_START_MS
+                } else {
+                    (inner.backoff_ms * 2).min(BACKOFF_MAX_MS)
+                };
+                inner.backoff_until_ms = now_ms() + inner.backoff_ms;
+                inner.last_error = Some(e.to_string());
+                Err(e)
+            }
+        }
+    }
+}
+
+fn backoff_error(inner: &ManagerInner) -> CodexError {
+    CodexError::Transport(format!(
+        "codex token refresh backed off: {}",
+        inner.last_error.as_deref().unwrap_or("refresh failed")
+    ))
+}
+
+fn load_persisted(path: &std::path::Path) -> Option<Tokens> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Tokens>(&text).ok()
+}
+
+fn save_persisted(path: &std::path::Path, tokens: &Tokens) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_vec_pretty(tokens).map_err(std::io::Error::other)?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(&json)?;
+        file.flush()?;
+        // an existing file keeps its old mode — force it
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &json)?;
+    }
+    Ok(())
+}
+
 // ── Pure helpers ────────────────────────────────────────────────────────────
 
 /// Extract `chatgpt_account_id` from an access token's JWT payload.
@@ -1053,5 +1341,236 @@ mod tests {
             CodexError::Http { status, .. } => assert_eq!(status, 500),
             other => panic!("expected Http, got {other}"),
         }
+    }
+
+    // ── token manager tests ────────────────────────────────────────────────
+
+    struct TokenServer {
+        base: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    async fn token_server(
+        handler: impl Fn(usize) -> (u16, Value) + Send + Sync + 'static,
+    ) -> TokenServer {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, h) = (calls.clone(), Arc::new(handler));
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(move || {
+                let (c, h) = (c.clone(), h.clone());
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    let (status, body) = h(n);
+                    (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
+                }
+            }),
+        );
+        TokenServer {
+            base: spawn_router(app).await,
+            calls,
+        }
+    }
+
+    fn ok_refresh(access: &'static str, refresh: &'static str) -> (u16, Value) {
+        (
+            200,
+            json!({"access_token": access, "refresh_token": refresh, "expires_in": 86_400}),
+        )
+    }
+
+    fn write_state(path: &std::path::Path, access: &str, refresh: &str, expires_at_ms: u64) {
+        let tokens = json!({"access": access, "refresh": refresh, "expires_at_ms": expires_at_ms});
+        std::fs::write(path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+    }
+
+    fn manager(path: &std::path::Path, base: &str) -> CodexTokenManager {
+        CodexTokenManager::new(path, &format!("{base}/oauth/token"))
+    }
+
+    fn state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("openai-codex-oauth-state.json")
+    }
+
+    #[tokio::test]
+    async fn manager_loads_valid_token_from_file_without_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        write_state(&path, "at_file", "rt_file", now_ms() + 24 * 3600 * 1000);
+        let mgr = manager(&path, &srv.base);
+        assert_eq!(mgr.access().await.unwrap(), "at_file");
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn manager_refreshes_expired_token_single_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        let (a, b) = tokio::join!(mgr.access(), mgr.access());
+        assert_eq!(a.unwrap(), "at_new");
+        assert_eq!(b.unwrap(), "at_new");
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "one HTTP refresh");
+    }
+
+    #[tokio::test]
+    async fn manager_refreshes_within_margin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        // 30 min left < 60 min margin
+        write_state(&path, "at_old", "rt_old", now_ms() + 30 * 60 * 1000);
+        let mgr = manager(&path, &srv.base);
+        assert_eq!(mgr.access().await.unwrap(), "at_new");
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn manager_missing_state_file_is_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        let mgr = manager(&path, &srv.base);
+        let err = mgr.access().await.unwrap_err();
+        assert!(matches!(err, CodexError::LoggedOut), "got {err}");
+        assert!(err.to_string().contains("/setup"), "got {err}");
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mgr.status().await, CodexStatus::LoggedOut);
+    }
+
+    #[tokio::test]
+    async fn manager_persists_rotated_refresh_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        assert_eq!(mgr.access().await.unwrap(), "at_new");
+        let on_disk: Tokens =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.access, "at_new");
+        assert_eq!(on_disk.refresh, "rt_new");
+        assert_eq!(mgr.status().await, CodexStatus::LoggedIn {
+            expires_at_ms: on_disk.expires_at_ms
+        });
+    }
+
+    #[tokio::test]
+    async fn manager_keeps_old_refresh_when_response_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| (200, json!({"access_token": "at_new", "expires_in": 3600}))).await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        assert_eq!(mgr.access().await.unwrap(), "at_new");
+        let on_disk: Tokens =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.refresh, "rt_old");
+    }
+
+    #[tokio::test]
+    async fn manager_invalid_grant_latches_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| (400, json!({"error": "invalid_grant"}))).await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        assert!(matches!(mgr.access().await, Err(CodexError::LoggedOut)));
+        assert!(matches!(mgr.access().await, Err(CodexError::LoggedOut)));
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "latch prevents re-polling");
+        assert_eq!(mgr.status().await, CodexStatus::LoggedOut);
+    }
+
+    #[tokio::test]
+    async fn manager_adopts_relogin_written_file_after_latch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|n| {
+            if n == 0 {
+                (400, json!({"error": "invalid_grant"}))
+            } else {
+                ok_refresh("at_new", "rt_new")
+            }
+        })
+        .await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        assert!(matches!(mgr.access().await, Err(CodexError::LoggedOut)));
+        // "aiproxy login" wrote a fresh state file while the proxy kept running
+        let expires_at_ms = now_ms() + 24 * 3600 * 1000;
+        write_state(&path, "at_fresh", "rt_fresh", expires_at_ms);
+        assert_eq!(mgr.access().await.unwrap(), "at_fresh");
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "no extra HTTP call");
+        assert_eq!(mgr.status().await, CodexStatus::LoggedIn { expires_at_ms });
+    }
+
+    #[tokio::test]
+    async fn manager_backs_off_after_transient_failure_and_force_refresh_bypasses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| (500, json!({"oops": true}))).await;
+        write_state(&path, "at_old", "rt_old", now_ms() - 1000);
+        let mgr = manager(&path, &srv.base);
+        assert!(matches!(
+            mgr.access().await,
+            Err(CodexError::Http { status: 500, .. })
+        ));
+        assert!(mgr.access().await.is_err());
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "backoff suppresses retry");
+        assert!(mgr.force_refresh().await.is_err());
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 2, "force_refresh bypasses backoff");
+    }
+
+    #[tokio::test]
+    async fn manager_store_tokens_writes_file_with_owner_only_perms() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at", "rt")).await;
+        let mgr = manager(&path, &srv.base);
+        mgr.store_tokens(Tokens {
+            access: "at_login".into(),
+            refresh: "rt_login".into(),
+            expires_at_ms: now_ms() + 24 * 3600 * 1000,
+        })
+        .await
+        .unwrap();
+        assert_eq!(mgr.access().await.unwrap(), "at_login");
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "state file must be owner-only");
+        }
+    }
+
+    #[tokio::test]
+    async fn manager_account_id_comes_from_access_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at", "rt")).await;
+        let token = token_with(json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_9"}
+        }));
+        write_state(&path, &token, "rt", now_ms() + 24 * 3600 * 1000);
+        let mgr = manager(&path, &srv.base);
+        assert_eq!(mgr.account_id().await.unwrap(), "acct_9");
+    }
+
+    #[tokio::test]
+    async fn manager_background_tick_refreshes_inside_margin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(&dir);
+        let srv = token_server(|_| ok_refresh("at_new", "rt_new")).await;
+        write_state(&path, "at_old", "rt_old", now_ms() + 30 * 60 * 1000);
+        let mgr = manager(&path, &srv.base);
+        mgr.background_tick().await;
+        assert_eq!(srv.calls.load(Ordering::SeqCst), 1);
+        let on_disk: Tokens =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.access, "at_new");
     }
 }
