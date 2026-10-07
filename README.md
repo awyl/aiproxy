@@ -104,10 +104,11 @@ embeddings:
 ### Discovery
 
 - `models: [...]` — static list, never probed (recommended for keyed upstreams)
-- `discover: true` — probe `GET <base_url>/models` at startup/refresh
+- `discover: true` — probe `GET <base_url>/models` at startup/refresh (for
+  `openai-codex`: `GET <base_url>/codex/models`, authenticated with the subscription)
 - Neither — empty catalog; requests still route, agents see nothing in `/v1/models`
 
-OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key.
+OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
 ### ChatGPT / Codex subscription (`openai-codex`)
 
@@ -135,10 +136,12 @@ mid-request).
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
 default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
 drops `max_output_tokens`) and sends `originator: pi` plus your account id.
-- **Model list is static for now** — list `models:` explicitly; `discover: true` is ignored
-with a warning. The Codex backend does expose a catalog (`GET
-{base}/codex/models?client_version=X.Y.Z` → `{"models":[{slug, visibility, context_window,
-…}]}`), but it is unimplemented here — see the design doc's open items.
+- **Model discovery** — `discover: true` probes the Codex catalog
+(`GET {base}/codex/models?client_version=X.Y.Z`, same OAuth headers as requests) on every
+model-refresh tick and offers the entries the picker is allowed to show (`visibility: list`,
+`supported_in_api: true`). Hidden entries such as `codex-auto-review` are skipped. A
+`models:` list is optional; when present it is the fallback if the probe cannot answer
+(logged out, offline, upstream error). Without either, the catalog stays empty until login.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
 
 Plan usage/limits for the subscription are not fetched (deferred).

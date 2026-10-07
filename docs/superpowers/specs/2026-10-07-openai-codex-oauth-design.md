@@ -42,7 +42,7 @@ Reference implementation (read byte-for-byte, replicated exactly — no guessing
 upstreams:
   - kind: openai-codex
     name: chatgpt-max          # optional; provider id stays "openai-codex" when single
-    models:                    # required today — discovery is not implemented yet
+    models:                    # optional — fallback for when discovery cannot answer
       - gpt-5.6-sol
       - gpt-5.6-terra
       - gpt-5.6-luna
@@ -54,7 +54,11 @@ upstreams:
   `.../codex/responses` (join rule below).
 - Auth is intrinsic to the kind: `api_key_env` / `token_env` on an `openai-codex`
   upstream → config error at startup. `oauth: true` is not a flag here.
-- `discover: true` → ignored with a warning (discovery not implemented; see open items).
+- `discover: true` → probe `GET {base}/codex/models?client_version=X.Y.Z` with the Codex
+  auth headers; offer only `visibility: list` + `supported_in_api: true`. Static `models:`
+  are the fallback when the probe cannot answer (logged out, offline, upstream error) and
+  the only source when `discover` is off. A probe failure with no static list stays an
+  error so the registry keeps its last-known catalog instead of wiping it.
 - Static `models:` entries carry surface `responses`.
 - Tokens live in `{config-dir}/openai-codex-oauth-state.json` (respects `--config`),
   perms `0600`: `{"access": "...", "refresh": "...", "expires_at": <ms>}`.
@@ -231,7 +235,7 @@ chat→responses translation, browser-callback login, multi-account.
 - Whether OpenAI's client registration accepts the dynamic loopback port used in tests
   (`http://localhost:<ephemeral>/auth/callback`) — production always uses 1455, so this
   only affects test fidelity, not real logins.
-- **Model discovery is implementable and unimplemented.** The Codex backend exposes
+- **Model discovery — implemented, live behaviour unconfirmed.** The Codex backend exposes
   `GET {codex_base}/models?client_version=X.Y.Z` (codex_base =
   `https://chatgpt.com/backend-api/codex`, `codex-rs/model-provider-info/src/lib.rs:80`):
   same Bearer + `chatgpt-account-id` auth as `/codex/responses`, ETag revalidation,
@@ -244,9 +248,13 @@ chat→responses translation, browser-callback login, multi-account.
   (`gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `codex-auto-review`). A live
   unauthenticated probe of that path returns `401 {"detail":"Unauthorized"}` while a bogus
   sibling path returns `403` HTML, so the route exists and is auth-gated. pi-ai's own
-  codex client never calls it, which is why the static list was chosen; wiring
-  `discover: true` to this endpoint (static `models:` staying as override/offline
-  fallback) needs a live token to confirm the accepted `client_version` and plan gating.
+  codex client never calls it, which is why the static list was the original choice.
+  `discover: true` now probes it (`src/providers/openai_codex.rs`, helpers in
+  `src/codex_oauth.rs`) with static `models:` as the fallback. **Still unverified live**:
+  which `client_version` the backend accepts (`AIPROXY_CODEX_CLIENT_VERSION` is the test
+  hook), whether the catalog is plan-gated, and whether hidden slugs are callable.
+- The catalog's `context_window` (272000 for these models) is parsed but not yet surfaced
+  in `/v1/models`, so pi still shows pi.dev's value (128000).
 - pi.dev's `openai-codex` catalog reports `contextWindow: 128000` for these models while
   the Codex catalog reports `context_window: 272000` (plus `max_context_window`) — the
   number shown in pi may be under-reported; discovery would supply the real value.

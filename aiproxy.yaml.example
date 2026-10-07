@@ -49,6 +49,9 @@ upstreams:
   # Every upstream is catalog-only unless you opt in:
   #   - `models: [...]`   -> static list, never probed (recommended)
   #   - `discover: true`  -> probe GET <base_url>/models at startup/refresh.
+  #     For openai-codex that is GET <base_url>/codex/models with the ChatGPT
+  #     OAuth headers; list `models:` too if you want a fallback for when the
+  #     proxy is logged out or offline.
   #                          Requires the upstream to be reachable AND keyed;
   #                          otherwise expect per-refresh warnings (401 etc).
   # Omitting both declarations a provider with an EMPTY catalog: requests
