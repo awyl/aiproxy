@@ -211,6 +211,10 @@ pub struct AppState {
     /// Missing entry: no gate. `Some(None)`: deny-all (misconfig).
     pub subscriptions: std::collections::HashMap<String, Option<String>>,
     pub usage: crate::usage::UsageTracker,
+    /// Codex OAuth token managers by provider id (openai-codex upstreams);
+    /// the /setup page reads and reloads them after a device-code login.
+    pub codex_managers:
+        Arc<std::collections::HashMap<String, Arc<crate::codex_oauth::CodexTokenManager>>>,
 }
 
 /// Which agent-facing error schema to speak when translating failures.

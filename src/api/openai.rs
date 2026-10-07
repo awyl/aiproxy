@@ -315,6 +315,7 @@ mod tests {
             token: Some("tok".into()),
             subscriptions: Default::default(),
             usage: crate::usage::UsageTracker::new(),
+            codex_managers: Default::default(),
         }
     }
 

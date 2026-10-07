@@ -25,16 +25,40 @@ pub enum ServerError {
 
 /// Build the app. Binds per `config.bind` unless `port_override` is set
 /// (CLI `--port`), which replaces the port portion of the bind string.
+/// `config_path` locates on-disk state that sits next to the config file
+/// (Codex OAuth tokens).
 pub async fn build_with_port(
     config: Config,
+    config_path: std::path::PathBuf,
     port_override: Option<u16>,
 ) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
     let port = port_override.unwrap_or(port);
 
-    let providers = build_providers(&config);
+    let codex_managers = Arc::new(crate::providers::create_codex_managers(
+        &config,
+        Some(config_path.as_path()),
+    ));
+    let providers = build_providers(&config, &codex_managers);
     let registry = Arc::new(ModelRegistry::new(providers));
     registry.refresh().await;
+
+    // Codex background refresh: wake up every ~10 min (plus jitter), refresh
+    // any access token inside the 60-minute margin. The manager coalesces
+    // concurrent refreshes and backs off on failures.
+    for manager in codex_managers.values() {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            loop {
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| u64::from(d.subsec_nanos()) % 60)
+                    .unwrap_or(0);
+                tokio::time::sleep(std::time::Duration::from_secs(10 * 60 + jitter)).await;
+                manager.background_tick().await;
+            }
+        });
+    }
 
     let refresh_secs = config.model_refresh_secs;
     if refresh_secs > 0 {
@@ -82,6 +106,7 @@ pub async fn build_with_port(
         token: token.clone(),
         subscriptions,
         usage: usage.clone(),
+        codex_managers: codex_managers.clone(),
     };
 
     // Background usage fetcher for upstreams with billing endpoints.
@@ -175,17 +200,27 @@ pub async fn build_with_port(
     Ok((listener, app))
 }
 
-pub async fn build(config: Config) -> Result<(TcpListener, Router), ServerError> {
-    build_with_port(config, None).await
+pub async fn build(
+    config: Config,
+    config_path: std::path::PathBuf,
+) -> Result<(TcpListener, Router), ServerError> {
+    build_with_port(config, config_path, None).await
 }
 
-pub async fn run(config: Config) -> Result<(), ServerError> {
-    let (listener, app) = build(config).await?;
+pub async fn run(
+    config: Config,
+    config_path: std::path::PathBuf,
+) -> Result<(), ServerError> {
+    let (listener, app) = build(config, config_path).await?;
     serve(listener, app).await
 }
 
-pub async fn run_with_port(config: Config, port_override: Option<u16>) -> Result<(), ServerError> {
-    let (listener, app) = build_with_port(config, port_override).await?;
+pub async fn run_with_port(
+    config: Config,
+    config_path: std::path::PathBuf,
+    port_override: Option<u16>,
+) -> Result<(), ServerError> {
+    let (listener, app) = build_with_port(config, config_path, port_override).await?;
     serve(listener, app).await
 }
 

@@ -39,6 +39,12 @@ pub enum UpstreamKind {
     /// nvapi-...). Self-hosted NIMs use a custom base_url (kind still nvidia).
     Nvidia,
     OpencodeGo,
+    /// OpenAI Codex (ChatGPT Plus/Pro subscription) — Responses surface only
+    /// at chatgpt.com/backend-api/codex/responses. Auth is device-code OAuth
+    /// (no api_key_env/token_env); tokens live in
+    /// `{config-dir}/openai-codex-oauth-state.json`.
+    #[serde(rename = "openai-codex", alias = "open-ai-codex")]
+    OpenAiCodex,
 }
 
 impl UpstreamKind {
@@ -51,6 +57,7 @@ impl UpstreamKind {
             Self::Openrouter => "openrouter",
             Self::Nvidia => "nvidia",
             Self::OpencodeGo => "opencode-go",
+            Self::OpenAiCodex => "openai-codex",
         }
     }
 
@@ -63,6 +70,7 @@ impl UpstreamKind {
             UpstreamKind::Openrouter => "https://openrouter.ai/api/v1",
             UpstreamKind::Nvidia => "https://integrate.api.nvidia.com/v1",
             UpstreamKind::OpencodeGo => "https://opencode.ai/zen/go/v1",
+            UpstreamKind::OpenAiCodex => crate::codex_oauth::DEFAULT_CODEX_BASE_URL,
         }
     }
 }
@@ -367,6 +375,20 @@ impl Config {
             }
         }
         for u in &self.upstreams {
+            if u.kind == UpstreamKind::OpenAiCodex {
+                if u.api_key_env.is_some() || u.token_env.is_some() {
+                    return bad(format!(
+                        "upstream '{}': openai-codex authenticates with ChatGPT OAuth — remove api_key_env/token_env and log in at /setup",
+                        u.effective_name()
+                    ));
+                }
+                if u.discover {
+                    tracing::warn!(
+                        upstream = %u.effective_name(),
+                        "openai-codex has no model-discovery endpoint; `discover: true` is ignored — list models explicitly"
+                    );
+                }
+            }
             for (model, surface) in &u.endpoint_by_model {
                 if !matches!(surface.as_str(), "chat" | "messages" | "responses") {
                     return bad(format!(
@@ -832,6 +854,43 @@ upstreams:
             "upstreams:\n  - { name: go, kind: opencode-go, endpoint_by_model: { x: bogus } }\n";
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("endpoint_by_model"));
+    }
+
+    #[test]
+    fn openai_codex_default_base_url_and_catalog() {
+        let yaml = r#"
+upstreams:
+  - { kind: openai-codex, models: [gpt-5.6-sol, gpt-5.5] }
+"#;
+        let cfg = Config::from_yaml(yaml).unwrap();
+        assert_eq!(cfg.upstreams[0].kind, UpstreamKind::OpenAiCodex);
+        assert_eq!(cfg.upstreams[0].kind.as_str(), "openai-codex");
+        assert_eq!(
+            cfg.upstreams[0].effective_base_url(),
+            "https://chatgpt.com/backend-api"
+        );
+        assert_eq!(cfg.provider_ids(), vec!["openai-codex".to_string()]);
+        // no discovery endpoint: models are explicit, discover is only a no-op
+        assert!(
+            Config::from_yaml(
+                "upstreams:\n  - { kind: openai-codex, models: [m], discover: true }\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn openai_codex_rejects_api_key_env() {
+        let yaml = "upstreams:\n  - { kind: openai-codex, api_key_env: OPENAI_API_KEY }\n";
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("OAuth"), "got {err}");
+    }
+
+    #[test]
+    fn openai_codex_rejects_token_env() {
+        let yaml = "upstreams:\n  - { kind: openai-codex, token_env: SUB_TOKEN }\n";
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("OAuth"), "got {err}");
     }
 
     #[test]

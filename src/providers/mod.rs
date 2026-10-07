@@ -4,8 +4,7 @@
 pub mod anthropic;
 pub mod go;
 pub mod openai;
-pub mod openai_codex;
-#[cfg(test)]
+pub mod openai_codex;#[cfg(test)]
 pub mod test_mock_upstream;
 
 use crate::config::{Config, UpstreamConfig, UpstreamKind};
@@ -15,6 +14,7 @@ use crate::provider::{
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::go::OpencodeGoProvider;
 use crate::providers::openai::OpenAiProvider;
+use crate::providers::openai_codex::OpenAiCodexProvider;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -154,7 +154,11 @@ impl Provider for NoDiscoveryProvider {
     }
 }
 
-pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
+/// Codex token managers by provider id (openai-codex upstreams).
+pub type CodexManagers =
+    std::collections::HashMap<String, Arc<crate::codex_oauth::CodexTokenManager>>;
+
+pub fn build_providers(cfg: &Config, codex: &CodexManagers) -> Vec<Arc<dyn Provider>> {
     let ids = cfg.provider_ids();
     cfg.upstreams
         .iter()
@@ -169,12 +173,52 @@ pub fn build_providers(cfg: &Config) -> Vec<Arc<dyn Provider>> {
             UpstreamKind::OpencodeGo => {
                 discoverable(u, &id, |u, id| Arc::new(OpencodeGoProvider::new(u, id)))
             }
+            UpstreamKind::OpenAiCodex => {
+                let manager = codex.get(&id).cloned().unwrap_or_else(|| {
+                    // No config path (unit tests): a manager with a relative state
+                    // path exists but reports logged-out until /setup writes it.
+                    Arc::new(crate::codex_oauth::CodexTokenManager::new(
+                        std::path::Path::new("openai-codex-oauth-state.json"),
+                        &crate::codex_oauth::token_url(),
+                    ))
+                });
+                Arc::new(OpenAiCodexProvider::new(u, &id, manager))
+            }
             UpstreamKind::Minimax
             | UpstreamKind::Zai
             | UpstreamKind::Openrouter
             | UpstreamKind::Nvidia => chat_kind(u, &id),
         })
         .collect()
+}
+
+/// Create Codex OAuth token managers for openai-codex upstreams, keyed by
+/// provider id. State files live next to the config file as
+/// `{provider-id}-oauth-state.json`.
+pub fn create_codex_managers(cfg: &Config, config_path: Option<&std::path::Path>) -> CodexManagers {
+    let mut managers = CodexManagers::new();
+    let Some(config_path) = config_path else {
+        return managers;
+    };
+    let dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let token_url = crate::codex_oauth::token_url();
+    for (u, id) in cfg.upstreams.iter().zip(cfg.provider_ids()) {
+        if u.kind == UpstreamKind::OpenAiCodex {
+            let state_path = dir.join(format!("{id}-oauth-state.json"));
+            managers.insert(
+                id.clone(),
+                Arc::new(crate::codex_oauth::CodexTokenManager::new(
+                    &state_path,
+                    &token_url,
+                )),
+            );
+        }
+    }
+    managers
 }
 
 /// Static `models:` win; else `discover: true` probes live; else the catalog is
@@ -257,7 +301,7 @@ upstreams:
         )
         .unwrap();
 
-        let providers = build_providers(&cfg);
+        let providers = build_providers(&cfg, &Default::default());
         assert_eq!(providers.len(), 3);
 
         // openai without models and without discover -> exists, but catalog empty
@@ -290,7 +334,7 @@ upstreams:
 "#,
         )
         .unwrap();
-        let p = build_providers(&cfg);
+        let p = build_providers(&cfg, &Default::default());
         let ids: Vec<String> = p[0]
             .list_models()
             .await
@@ -308,10 +352,44 @@ upstreams:
 "#,
         )
         .unwrap();
-        let p = build_providers(&cfg);
+        let p = build_providers(&cfg, &Default::default());
         assert!(
             p[0].list_models().await.unwrap().is_empty(),
             "go without discover: true must not probe"
         );
+    }
+
+    #[tokio::test]
+    async fn openai_codex_build_arm_is_responses_catalog_only() {
+        let cfg = Config::from_yaml(
+            "upstreams:\n  - { kind: openai-codex, models: [gpt-5.6-sol] }\n",
+        )
+        .unwrap();
+        let providers = build_providers(&cfg, &Default::default());
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id(), "openai-codex");
+        assert_eq!(providers[0].surface_of("gpt-5.6-sol"), ModelSurface::Responses);
+        let models = providers[0].list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].surface, ModelSurface::Responses);
+        // no live probing on the discovery tick
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn create_codex_managers_uses_config_dir_and_provider_id() {
+        let cfg = Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [m] }\n")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("aiproxy.yaml");
+        let managers = create_codex_managers(&cfg, Some(&config_path));
+        assert_eq!(managers.len(), 1);
+        let manager = managers.values().next().unwrap();
+        assert_eq!(
+            manager.state_path(),
+            dir.path().join("openai-codex-oauth-state.json")
+        );
+        // no config path -> no managers (unit-test fallback in build_providers)
+        assert!(create_codex_managers(&cfg, None).is_empty());
     }
 }
