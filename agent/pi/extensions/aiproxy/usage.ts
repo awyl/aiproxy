@@ -73,8 +73,7 @@ export function registerUsage(
     const slash = id.indexOf("/");
     if (slash > 0) {
       const prefix = id.substring(0, slash);
-      // Strip =suffix for multi-subscription (opencode-go=alice → opencode-go)
-      currentProvider = prefix.includes("=") ? prefix.split("=")[0] : prefix;
+      currentProvider = prefix;
     }
   });
 

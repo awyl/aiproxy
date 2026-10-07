@@ -162,6 +162,7 @@ pub async fn build_with_options(
                     | crate::config::UpstreamKind::Openrouter
                     | crate::config::UpstreamKind::Zai
                     | crate::config::UpstreamKind::OpencodeGo
+                    | crate::config::UpstreamKind::OpenAiCodex
             )
         })
         .map(|u| {
@@ -185,11 +186,17 @@ pub async fn build_with_options(
             } else {
                 u.kind.as_str().to_string()
             };
+            let codex_manager = if u.kind == crate::config::UpstreamKind::OpenAiCodex {
+                codex_managers.get(&provider_name).cloned()
+            } else {
+                None
+            };
             crate::usage::FetcherConfig {
                 kind: u.kind.as_str().to_string(),
                 provider_name: provider_name.clone(),
                 api_key,
                 base_url: u.base_url.clone(),
+                codex_manager,
             }
         })
         .collect();

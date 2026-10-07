@@ -706,6 +706,7 @@ pub struct FetcherConfig {
     pub provider_name: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub codex_manager: Option<Arc<crate::codex_oauth::CodexTokenManager>>,
 }
 
 impl FetcherConfig {
@@ -736,6 +737,14 @@ impl FetcherConfig {
                     client,
                     api_key,
                     base_url,
+                }))
+            }
+            "openai-codex" => {
+                let manager = self.codex_manager.clone()?;
+                Some(Box::new(CodexProvider {
+                    client,
+                    manager,
+                    base_url: self.base_url.clone(),
                 }))
             }
             _ => None,
@@ -842,6 +851,34 @@ impl UsageProvider for OpencodeGoProvider {
     }
 }
 
+struct CodexProvider {
+    client: reqwest::Client,
+    manager: Arc<crate::codex_oauth::CodexTokenManager>,
+    base_url: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl UsageProvider for CodexProvider {
+    fn name(&self) -> &str {
+        "openai-codex"
+    }
+
+    async fn fetch(&self) -> Result<UsageData, String> {
+        let access = self
+            .manager
+            .access()
+            .await
+            .map_err(|e| format!("Codex token: {e}"))?;
+        let account_id = crate::codex_oauth::account_id_from_token(&access)
+            .ok_or_else(|| "Codex access token has no chatgpt_account_id".to_string())?;
+        let base = self
+            .base_url
+            .as_deref()
+            .unwrap_or(crate::codex_oauth::DEFAULT_CODEX_BASE_URL);
+        fetch_codex_usage(&self.client, &access, &account_id, base).await
+    }
+}
+
 async fn fetch_minimax(client: &reqwest::Client, api_key: &str) -> Result<UsageData, String> {
     let url = "https://api.minimax.io/v1/api/openplatform/coding_plan/remains";
     let resp = client
@@ -925,13 +962,374 @@ pub fn spawn_refresh(tracker: UsageTracker, fetchers: Vec<FetcherConfig>, interv
     });
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+async fn fetch_codex_usage(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: &str,
+    base_url: &str,
+) -> Result<UsageData, String> {
+    let base = base_url.trim_end_matches('/');
+    let mut last_error = None;
+    for path in ["/wham/usage", "/codex/usage"] {
+        let url = format!("{base}{path}");
+        let response = match client
+            .get(&url)
+            .bearer_auth(access_token)
+            .header("ChatGPT-Account-Id", account_id)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(format!("Codex usage request: {error}"));
+                continue;
+            }
+        };
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err("Codex usage HTTP 429".into());
+        }
+        if !status.is_success() {
+            last_error = Some(format!("Codex usage HTTP {status}"));
+            continue;
+        }
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                last_error = Some(format!("Codex usage body: {error}"));
+                continue;
+            }
+        };
+        match parse_codex_usage(&body, now_secs()) {
+            Ok(data) => return Ok(data),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Codex usage unavailable".into()))
+}
+
+fn parse_codex_usage(body: &[u8], now: i64) -> Result<UsageData, String> {
+    use serde_json::Value;
+
+    let data: Value = serde_json::from_slice(body).map_err(|e| format!("Codex usage JSON: {e}"))?;
+    let root = data
+        .as_object()
+        .ok_or("Codex usage response is not an object")?;
+    let rate = root
+        .get("rate_limit")
+        .or_else(|| root.get("rateLimits"))
+        .and_then(Value::as_object);
+    let mut windows = Vec::new();
+    if let Some(rate) = rate {
+        for (key, alias, label) in [
+            ("primary_window", "primary", "5h"),
+            ("secondary_window", "secondary", "7d"),
+        ] {
+            if let Some(window) = rate
+                .get(key)
+                .or_else(|| rate.get(alias))
+                .and_then(|raw| codex_window(raw, label, now))
+            {
+                windows.push(window);
+            }
+        }
+    }
+
+    if let Some(cap) = root
+        .get("spend_control")
+        .and_then(Value::as_object)
+        .and_then(|control| control.get("individual_limit"))
+        .and_then(Value::as_object)
+    {
+        let limit = codex_number(cap, &["limit"]);
+        let used = codex_number(cap, &["used"]);
+        let reached = root
+            .get("spend_control")
+            .and_then(Value::as_object)
+            .and_then(|control| control.get("reached"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let percent = if reached {
+            Some(100.0)
+        } else {
+            codex_number(cap, &["used_percent", "usedPercent"]).or_else(|| {
+                match (used, limit.filter(|limit| *limit > 0.0)) {
+                    (Some(used), Some(limit)) => Some(used / limit * 100.0),
+                    _ => None,
+                }
+            })
+        };
+        windows.push(UsageWindow {
+            label: "30d".into(),
+            used_percent: percent.map(normalize_percent),
+            reset_secs: codex_reset_secs(cap, now),
+            window_minutes: Some(43200),
+        });
+    }
+
+    let mut pools = Vec::new();
+    if let Some(credits) = root.get("credits").and_then(Value::as_object) {
+        if credits.get("unlimited").and_then(Value::as_bool) == Some(true) {
+            pools.push(CreditPool {
+                id: "credits".into(),
+                label: "Codex credits".into(),
+                remaining: None,
+                total: None,
+                unit: "unlimited".into(),
+            });
+        } else if let Some(balance) = codex_number(credits, &["balance"]) {
+            pools.push(CreditPool {
+                id: "credits".into(),
+                label: "Codex credits".into(),
+                remaining: Some(balance.max(0.0)),
+                total: None,
+                unit: "credits".into(),
+            });
+        }
+    }
+
+    if windows.is_empty() && pools.is_empty() {
+        return Err("Codex usage response contains no usage limits".into());
+    }
+    Ok(UsageData { windows, pools })
+}
+
+fn codex_window(raw: &serde_json::Value, default_label: &str, now: i64) -> Option<UsageWindow> {
+    let object = raw.as_object()?;
+    let used_percent = codex_number(object, &["used_percent", "usedPercent"])?;
+    let duration_secs = codex_number(object, &["limit_window_seconds", "limitWindowSeconds"]);
+    let window_minutes = duration_secs.map(|seconds| (seconds / 60.0).ceil() as i64);
+    let label = match window_minutes {
+        Some(10080) => "7d".to_string(),
+        Some(43200) => "30d".to_string(),
+        Some(minutes) if minutes > 0 && minutes % 1440 == 0 => format!("{}d", minutes / 1440),
+        Some(minutes) if minutes > 0 && minutes % 60 == 0 => format!("{}h", minutes / 60),
+        Some(minutes) if minutes > 0 => format!("{}m", minutes),
+        _ => default_label.to_string(),
+    };
+    Some(UsageWindow {
+        label,
+        used_percent: Some(normalize_percent(used_percent)),
+        reset_secs: codex_reset_secs(object, now),
+        window_minutes,
+    })
+}
+
+fn codex_number(object: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        let value = object.get(*key).cloned();
+        json_float(&value)
+    })
+}
+
+fn codex_reset_secs(object: &serde_json::Map<String, serde_json::Value>, now: i64) -> Option<u64> {
+    if let Some(after) = codex_number(object, &["reset_after_seconds", "resetAfterSeconds"]) {
+        return Some(after.max(0.0) as u64);
+    }
+    let reset_at = codex_number(object, &["reset_at", "resetAt"])? as i64;
+    let reset_at = epoch_to_secs(reset_at)?;
+    Some(reset_at.saturating_sub(now).max(0) as u64)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // -- tracker tests --
+    #[test]
+    fn codex_personal_plan_returns_five_hour_and_weekly_windows() {
+        let json = r#"{
+            "plan_type":"plus",
+            "rate_limit":{
+                "primary_window":{"used_percent":37.5,"limit_window_seconds":18000,"reset_after_seconds":5400},
+                "secondary_window":{"used_percent":22,"limit_window_seconds":604800,"reset_after_seconds":7200}
+            }
+        }"#;
+        let usage = parse_codex_usage(json.as_bytes(), 1_800_000_000).unwrap();
+        let five_hour = usage.windows.iter().find(|w| w.label == "5h").unwrap();
+        assert_eq!(five_hour.used_percent, Some(37.5));
+        assert_eq!(five_hour.reset_secs, Some(5400));
+        assert_eq!(five_hour.window_minutes, Some(300));
+        let weekly = usage.windows.iter().find(|w| w.label == "7d").unwrap();
+        assert_eq!(weekly.used_percent, Some(22.0));
+        assert_eq!(weekly.reset_secs, Some(7200));
+        assert_eq!(weekly.window_minutes, Some(10080));
+    }
+
+    #[test]
+    fn codex_business_plan_returns_individual_spend_cap() {
+        let json = r#"{
+            "plan_type":"business",
+            "rate_limit":null,
+            "spend_control":{"reached":false,"individual_limit":{
+                "unit":"credit","limit":"2400","used":"1434.58","remaining":"965.42",
+                "used_percent":60,"remaining_percent":40,"reset_after_seconds":11831
+            }}
+        }"#;
+        let usage = parse_codex_usage(json.as_bytes(), 1_800_000_000).unwrap();
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "30d");
+        assert_eq!(usage.windows[0].used_percent, Some(60.0));
+        assert_eq!(usage.windows[0].reset_secs, Some(11831));
+        assert_eq!(usage.windows[0].window_minutes, Some(43200));
+    }
+
+    #[test]
+    fn codex_unlimited_credits_is_a_valid_usage_report() {
+        let usage = parse_codex_usage(
+            br#"{"plan_type":"business","credits":{"has_credits":true,"unlimited":true,"balance":null}}"#,
+            1_800_000_000,
+        )
+        .unwrap();
+        assert!(usage.windows.is_empty());
+        assert_eq!(usage.pools.len(), 1);
+        assert_eq!(usage.pools[0].unit, "unlimited");
+        assert_eq!(usage.pools[0].remaining, None);
+    }
+
+    #[tokio::test]
+    async fn codex_usage_falls_back_and_sends_oauth_account_headers() {
+        use axum::{
+            Json, Router,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+        };
+        use serde_json::json;
+        use std::sync::Mutex;
+
+        let seen = Arc::new(Mutex::new(Vec::<(String, HeaderMap)>::new()));
+        let wham_seen = seen.clone();
+        let codex_seen = seen.clone();
+        let app = Router::new()
+            .route(
+                "/backend-api/wham/usage",
+                get(move |headers: HeaderMap| {
+                    let seen = wham_seen.clone();
+                    async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(("/backend-api/wham/usage".into(), headers));
+                        StatusCode::NOT_FOUND
+                    }
+                }),
+            )
+            .route(
+                "/backend-api/codex/usage",
+                get(move |headers: HeaderMap| {
+                    let seen = codex_seen.clone();
+                    async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(("/backend-api/codex/usage".into(), headers));
+                        Json(json!({"rate_limit":{"primary_window":{
+                            "used_percent":12,"limit_window_seconds":18000,"reset_after_seconds":300
+                        }}}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let result = fetch_codex_usage(
+            &reqwest::Client::new(),
+            "access-token",
+            "account-123",
+            &format!("http://{addr}/backend-api"),
+        )
+        .await
+        .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            vec!["/backend-api/wham/usage", "/backend-api/codex/usage"]
+        );
+        for (_, headers) in seen.iter() {
+            assert_eq!(headers["authorization"], "Bearer access-token");
+            assert_eq!(headers["chatgpt-account-id"], "account-123");
+            assert_eq!(headers["accept"], "application/json");
+        }
+        assert_eq!(result.windows[0].used_percent, Some(12.0));
+    }
+
+    #[tokio::test]
+    async fn codex_fetcher_uses_token_manager_and_updates_usage_snapshot() {
+        use axum::{Json, Router, http::HeaderMap, routing::get};
+        use serde_json::json;
+        use std::sync::Mutex;
+
+        let seen = Arc::new(Mutex::new(None::<HeaderMap>));
+        let route_seen = seen.clone();
+        let app = Router::new().route(
+            "/backend-api/wham/usage",
+            get(move |headers: HeaderMap| {
+                let seen = route_seen.clone();
+                async move {
+                    *seen.lock().unwrap() = Some(headers);
+                    Json(json!({"rate_limit":{"primary_window":{
+                        "used_percent":44,"limit_window_seconds":18000,"reset_after_seconds":900
+                    }}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id":"acct-7"}
+        });
+        let token = format!(
+            "header.{}.sig",
+            crate::codex_oauth::base64_url_encode(payload.to_string().as_bytes())
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(crate::codex_oauth::CodexTokenManager::new(
+            &dir.path().join("codex-state.json"),
+            "http://127.0.0.1:1/oauth/token",
+        ));
+        manager
+            .store_tokens(crate::codex_oauth::Tokens {
+                access: token.clone(),
+                refresh: "refresh-token".into(),
+                expires_at_ms: now_millis_for_test() + 3 * 3_600_000,
+            })
+            .await
+            .unwrap();
+        let tracker = UsageTracker::new();
+        fetch_all(
+            &tracker,
+            vec![FetcherConfig {
+                kind: "openai-codex".into(),
+                provider_name: "openai-codex=alice".into(),
+                api_key: None,
+                base_url: Some(format!("http://{addr}/backend-api")),
+                codex_manager: Some(manager),
+            }],
+        )
+        .await;
+
+        let snapshot = tracker.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].provider, "openai-codex=alice");
+        assert_eq!(snapshot[0].windows[0].used_percent, Some(44.0));
+        let headers = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(headers["authorization"], format!("Bearer {token}"));
+        assert_eq!(headers["chatgpt-account-id"], "acct-7");
+    }
+
+    fn now_millis_for_test() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
 
     #[test]
     fn new_tracker_is_empty() {

@@ -203,7 +203,7 @@ the JSON APIs take the same `?provider=` parameter, and `GET /api/codex/provider
 every subscription with its `logged_in` flag and state path. Agent-facing ids are
 `openai-codex=alice/gpt-5.6-sol` and `openai-codex=bob/gpt-5.6-sol`.
 
-Plan usage/limits for the subscription are not fetched (deferred).
+The pi usage widget matches the full `openai-codex=<name>` id, so each named subscription displays its own quota.
 
 ### Multi-subscription
 
@@ -299,33 +299,28 @@ Exposed as `embeddings-local/<model-id>` in the catalog (surface: `embedding`). 
 
 ## Usage tracking
 
-`GET /v1/usage` returns per-provider rate-limit data captured from upstream response headers:
+`GET /v1/usage` returns per-provider snapshots from upstream rate-limit headers and billing APIs:
 
 ```json
 [
   {
-    "provider": "opencode-go",
+    "provider": "openai-codex",
     "windows": [
-      { "resource": "requests", "limit": 100, "remaining": 65, "used_percent": 35.0, "reset_secs": 1800 },
-      { "resource": "tokens", "limit": 1000000, "remaining": 400000, "used_percent": 60.0, "reset_secs": 3600 }
+      { "label": "5h", "used_percent": 37.5, "reset_secs": 5400, "window_minutes": 300 },
+      { "label": "7d", "used_percent": 22.0, "reset_secs": 7200, "window_minutes": 10080 }
     ],
     "updated_at": 1725547200000
   }
 ]
 ```
 
-In-memory only (lost on restart). Auth-gated like other `/v1/*` endpoints.
+In-memory only (lost on restart). Refreshed immediately at startup and every 60s. Auth-gated like other `/v1/*` endpoints.
 
-Sources differ per upstream: OpenAI-style gateways report rate-limit headers;
-minimax/zai/openrouter have billing endpoints; **opencode-go** calls the official
-Zen usage route (`GET <base_url>/usage` → `opencode.ai/zen/go/v1/usage`)
-authenticated with the same inference API key the upstream already uses, and
-reports its 5h / 7d / 30d subscription windows as percent. No browser cookie,
-session or HTML scraping is involved.
+Sources differ by upstream: OpenAI-style gateways report rate-limit headers; minimax/zai/openrouter have billing endpoints; **opencode-go** calls the official Zen usage route (`GET <base_url>/usage` → `opencode.ai/zen/go/v1/usage`) with its inference API key. **openai-codex** uses its existing OAuth token and account ID to query ChatGPT's usage endpoint (`GET /backend-api/wham/usage`, falling back to `/backend-api/codex/usage`). It reports personal-plan 5h/7d windows and Business `spend_control.individual_limit` monthly caps. These ChatGPT web-backend endpoints are undocumented and may change.
 
-The pi extension shows the most-pressured provider on startup and every 60s:
+The pi extension fetches usage on first agent turn and every 60s, then filters to the current upstream. Example widget:
 ```
-[aiproxy] opencode-go 60% (reset 1h)
+[aiproxy] 5h 38% (reset 1h30m) │ 7d 22% (reset 2h)
 ```
 
 ## Connecting pi
