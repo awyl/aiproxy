@@ -84,7 +84,16 @@ const CACHE_DIR = join(homedir(), ".pi/agent");
 const CACHE_PATH = join(CACHE_DIR, "aiproxy-models.json");
 
 /** Upstream kinds that aiproxy supports — used to fetch metadata from pi.dev. */
-const UPSTREAM_KINDS = ["opencode-go", "minimax", "zai", "openrouter", "nvidia"];
+const UPSTREAM_KINDS = [
+  "opencode-go",
+  "minimax",
+  "zai",
+  "openrouter",
+  "nvidia",
+  // ChatGPT/Codex subscription — same provider id as pi's catalog entry, so no
+  // kind→catalog aliasing is needed.
+  "openai-codex",
+];
 
 /** Fetch model metadata from pi.dev catalog API for one upstream kind. */
 async function fetchPiDevCatalog(

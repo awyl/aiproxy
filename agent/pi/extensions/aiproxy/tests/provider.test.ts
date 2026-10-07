@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { registerProxyProvider, attributionHeaders, loadCatalog } from "../provider.ts";
+import { registerProxyProvider, attributionHeaders, loadCatalog, SURFACE_API, fromCatalog } from "../provider.ts";
 
 function stubPi() {
   return { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
@@ -185,5 +185,22 @@ describe("loadCatalog — fetches from pi.dev and caches", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(catalog.has("opencode-go/mimo-v2.5")).toBe(true);
     expect(catalog.has("minimax/mimo-v2.5")).toBe(true);
+  });
+
+  it("fetches the openai-codex catalog under pi's own provider id", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(piDevResponse);
+    await loadCatalog(["openai-codex"], fetchImpl as unknown as typeof fetch);
+    // no kind→catalog aliasing: the proxy kind is already pi's provider id
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining("pi.dev/api/models/providers/openai-codex"),
+      expect.anything(),
+    );
+  });
+
+  it("codex models stream over the responses surface", () => {
+    expect(SURFACE_API["responses"]).toBe("openai-responses");
+    const model = fromCatalog("openai-codex/gpt-5.6-sol", {}, "responses");
+    expect(model.api).toBe("openai-responses");
+    expect(model.baseUrl).toBeUndefined();
   });
 });
