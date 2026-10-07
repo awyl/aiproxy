@@ -94,7 +94,26 @@ impl OpenAiCodexProvider {
                 body: parsed,
             });
         }
-        codex_oauth::parse_models_response(&body).map_err(codex_err)
+        let catalog = codex_oauth::parse_models_catalog(&body).map_err(codex_err)?;
+        if catalog.models.is_empty() {
+            // Silence here is what made a logged-in upstream look broken: the
+            // probe answered, so nothing failed, and "0 models" said nothing
+            // about why. Report the skip reasons instead.
+            tracing::warn!(
+                provider = %self.id,
+                total = catalog.total,
+                hidden = catalog.hidden,
+                not_in_api = catalog.not_in_api,
+                no_slug = catalog.no_slug,
+                body = %String::from_utf8_lossy(&body[..body.len().min(400)]),
+                "codex catalog probe returned nothing offerable"
+            );
+            return Err(ProviderError::Transport(format!(
+                "codex catalog: {}",
+                catalog.empty_reason()
+            )));
+        }
+        Ok(catalog.models)
     }
 
     fn static_models(&self) -> Vec<Model> {
@@ -557,6 +576,42 @@ mod tests {
             "a failed probe keeps the configured catalog"
         );
         assert_eq!(catalog.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_nothing_offerable_says_why() {
+        // A real account can list models that are all hidden or not API-capable.
+        // The probe used to report success with 0 models, which reads as a broken
+        // login; the reason must reach the caller (and /reload).
+        let (base, _catalog) = spawn_catalog(
+            200,
+            json!({"models": [
+                {"slug": "codex-auto-review", "visibility": "hide", "supported_in_api": true},
+                {"slug": "gpt-5.6-sol", "visibility": "list", "supported_in_api": false},
+            ]}),
+        )
+        .await;
+        let (provider, _dir) = provider_with(&base, vec![], true, true).await;
+        let err = provider.list_models().await.unwrap_err();
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("0 offerable")
+                && text.contains("1 hidden")
+                && text.contains("1 not supported in api"),
+            "the empty catalog must explain itself, got {text}"
+        );
+        // and with a static list configured, that list still serves
+        let (provider, _dir) = provider_with(&base, vec!["gpt-5.6-sol".into()], true, true).await;
+        assert_eq!(
+            provider
+                .list_models()
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"]
+        );
     }
 
     #[tokio::test]

@@ -613,19 +613,54 @@ pub struct CodexModel {
 /// that explicitly deny API support (`supported_in_api: false`) are dropped.
 /// Both fields are treated as present-and-true when missing, matching the
 /// Codex CLI's lenient handling of older payloads.
+/// A parsed catalog plus the counts needed to explain a short result: "0 models"
+/// with no reason is not diagnosable, so the skip reasons travel with it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CodexCatalog {
+    pub models: Vec<CodexModel>,
+    /// Entries in the upstream payload.
+    pub total: usize,
+    /// Skipped: `visibility` was neither `list` nor absent.
+    pub hidden: usize,
+    /// Skipped: `supported_in_api` was explicitly false.
+    pub not_in_api: usize,
+    /// Skipped: no usable `slug`.
+    pub no_slug: usize,
+}
+
+impl CodexCatalog {
+    /// Human-readable reason when nothing is offerable.
+    pub fn empty_reason(&self) -> String {
+        format!(
+            "upstream listed {} models, 0 offerable ({} hidden, {} not supported in api, {} without a slug)",
+            self.total, self.hidden, self.not_in_api, self.no_slug
+        )
+    }
+}
+
 pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError> {
+    Ok(parse_models_catalog(body)?.models)
+}
+
+/// Parse `GET {base}/codex/models`, counting why entries were skipped.
+pub fn parse_models_catalog(body: &[u8]) -> Result<CodexCatalog, CodexError> {
     let json: Value = serde_json::from_slice(body)
         .map_err(|e| CodexError::InvalidJson(format!("model catalog: {e}")))?;
     let models = json
         .get("models")
         .and_then(Value::as_array)
         .ok_or_else(|| CodexError::InvalidJson("model catalog: missing `models` array".into()))?;
-    let mut out = Vec::new();
+    let mut catalog = CodexCatalog {
+        total: models.len(),
+        ..Default::default()
+    };
     for model in models {
         let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+            catalog.no_slug += 1;
             continue;
         };
         if slug.is_empty() {
+            catalog.no_slug += 1;
             continue;
         }
         let visible = model
@@ -637,10 +672,15 @@ pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError>
             .get("supported_in_api")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        if !visible || !in_api {
+        if !visible {
+            catalog.hidden += 1;
             continue;
         }
-        out.push(CodexModel {
+        if !in_api {
+            catalog.not_in_api += 1;
+            continue;
+        }
+        catalog.models.push(CodexModel {
             slug: slug.to_string(),
             display_name: model
                 .get("display_name")
@@ -653,7 +693,7 @@ pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError>
                 .filter(|w| *w > 0),
         });
     }
-    Ok(out)
+    Ok(catalog)
 }
 
 /// Resolve the Codex responses endpoint from an upstream base URL.
@@ -1523,6 +1563,34 @@ mod tests {
         assert_eq!(get(&h, "openai-beta"), None);
         assert_eq!(get(&h, "content-type"), None);
         assert_eq!(get(&h, "session-id"), None);
+    }
+
+    #[test]
+    fn catalog_counts_every_skip_reason() {
+        let body = serde_json::to_vec(&json!({"models": [
+            {"slug": "gpt-5.6-sol", "visibility": "list", "supported_in_api": true},
+            {"slug": "gpt-hidden", "visibility": "hide", "supported_in_api": true},
+            {"slug": "gpt-no-api", "visibility": "list", "supported_in_api": false},
+            {"display_name": "no slug", "visibility": "list", "supported_in_api": true},
+            {"slug": "", "visibility": "list", "supported_in_api": true},
+        ]}))
+        .unwrap();
+        let c = parse_models_catalog(&body).unwrap();
+        assert_eq!(c.total, 5);
+        assert_eq!(c.models.len(), 1);
+        assert_eq!(c.hidden, 1);
+        assert_eq!(c.not_in_api, 1);
+        assert_eq!(c.no_slug, 2);
+        // the reason names the numbers, so a 0-model probe is diagnosable
+        let empty = CodexCatalog {
+            total: 12,
+            not_in_api: 12,
+            ..Default::default()
+        };
+        assert_eq!(
+            empty.empty_reason(),
+            "upstream listed 12 models, 0 offerable (0 hidden, 12 not supported in api, 0 without a slug)"
+        );
     }
 
     fn catalog(models: Value) -> Vec<CodexModel> {
