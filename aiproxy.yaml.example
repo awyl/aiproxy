@@ -37,7 +37,7 @@ upstreams:
 
   # Multi-subscription example: two opencode-go upstreams.
   # Name is required — provider IDs become "opencode-go=alice" and "opencode-go=bob".
-  # Model ids: opencode-go=alice/mimo-v2.5, opencode-go=bob/mimo-v2.5
+  # Model ids: opencode-go=alice/grok-4.6, opencode-go=bob/grok-4.6
   #
   # - name: alice
   #   kind: opencode-go

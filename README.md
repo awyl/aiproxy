@@ -36,9 +36,9 @@ export OPENCODE_GO_API_KEY=your-go-key
 | `zai` | OpenAI chat completions | `api.z.ai/api/coding/paas/v4` | Keyed | GLM Coding Plan |
 | `openrouter` | OpenAI chat completions | `openrouter.ai/api/v1` | Public, keyless | 396+ models aggregated |
 | `nvidia` | OpenAI chat completions | `integrate.api.nvidia.com/v1` | Public, keyless | NIM cloud; self-hosted via `base_url` |
-| `openai-codex` | OpenAI Responses | `chatgpt.com/backend-api` | None (list `models:`) | **ChatGPT Plus/Pro subscription** via device-code OAuth — log in at `/setup`, no API key |
+| `openai-codex` | OpenAI Responses | `chatgpt.com/backend-api` | Implicit (needs the login) | **ChatGPT Plus/Pro subscription** — OAuth login at `/setup`, no API key |
 
-Agent-facing model ids are always `<provider-id>/<model-id>`, e.g. `opencode-go/mimo-v2.5`.
+Agent-facing model ids are always `<provider-id>/<model-id>`, e.g. `opencode-go/grok-4.6`.
 
 Provider IDs follow a scheme:
 - **1 upstream of kind** → ID = kind name (e.g. `opencode-go`)
@@ -49,8 +49,8 @@ Provider IDs follow a scheme:
 ## Docker
 
 ```bash
-# Build
-DOCKER_USER=yourhubuser ./docker-push.sh 0.2.3
+# Build (reads the version from Cargo.toml, tags :<version> + :latest)
+DOCKER_USER=yourhubuser ./docker-push.sh
 
 # Run
 docker run -d \
@@ -60,7 +60,7 @@ docker run -d \
   -e AIPROXY_TOKEN=secret \
   -e OPENCODE_GO_API_KEY=... \
   -p 8080:8080 \
-  yourhubuser/aiproxy:0.2.3
+  yourhubuser/aiproxy:latest
 ```
 
 `/runtime` is where OAuth logins live (`openai-codex-oauth-{name}.json`). Mount it, or
@@ -115,6 +115,11 @@ embeddings:
 - `discover: true` — probe `GET <base_url>/models` at startup/refresh (for
   `openai-codex`: `GET <base_url>/codex/models`, authenticated with the subscription)
 - Neither — empty catalog; requests still route, agents see nothing in `/v1/models`
+- `surface: chat | messages | responses` — for a static list, which wire format those
+  models are served on (this is what `/v1/models` reports and what clients route by).
+  Without it a static entry is catalog-only: listed, but not streamable. On
+  `opencode-go` the surface comes from `surface_map_url` / the builtin table instead,
+  and `endpoint_by_model:` overrides a single model.
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
@@ -131,8 +136,7 @@ upstreams:
 ```
 
 - **No key, no `api_key_env`/`token_env`** — setting either is a config error. Auth is
-the ChatGPT OAuth login, stored in `{config-dir}/openai-codex-oauth-state.json` (mode
-`0600`) next to your config file.
+the ChatGPT OAuth login (see *Where the login is stored* below).
 - **Log in at `http://<proxy>/setup`** — browser login by default (PKCE, like pi's own
 Codex login): the page opens `auth.openai.com`, and when you authorize, the browser is
 sent to `http://localhost:1455/auth/callback?code=…&state=…`. **Nothing listens on that
@@ -147,10 +151,12 @@ background (and on a `401`, once, mid-request).
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
 default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
 drops `max_output_tokens`) and sends `originator: pi` plus your account id.
-- **Model discovery** — `discover: true` probes the Codex catalog
+- **Model discovery** — probes the Codex catalog
 (`GET {base}/codex/models?client_version=X.Y.Z`, same OAuth headers as requests) on every
-model-refresh tick and offers the entries the picker is allowed to show (`visibility: list`,
-`supported_in_api: true`). Hidden entries such as `codex-auto-review` are skipped. A
+model-refresh tick. Offered entries are the ones the picker itself shows:
+`visibility: list` (in ChatGPT mode every model is visible, so `supported_in_api` is
+*not* applied — applying it is what silently dropped the subscription-only models).
+Hidden entries such as `codex-auto-review` are skipped. A
 `models:` list is optional; when present it is the fallback if the probe cannot answer
 (logged out, offline, upstream error). Without either, the catalog stays empty until login.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
@@ -215,7 +221,8 @@ upstreams:
     token_env: GO_BOB_TOKEN
 ```
 
-Model ids become `go-alice/mimo-v2.5` and `go-bob/mimo-v2.5`. Alice can't use Bob's models.
+Model ids become `opencode-go=go-alice/grok-4.6` and `opencode-go=go-bob/grok-4.6` (the
+`kind=name` form — see *Provider IDs* above). Alice can't use Bob's models.
 
 ## MCP hosting
 
@@ -323,30 +330,36 @@ The pi extension shows the most-pressured provider on startup and every 60s:
 
 ## Connecting pi
 
-Install the pi aiproxy extension:
+Install the pi aiproxy extension as a pi package:
 
 ```bash
-# Project-scoped (recommended)
-pi install ./agent/pi/extensions/aiproxy -l
-
-# Or global
-cp -r agent/pi/extensions/aiproxy ~/.pi/agent/extensions/aiproxy
+pi install git:github.com/awyl/aiproxy@v0.4.0
 ```
 
-Configure in `~/.pi/agent/models.json`:
+For a local checkout, `pi install ./agent/pi/extensions/aiproxy -l` (project-scoped).
+Don't also keep a hand-copied extension under `~/.pi/agent/extensions/` — it would load
+twice.
+
+Configure in `~/.pi/agent/aiproxy.json` (a project-level `.pi/aiproxy.json` overrides
+individual fields):
 
 ```json
 {
-  "providers": {
-    "aiproxy": {
-      "baseUrl": "http://127.0.0.1:8080/v1",
-      "apiKey": "$AIPROXY_TOKEN"
-    }
-  }
+  "baseUrl": "http://127.0.0.1:8080/v1",
+  "apiKey": "$AIPROXY_TOKEN",
+  "mcpServers": "searxng,ctx7,grep"
 }
 ```
 
-Models auto-register from `/v1/models`. Wire format (openai-completions / anthropic-messages / openai-responses) is set per-model based on the upstream's surface. Thinking defaults to `high` for all models; override per-model via `modelOverrides` in models.json.
+`mcpServers` is optional (it registers the proxy's MCP multiplexer tools). This file is
+the extension's own — the proxy's `aiproxy.yaml` is never read by pi, and neither is
+`models.json`.
+
+Models auto-register from the proxy's `/v1/models`. Wire format
+(openai-completions / anthropic-messages / openai-responses) is set per-model from the
+`surface` the proxy reports, and metadata (context window, max tokens, reasoning,
+thinking levels, cost) is resolved from the pi.dev model catalog, with pi's local
+`models-store.json` as fallback.
 
 ## CLI
 

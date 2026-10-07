@@ -8,7 +8,6 @@ flake.nix
 flake.lock
 docs/
 agent/
-extensions/
 tests/
 *.md
 !README.md

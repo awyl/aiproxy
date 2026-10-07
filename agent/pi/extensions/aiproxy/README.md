@@ -4,7 +4,7 @@ Pi provider that fronts an [aiproxy](../..) gateway. One provider entry; models
 are auto-discovered from the gateway at startup, split across the three wire
 surfaces the proxy speaks.
 
-Model ids stay prefixed (`opencode-go/mimo-v2.5`); the proxy routes by prefix
+Model ids stay prefixed (`opencode-go/grok-4.6`); the proxy routes by prefix
 and strips it. Provider IDs follow a scheme:
 
 - 1 upstream of kind → ID = kind name (e.g. `opencode-go`)
@@ -67,16 +67,16 @@ The MCP SDK (`@modelcontextprotocol/sdk`) is a runtime dependency — installed
 automatically by `pi install` (git package), but for loose-copy installs run
 `npm i @modelcontextprotocol/sdk` next to the extension files.
 
-Default thinking level is `high` for every model; override per model with
-`models.json` `modelOverrides` (e.g. `{"providers":{"aiproxy": {"modelOverrides":
-{"aiproxy/opencode-go/mimo-v2.5": {"thinkingLevelMap": {...}}}}}}`).
+Thinking levels come from the same catalog metadata (`thinkingLevelMap`), so
+whatever pi knows about a model applies through the proxy. There is no local
+override file: `models.json` is not read.
 
 ## Install
 
 Install as a pi package from git (recommended):
 
 ```bash
-pi install git:github.com/awyl/aiproxy@v0.2.6
+pi install git:github.com/awyl/aiproxy@v0.4.0
 ```
 
 Clones to `~/.pi/agent/git/github.com/awyl/aiproxy` and loads the extension.
@@ -91,25 +91,32 @@ pi -e git:github.com/awyl/aiproxy
 
 Or for a local checkout, add `./agent/pi/extensions/aiproxy` to your settings'
 `packages` list (or `pi install ./agent/pi/extensions/aiproxy -l`).
-Then `/models` → select `aiproxy/opencode-go/mimo-v2.5`.
+Then `/models` → select `aiproxy/opencode-go/grok-4.6`.
 
 ## Notes
 
-- Model metadata (contextWindow, maxTokens, reasoning, cost, etc.) is resolved
-  from pi's live model store (`models-store.json`) so context sizes match what
-  pi knows about each model (e.g. mimo-v2.5 gets 1M, not 128k defaults).
+- Model metadata (contextWindow, maxTokens, reasoning, thinkingLevelMap, cost,
+  compat) is resolved per `provider/modelId` from the **pi.dev catalog API**
+  (`/api/models/providers/<kind>`), with pi's local model store
+  (`models-store.json`) as fallback — so context sizes match what pi knows about
+  each model instead of defaulting to 128k. The resolved catalog is cached and
+  refreshed in the background.
 - `Input` defaults to `["text"]` — flip to include `"image"` per model if tested.
 - If the gateway is unreachable at startup, the extension warns and registers
   zero models — pi still starts.
 
 ## Multi-subscription gateways
 
-With per-upstream `token_env` (aiproxy multi-subscription), the catalog
-contains models from every subscription (`opencode-go=alice/*`, `opencode-go=bob/*`).
-This extension registers all of them; each user picks their subscription by model
-prefix and their own `AIPROXY_TOKEN` identifies them (requests for prefixes
-they don't own are rejected by the proxy). One extension, no per-user config
-beyond each person's token env.
+With 2+ upstreams of a kind the catalog contains models from every one of them
+(`opencode-go=alice/*`, `opencode-go=bob/*`, `openai-codex=alice/*`, …). This
+extension registers all of them — nothing to configure, the ids carry the
+subscription.
+
+Who may use which is the proxy's business: with per-upstream `token_env`, a
+request's bearer token both authenticates and locks it to that upstream's models
+(prefixes the token does not own are rejected), so each user sets their own
+`AIPROXY_TOKEN`. `openai-codex` subscriptions take no token — they are logged in
+at the proxy's `/setup` page and are shared by everyone holding the proxy token.
 
 ## Typecheck
 
