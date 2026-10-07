@@ -76,6 +76,17 @@ upstreams:
     api_key_env: OPENROUTER_API_KEY
     discover: true          # safe: GET /v1/models is keyless (396 models)
 
+  # ChatGPT / Codex subscription (ChatGPT Plus or Pro) — Responses surface only.
+  # NO API KEY: authentication is the ChatGPT OAuth device-code login. Start the
+  # proxy, open http://127.0.0.1:8080/setup, and enter the code it shows at
+  # https://auth.openai.com/codex/device. Tokens live in
+  # `openai-codex-oauth-state.json` next to this config file (mode 0600) and are
+  # refreshed automatically. There is no model-discovery endpoint, so list the
+  # models explicitly (`discover: true` is ignored with a warning).
+  # Agent-facing ids: openai-codex/gpt-5.6-sol → POST /v1/responses
+  # - kind: openai-codex           # provider ID = "openai-codex"
+  #   models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5]
+
   # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
   # The coding-plan API key (individual or team) goes in ZAI_API_KEY.
   - kind: zai                      # provider ID = "zai"

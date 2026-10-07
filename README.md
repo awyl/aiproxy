@@ -36,6 +36,7 @@ export OPENCODE_GO_API_KEY=your-go-key
 | `zai` | OpenAI chat completions | `api.z.ai/api/coding/paas/v4` | Keyed | GLM Coding Plan |
 | `openrouter` | OpenAI chat completions | `openrouter.ai/api/v1` | Public, keyless | 396+ models aggregated |
 | `nvidia` | OpenAI chat completions | `integrate.api.nvidia.com/v1` | Public, keyless | NIM cloud; self-hosted via `base_url` |
+| `openai-codex` | OpenAI Responses | `chatgpt.com/backend-api` | None (list `models:`) | **ChatGPT Plus/Pro subscription** via device-code OAuth — log in at `/setup`, no API key |
 
 Agent-facing model ids are always `<provider-id>/<model-id>`, e.g. `opencode-go/mimo-v2.5`.
 
@@ -107,6 +108,33 @@ embeddings:
 - Neither — empty catalog; requests still route, agents see nothing in `/v1/models`
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key.
+
+### ChatGPT / Codex subscription (`openai-codex`)
+
+Runs Codex models on a ChatGPT Plus/Pro subscription instead of an API key:
+
+```yaml
+upstreams:
+  - kind: openai-codex          # provider ID = "openai-codex"
+    models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5]
+```
+
+- **No key, no `api_key_env`/`token_env`** — setting either is a config error. Auth is
+the ChatGPT OAuth login, stored in `{config-dir}/openai-codex-oauth-state.json` (mode
+`0600`) next to your config file.
+- **Log in at `http://<proxy>/setup`** — the page shows a device code; enter it at the
+verification link. The proxy runs the poll loop, so you can close the page. Tokens are
+refreshed in the background (and on a `401`, once, mid-request).
+- **Responses surface only**: agents call `POST /v1/responses` with
+`openai-codex/<model>`; `/v1/chat/completions` and `/v1/messages` are rejected for these
+models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
+default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
+drops `max_output_tokens`) and sends `originator: pi` plus your account id.
+- **No discovery endpoint** — list `models:` explicitly; `discover: true` is ignored with
+a warning.
+- Not logged in yet? Requests fail `502` with a hint to open `/setup`.
+
+Plan usage/limits for the subscription are not fetched (deferred).
 
 ### Multi-subscription
 
