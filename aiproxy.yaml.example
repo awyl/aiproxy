@@ -92,7 +92,7 @@ upstreams:
   # AIPROXY_CODEX_STATE_DIR, else AIPROXY_RUNTIME_DIR, else /runtime when it
   # exists, else this config file's directory. In a container mount the state dir
   # (or the config directory, not just the file) or the login dies with the
-  # container. /setup and /api/codex/status show the exact path; a successful
+  # container. Nothing is read from the old config-dir location. /setup and /api/codex/status show the exact path; a successful
   # login re-runs discovery by itself. Model discovery is on by default (`discover:` is
   # implicit for this kind); the `models:` list is the fallback for a failed probe.
   # Agent-facing ids: openai-codex/gpt-5.6-sol → POST /v1/responses

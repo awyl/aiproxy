@@ -157,9 +157,8 @@ model-refresh tick and offers the entries the picker is allowed to show (`visibi
 
 **Where the login is stored.** `{state-dir}/{provider-id}-oauth-state.json`, mode `0600`.
 The state dir is resolved in this order: `AIPROXY_CODEX_STATE_DIR` →
-`AIPROXY_RUNTIME_DIR` → `/runtime` when it exists → the config file's directory. A file
-left at the old config-dir location is moved into the state dir on first use, so a login
-made before this change keeps working. `/api/codex/status` reports the exact path
+`AIPROXY_RUNTIME_DIR` → `/runtime` when it exists → the config file's directory.
+`/api/codex/status` reports the exact path
 (`state_path`) and whether a file is really there (`state_file`), `/setup` shows the same
 line, and startup logs `codex credentials path=… logged_in=…` — check that first when a
 login seems to vanish after a restart. A successful login also re-runs discovery on its

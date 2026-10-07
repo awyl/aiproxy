@@ -867,51 +867,8 @@ fn pick_state_dir(
 
 /// State file for one `openai-codex` upstream: `{dir}/{provider-id}-oauth-state.json`.
 /// The provider id keeps multiple subscriptions apart (`openai-codex=alice`).
-///
-/// A state file left at the old config-dir location is **moved** into the state
-/// dir the first time it is resolved, so a login made before this change keeps
-/// working and lands in the directory that survives a container recreate. If the
-/// move is impossible (unwritable runtime dir), the old path is kept and logged —
-/// an existing login is never stranded.
 pub fn codex_state_path(config_path: Option<&Path>, provider_id: &str) -> PathBuf {
-    let name = format!("{provider_id}-oauth-state.json");
-    let target = codex_state_dir(config_path).join(&name);
-    let legacy = config_dir_of(config_path).join(&name);
-    if legacy == target || !legacy.exists() || target.exists() {
-        return target;
-    }
-    match migrate_state_file(&legacy, &target) {
-        Ok(()) => {
-            tracing::info!(
-                from = %legacy.display(),
-                to = %target.display(),
-                "moved codex credentials into the state dir"
-            );
-            target
-        }
-        Err(e) => {
-            tracing::warn!(
-                from = %legacy.display(),
-                to = %target.display(),
-                "could not move codex credentials ({e}); keeping the existing file"
-            );
-            legacy
-        }
-    }
-}
-
-fn migrate_state_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    if let Some(dir) = to.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // different filesystems: copy first, remove only after it landed
-            std::fs::copy(from, to)?;
-            std::fs::remove_file(from)
-        }
-    }
+    codex_state_dir(config_path).join(format!("{provider_id}-oauth-state.json"))
 }
 
 pub fn token_url() -> String {
@@ -1313,69 +1270,41 @@ mod tests {
     }
 
     #[test]
-    fn codex_state_path_moves_a_config_dir_file_into_the_runtime_dir() {
+    fn codex_state_path_lives_in_the_state_dir_and_is_per_provider() {
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let legacy = config.path().join("openai-codex-oauth-state.json");
+        // A file left at the old location is ignored, not adopted or moved.
         save_persisted(
-            &legacy,
+            &config.path().join("openai-codex-oauth-state.json"),
             &Tokens {
-                access: "at_legacy".into(),
-                refresh: "rt_legacy".into(),
+                access: "at_old".into(),
+                refresh: "rt_old".into(),
                 expires_at_ms: now_ms() + 3_600_000,
             },
         )
         .unwrap();
         let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", runtime.path().to_str().unwrap());
 
-        let path = codex_state_path(Some(&config.path().join("aiproxy.yaml")), "openai-codex");
-        assert_eq!(path, runtime.path().join("openai-codex-oauth-state.json"));
-        assert!(
-            path.exists(),
-            "the state file must follow into the runtime dir"
-        );
-        assert!(
-            !legacy.exists(),
-            "the fragile config-dir copy must be gone after the move"
-        );
-        // the login survives: a manager on the new path reads the same tokens
-        let manager = CodexTokenManager::new(&path, "http://127.0.0.1:1/oauth/token");
+        let config_path = config.path().join("aiproxy.yaml");
+        let alice = codex_state_path(Some(&config_path), "openai-codex=alice");
+        let bob = codex_state_path(Some(&config_path), "openai-codex=bob");
         assert_eq!(
-            manager.state_path(),
-            path.as_path(),
-            "the manager must use the runtime path"
+            alice,
+            runtime.path().join("openai-codex=alice-oauth-state.json")
         );
+        assert_eq!(
+            bob,
+            runtime.path().join("openai-codex=bob-oauth-state.json")
+        );
+        assert_ne!(alice, bob, "subscriptions must never share a state file");
+        assert!(!alice.exists(), "nothing is created before a login");
+        // The manager on that path reports logged out — the stale config-dir
+        // file is not consulted.
+        let manager = CodexTokenManager::new(&alice, "http://127.0.0.1:1/oauth/token");
         assert!(matches!(
             futures::executor::block_on(manager.status()),
-            CodexStatus::LoggedIn { .. }
+            CodexStatus::LoggedOut
         ));
-    }
-
-    #[test]
-    fn codex_state_path_keeps_the_old_location_when_it_cannot_move() {
-        let config = tempfile::tempdir().unwrap();
-        let legacy = config.path().join("openai-codex-oauth-state.json");
-        save_persisted(
-            &legacy,
-            &Tokens {
-                access: "at_legacy".into(),
-                refresh: "rt_legacy".into(),
-                expires_at_ms: now_ms() + 3_600_000,
-            },
-        )
-        .unwrap();
-        // a "runtime dir" whose parent is a file: create_dir_all fails
-        let blocker = config.path().join("not-a-dir");
-        std::fs::write(&blocker, b"x").unwrap();
-        let unusable = blocker.join("state");
-        let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", unusable.to_str().unwrap());
-
-        let path = codex_state_path(Some(&config.path().join("aiproxy.yaml")), "openai-codex");
-        assert_eq!(
-            path, legacy,
-            "an unusable runtime dir must not strand the existing login"
-        );
-        assert!(path.exists());
     }
 
     /// base64url (no padding) encoder, independent of the implementation.
