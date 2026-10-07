@@ -69,6 +69,17 @@ export const SURFACE_API: Record<string, string> = {
 };
 
 /**
+ * pi-ai api ids that must never be used against the proxy. The proxy fronts a
+ * plain OpenAI Responses endpoint, so provider-specific drivers — which inject
+ * their own OAuth and codex headers and target chatgpt.com directly — are
+ * remapped to the generic wire (pi.dev's openai-codex catalog says
+ * `openai-codex-responses`; going through aiproxy means `openai-responses`).
+ */
+export const API_ALIASES: Record<string, string> = {
+  "openai-codex-responses": "openai-responses",
+};
+
+/**
  * pi-ai's anthropic client appends `/v1/messages` to the base URL (the Anthropic
  * SDK convention), while aiproxy mounts the messages route at `/v1/messages`.
  * The provider baseUrl ends in `/v1`, so messages-wire models need the root.
@@ -247,7 +258,11 @@ export function fromCatalog(
   surface?: string,
   base = "http://127.0.0.1:8080/v1",
 ) {
-  const api = SURFACE_API[surface ?? ""] ?? (meta.api as string) ?? "openai-completions";
+  const api =
+    SURFACE_API[surface ?? ""] ??
+    API_ALIASES[meta.api as string] ??
+    (meta.api as string) ??
+    "openai-completions";
   const msgBase = wireBaseUrl(api, base);
   return {
     id,

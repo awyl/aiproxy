@@ -203,4 +203,15 @@ describe("loadCatalog — fetches from pi.dev and caches", () => {
     expect(model.api).toBe("openai-responses");
     expect(model.baseUrl).toBeUndefined();
   });
+
+  it("never hands pi a chatgpt-specific driver for a proxied codex model", () => {
+    // pi.dev's openai-codex catalog advertises api "openai-codex-responses",
+    // which talks to chatgpt.com with its own OAuth — through aiproxy the
+    // generic responses wire is the correct one.
+    const model = fromCatalog(
+      "openai-codex/gpt-5.6-sol",
+      { api: "openai-codex-responses" },
+    );
+    expect(model.api).toBe("openai-responses");
+  });
 });
