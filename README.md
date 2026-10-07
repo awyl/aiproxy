@@ -135,8 +135,10 @@ mid-request).
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
 default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
 drops `max_output_tokens`) and sends `originator: pi` plus your account id.
-- **No discovery endpoint** — list `models:` explicitly; `discover: true` is ignored with
-a warning.
+- **Model list is static for now** — list `models:` explicitly; `discover: true` is ignored
+with a warning. The Codex backend does expose a catalog (`GET
+{base}/codex/models?client_version=X.Y.Z` → `{"models":[{slug, visibility, context_window,
+…}]}`), but it is unimplemented here — see the design doc's open items.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
 
 Plan usage/limits for the subscription are not fetched (deferred).
