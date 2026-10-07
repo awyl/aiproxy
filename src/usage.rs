@@ -602,12 +602,9 @@ struct OcGoUsageWindows {
 
 #[derive(Debug, Deserialize)]
 struct OcGoUsageMeter {
-    /// "ok" | "rate-limited". Parsed for completeness but not interpreted:
-    /// `percent` already carries the pressure, and a rate-limited window
-    /// simply reads 100%.
-    #[serde(default)]
-    #[allow(dead_code)]
-    status: Option<String>,
+    // The response also carries `status` ("ok" | "rate-limited"); it is not
+    // interpreted — `percent` already carries the pressure — so it is not
+    // parsed. Unknown JSON fields are ignored by serde.
     #[serde(default)]
     percent: Option<f64>,
     #[serde(rename = "resetsAt", default)]

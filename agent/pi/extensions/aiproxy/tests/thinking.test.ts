@@ -61,6 +61,23 @@ async function collect(stream: AssistantMessageEventStream): Promise<AssistantMe
   return events;
 }
 
+/** The terminal event every test stream ends with. */
+function done() {
+  return ev("done", {
+    reason: "stop",
+    message: {
+      role: "assistant",
+      content: [],
+      api: "openai-completions",
+      provider: "test",
+      model: "test",
+      usage: {},
+      stopReason: "stop",
+      timestamp: 0,
+    },
+  });
+}
+
 /** Create a mock base stream from an array of events. */
 function baseStream(events: AssistantMessageEvent[]): AssistantMessageEventStream {
   let i = 0;
@@ -117,19 +134,7 @@ describe("cleanStream", () => {
       ev("text_start"),
       ev("text_delta", { delta: "answer" }),
       ev("text_end", { content: "answer" }),
-      ev("done", {
-        reason: "stop",
-        message: {
-          role: "assistant",
-          content: [],
-          api: "openai-completions",
-          provider: "test",
-          model: "test",
-          usage: {},
-          stopReason: "stop",
-          timestamp: 0,
-        },
-      }),
+      done(),
     ]);
     const out = cleanStream(base);
     const events = await collect(out);
@@ -147,19 +152,7 @@ describe("cleanStream", () => {
       ev("text_start"),
       ev("text_delta", { delta: "<think>think</think>answer" }),
       ev("text_end", { content: "<think>think</think>answer" }),
-      ev("done", {
-        reason: "stop",
-        message: {
-          role: "assistant",
-          content: [],
-          api: "openai-completions",
-          provider: "test",
-          model: "test",
-          usage: {},
-          stopReason: "stop",
-          timestamp: 0,
-        },
-      }),
+      done(),
     ]);
     const out = cleanStream(base);
     const events = await collect(out);
@@ -182,19 +175,7 @@ describe("cleanStream", () => {
       ev("text_start"),
       ev("text_delta", { delta: "done" }),
       ev("text_end", { content: "done" }),
-      ev("done", {
-        reason: "stop",
-        message: {
-          role: "assistant",
-          content: [],
-          api: "openai-completions",
-          provider: "test",
-          model: "test",
-          usage: {},
-          stopReason: "stop",
-          timestamp: 0,
-        },
-      }),
+      done(),
     ]);
     const out = cleanStream(base);
     const events = await collect(out);

@@ -379,16 +379,6 @@ impl CodexTokenManager {
         Ok(())
     }
 
-    /// Drop in-memory tokens so the next call re-reads the state file.
-    pub async fn reload(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.tokens = None;
-        inner.bad_refresh = None;
-        inner.backoff_ms = 0;
-        inner.backoff_until_ms = 0;
-        inner.last_error = None;
-    }
-
     /// Background refresh: refresh when inside the margin. Errors are recorded,
     /// never surfaced (the request path reports them).
     pub async fn background_tick(&self) {
@@ -665,10 +655,6 @@ impl CodexCatalog {
             self.total, self.hidden, self.no_slug
         )
     }
-}
-
-pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError> {
-    Ok(parse_models_catalog(body)?.models)
 }
 
 /// Parse `GET {base}/codex/models`, counting why entries were skipped.
@@ -1298,13 +1284,14 @@ mod tests {
         set_envs_guarded(&[(key, value)])
     }
 
-    struct EnvGuard(
-        Vec<String>,
-        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-    );
+    /// Restores the environment on drop; holds the lock for as long as it lives.
+    struct EnvGuard {
+        keys: Vec<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            for key in &self.0 {
+            for key in &self.keys {
                 unsafe { std::env::remove_var(key) };
             }
         }
@@ -1317,7 +1304,10 @@ mod tests {
         for (key, value) in pairs {
             unsafe { std::env::set_var(key, value) };
         }
-        EnvGuard(pairs.iter().map(|(k, _)| k.to_string()).collect(), lock)
+        EnvGuard {
+            keys: pairs.iter().map(|(k, _)| k.to_string()).collect(),
+            _lock: lock,
+        }
     }
 
     // ── state file location ────────────────────────────────────────────
@@ -1720,7 +1710,9 @@ mod tests {
     }
 
     fn catalog(models: Value) -> Vec<CodexModel> {
-        parse_models_response(&serde_json::to_vec(&json!({"models": models})).unwrap()).unwrap()
+        parse_models_catalog(&serde_json::to_vec(&json!({"models": models})).unwrap())
+            .unwrap()
+            .models
     }
 
     #[test]
@@ -1786,14 +1778,17 @@ mod tests {
     #[test]
     fn catalog_rejects_malformed_bodies() {
         assert!(matches!(
-            parse_models_response(b"not json"),
+            parse_models_catalog(b"not json").map(|c| c.models),
             Err(CodexError::InvalidJson(_))
         ));
         assert!(matches!(
-            parse_models_response(br#"{"data":[]}"#),
+            parse_models_catalog(br#"{"data":[]}"#).map(|c| c.models),
             Err(CodexError::InvalidJson(_))
         ));
-        assert_eq!(parse_models_response(br#"{"models":[]}"#).unwrap(), vec![]);
+        assert_eq!(
+            parse_models_catalog(br#"{"models":[]}"#).unwrap().models,
+            vec![]
+        );
     }
 
     #[test]

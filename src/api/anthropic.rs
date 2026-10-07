@@ -96,45 +96,16 @@ pub async fn messages(
 mod tests {
     use super::*;
     use crate::api::AppState;
-    use crate::provider::ModelSurface;
-    use crate::provider::testutil::MockProvider;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
-        let providers: Vec<std::sync::Arc<dyn crate::provider::Provider>> = vec![
-            std::sync::Arc::new(MockProvider::with_surface(
-                "openai",
-                vec!["gpt-4o".into()],
-                ModelSurface::ChatCompletions,
-            )),
-            std::sync::Arc::new(MockProvider::with_surface(
-                "anthropic",
-                vec!["claude-sonnet-4".into()],
-                ModelSurface::Messages,
-            )),
-            std::sync::Arc::new(MockProvider::with_surface(
-                "opencode-go",
-                vec!["grok-4.6".into()],
-                ModelSurface::Responses,
-            )),
-        ];
-        let reg = crate::discovery::ModelRegistry::new(providers);
-        reg.refresh().await;
-        AppState {
-            registry: std::sync::Arc::new(reg),
-            embeddings: std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(
-                &crate::config::EmbeddingsConfig::default(),
-            )),
-            token: Some("tok".into()),
-            subscriptions: Default::default(),
-            usage: crate::usage::UsageTracker::new(),
-            codex_managers: Default::default(),
-            codex_auth_base: String::new(),
-            codex_flows: Default::default(),
-        }
+        let embeddings = std::sync::Arc::new(crate::embeddings::EmbeddingManager::new(
+            &crate::config::EmbeddingsConfig::default(),
+        ));
+        crate::api::testutil::state_with(embeddings).await
     }
 
     async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {

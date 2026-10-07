@@ -30,35 +30,13 @@ async fn spawn(app: Router) -> String {
     format!("http://{addr}")
 }
 
-fn base64_url(input: &[u8]) -> String {
-    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(A[(n >> 18) as usize & 63] as char);
-        out.push(A[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(A[(n >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(A[n as usize & 63] as char);
-        }
-    }
-    out
-}
-
 fn access_token() -> String {
     let payload = json!({
         "https://api.openai.com/auth": {"chatgpt_account_id": "acct_e2e"}
     });
     format!(
         "e2e-header.{}.e2e-sig",
-        base64_url(payload.to_string().as_bytes())
+        aiproxy::codex_oauth::base64_url_encode(payload.to_string().as_bytes())
     )
 }
 

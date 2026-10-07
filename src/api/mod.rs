@@ -221,6 +221,49 @@ pub struct AppState {
     pub codex_flows: crate::setup::CodexFlows,
 }
 
+/// Test fixture shared by the surface routers' tests: one mock provider per
+/// surface (chat / messages / responses), already discovered.
+#[cfg(test)]
+pub(crate) mod testutil {
+    use super::AppState;
+    use crate::embeddings::EmbeddingManager;
+    use crate::provider::testutil::MockProvider;
+    use crate::provider::{ModelSurface, Provider};
+    use std::sync::Arc;
+
+    pub(crate) async fn state_with(embeddings: Arc<EmbeddingManager>) -> AppState {
+        let providers: Vec<Arc<dyn Provider>> = vec![
+            Arc::new(MockProvider::with_surface(
+                "openai",
+                vec!["gpt-4o".into()],
+                ModelSurface::ChatCompletions,
+            )),
+            Arc::new(MockProvider::with_surface(
+                "anthropic",
+                vec!["claude-sonnet-4".into()],
+                ModelSurface::Messages,
+            )),
+            Arc::new(MockProvider::with_surface(
+                "opencode-go",
+                vec!["grok-4.6".into()],
+                ModelSurface::Responses,
+            )),
+        ];
+        let registry = crate::discovery::ModelRegistry::new(providers);
+        registry.refresh().await;
+        AppState {
+            registry: Arc::new(registry),
+            embeddings,
+            token: Some("tok".into()),
+            subscriptions: Default::default(),
+            usage: crate::usage::UsageTracker::new(),
+            codex_managers: Default::default(),
+            codex_auth_base: String::new(),
+            codex_flows: Default::default(),
+        }
+    }
+}
+
 /// Which agent-facing error schema to speak when translating failures.
 #[derive(Debug, Clone, Copy)]
 pub enum Surface {

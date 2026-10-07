@@ -713,8 +713,10 @@ mod tests {
                     let payload = json!({
                         "https://api.openai.com/auth": {"chatgpt_account_id": "acct_1"}
                     });
-                    let token =
-                        format!("header.{}.sig", base64_url(payload.to_string().as_bytes()));
+                    let token = format!(
+                        "header.{}.sig",
+                        crate::codex_oauth::base64_url_encode(payload.to_string().as_bytes())
+                    );
                     Json(json!({
                         "access_token": token,
                         "refresh_token": "rt_1",
@@ -723,28 +725,6 @@ mod tests {
                 }),
             );
         spawn(app).await
-    }
-
-    fn base64_url(input: &[u8]) -> String {
-        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut out = String::new();
-        for chunk in input.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-            out.push(A[(n >> 18) as usize & 63] as char);
-            out.push(A[(n >> 12) as usize & 63] as char);
-            if chunk.len() > 1 {
-                out.push(A[(n >> 6) as usize & 63] as char);
-            }
-            if chunk.len() > 2 {
-                out.push(A[n as usize & 63] as char);
-            }
-        }
-        out
     }
 
     struct Env {
@@ -850,13 +830,36 @@ mod tests {
         (status, value)
     }
 
-    /// GET a route and parse the JSON body.
-    async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
-        let resp = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+    /// `POST` a JSON body and decode the response.
+    async fn post_json(app: Router, uri: &str, body: &str) -> (StatusCode, Value) {
+        body_json(
+            app.oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
             .await
-            .unwrap();
-        body_json(resp).await
+            .unwrap(),
+        )
+        .await
+    }
+
+    /// `POST` an empty JSON object, the body every `/api/codex/*` route takes.
+    async fn post_empty(app: Router, uri: &str) -> (StatusCode, Value) {
+        post_json(app, uri, "{}").await
+    }
+
+    /// `GET` a route and decode the JSON body.
+    async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
+        body_json(
+            app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1056,18 +1059,7 @@ mod tests {
     async fn start_without_codex_upstream_is_400() {
         let mut e = env("http://127.0.0.1:1", "openai-codex").await;
         e.state.codex_managers = Arc::new(HashMap::new());
-        let resp = router(&e.state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/codex/start")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (status, body) = body_json(resp).await;
+        let (status, body) = post_empty(router(&e.state), "/api/codex/start").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
             body["error"]["message"]
@@ -1081,18 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn start_with_unknown_provider_is_400() {
         let e = env("http://127.0.0.1:1", "openai-codex").await;
-        let resp = router(&e.state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/codex/start?provider=other")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (status, body) = body_json(resp).await;
+        let (status, body) = post_empty(router(&e.state), "/api/codex/start?provider=other").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
             body["error"]["message"].as_str().unwrap().contains("other"),
@@ -1103,18 +1084,8 @@ mod tests {
     #[tokio::test]
     async fn start_reports_gateway_error_when_auth_server_fails() {
         let e = env("http://127.0.0.1:1", "openai-codex").await;
-        let resp = router(&e.state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/codex/start?method=device")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let (status, _) = post_empty(router(&e.state), "/api/codex/start?method=device").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
@@ -1141,34 +1112,8 @@ mod tests {
         let e = env(&auth, "openai-codex").await;
         let app = router(&e.state);
 
-        let first = body_json(
-            app.clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/codex/start?method=device")
-                        .method("POST")
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
-        )
-        .await;
-        let second = body_json(
-            app.clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/codex/start?method=device")
-                        .method("POST")
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
-        )
-        .await;
+        let first = post_empty(app.clone(), "/api/codex/start?method=device").await;
+        let second = post_empty(app.clone(), "/api/codex/start?method=device").await;
         assert_eq!(first.0, StatusCode::OK);
         assert_eq!(first.1["state"], "pending");
         assert_eq!(first.1["user_code"], "WXYZ-1234");
@@ -1189,21 +1134,7 @@ mod tests {
 
         let post_start = |uri: &'static str| {
             let app = app.clone();
-            async move {
-                body_json(
-                    app.oneshot(
-                        Request::builder()
-                            .uri(uri)
-                            .method("POST")
-                            .header("content-type", "application/json")
-                            .body(Body::from("{}"))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap(),
-                )
-                .await
-            }
+            async move { post_empty(app, uri).await }
         };
 
         let (_, first) = post_start("/api/codex/start?method=device").await;
@@ -1266,22 +1197,6 @@ mod tests {
     }
 
     // ── browser (PKCE) flow ────────────────────────────────────────────────
-
-    async fn post_json(app: Router, uri: &str, body: &str) -> (StatusCode, Value) {
-        body_json(
-            app.oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap(),
-        )
-        .await
-    }
 
     /// Start a browser login and return the flow's authorize URL + state.
     async fn start_browser(e: &Env) -> Value {
@@ -1443,20 +1358,7 @@ mod tests {
         let e = env(&auth, "openai-codex").await;
         let app = router(&e.state);
 
-        let (status, body) = body_json(
-            app.clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/codex/start?method=device")
-                        .method("POST")
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
-        )
-        .await;
+        let (status, body) = post_empty(app.clone(), "/api/codex/start?method=device").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["verification_uri"], format!("{auth}/codex/device"));
 
@@ -1464,18 +1366,7 @@ mod tests {
         let mut final_state = String::new();
         for _ in 0..80 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let (_, body) = body_json(
-                app.clone()
-                    .oneshot(
-                        Request::builder()
-                            .uri("/api/codex/status")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap(),
-            )
-            .await;
+            let (_, body) = get_json(app.clone(), "/api/codex/status").await;
             final_state = body["state"].as_str().unwrap_or_default().to_string();
             if final_state != "pending" {
                 break;
