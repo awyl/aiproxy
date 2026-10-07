@@ -4,6 +4,7 @@
 pub mod anthropic;
 pub mod go;
 pub mod openai;
+pub mod openai_codex;
 #[cfg(test)]
 pub mod test_mock_upstream;
 
