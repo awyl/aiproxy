@@ -383,6 +383,30 @@ upstreams:
         assert_eq!(models[0].id, "gpt-5.6-sol");
     }
 
+    #[tokio::test]
+    async fn openai_codex_discover_opt_in_probes_the_codex_catalog() {
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, discover: true }\n").unwrap();
+        let providers = build_providers(&cfg, &Default::default());
+        assert_eq!(providers.len(), 1);
+        // Logged out with no static list: the probe cannot answer, so the
+        // failure is reported (the registry keeps its last-known catalog)
+        // instead of silently wiping it with an empty list.
+        let err = providers[0].list_models().await.unwrap_err();
+        assert!(
+            matches!(&err, ProviderError::Http { status, body } if *status == 502
+                && body["error"]["message"].as_str().unwrap_or_default().contains("/setup")),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_codex_without_discover_or_models_is_an_empty_catalog() {
+        let cfg = Config::from_yaml("upstreams:\n  - { kind: openai-codex }\n").unwrap();
+        let providers = build_providers(&cfg, &Default::default());
+        assert!(providers[0].list_models().await.unwrap().is_empty());
+    }
+
     #[test]
     fn create_codex_managers_uses_config_dir_and_provider_id() {
         let cfg =

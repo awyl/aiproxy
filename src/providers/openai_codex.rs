@@ -4,7 +4,7 @@
 //! shape applied (see `crate::codex_oauth::transform_codex_body`) and the
 //! Codex auth/identity headers; upstream SSE bytes are relayed verbatim.
 
-use crate::codex_oauth::{self, CodexError, CodexTokenManager};
+use crate::codex_oauth::{self, CodexError, CodexModel, CodexTokenManager};
 use crate::config::UpstreamConfig;
 use crate::provider::{
     Event, Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
@@ -19,6 +19,7 @@ pub struct OpenAiCodexProvider {
     pub id: String,
     base_url: String,
     models: Vec<String>,
+    discover: bool,
     manager: Arc<CodexTokenManager>,
     client: Client,
 }
@@ -26,6 +27,7 @@ pub struct OpenAiCodexProvider {
 impl OpenAiCodexProvider {
     pub fn new(cfg: &UpstreamConfig, id: &str, manager: Arc<CodexTokenManager>) -> Self {
         Self::with_base_url(id, &cfg.effective_base_url(), cfg.models.clone(), manager)
+            .with_discovery(cfg.discover)
     }
 
     pub fn with_base_url(
@@ -38,13 +40,73 @@ impl OpenAiCodexProvider {
             id: id.to_string(),
             base_url: base_url.to_string(),
             models,
+            discover: false,
             manager,
             client: crate::providers::default_http_client(),
         }
     }
 
+    /// Probe the Codex model catalog instead of serving `models:` verbatim.
+    /// The configured list stays as the fallback for a failed or impossible
+    /// probe (offline, logged out, upstream error).
+    pub fn with_discovery(mut self, discover: bool) -> Self {
+        self.discover = discover;
+        self
+    }
+
     fn url(&self) -> String {
         codex_oauth::codex_responses_url(&self.base_url)
+    }
+
+    fn models_url(&self) -> String {
+        format!(
+            "{}?client_version={}",
+            codex_oauth::codex_models_url(&self.base_url),
+            codex_oauth::client_version()
+        )
+    }
+
+    /// `GET {base}/codex/models` with the Codex auth/identity headers.
+    /// `None` when there are no usable credentials — discovery is skipped
+    /// rather than failing the whole refresh.
+    async fn discover_models(&self) -> Result<Vec<CodexModel>, ProviderError> {
+        let access = match self.manager.access().await {
+            Ok(access) => access,
+            Err(e) => return Err(codex_err(e)),
+        };
+        let account_id = codex_oauth::account_id_from_token(&access)
+            .ok_or_else(|| codex_err(CodexError::LoggedOut))?;
+        let resp = self
+            .client
+            .get(self.models_url())
+            .headers(codex_oauth::codex_models_headers(&access, &account_id))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(format!("codex catalog: {e}")))?;
+        let status = resp.status();
+        let body = resp.bytes().await.unwrap_or_default();
+        if !status.is_success() {
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or_else(
+                |_| json!({"error": {"message": "codex catalog request failed", "type": "upstream_error"}}),
+            );
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body: parsed,
+            });
+        }
+        codex_oauth::parse_models_response(&body).map_err(codex_err)
+    }
+
+    fn static_models(&self) -> Vec<Model> {
+        self.models
+            .iter()
+            .map(|m| Model {
+                id: m.clone(),
+                display_name: None,
+                created_at: None,
+                surface: ModelSurface::Responses,
+            })
+            .collect()
     }
 
     /// One upstream attempt: fresh access token, Codex headers, transformed body.
@@ -95,16 +157,28 @@ impl Provider for OpenAiCodexProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<Model>, ProviderError> {
-        Ok(self
-            .models
-            .iter()
-            .map(|m| Model {
-                id: m.clone(),
-                display_name: None,
-                created_at: None,
-                surface: ModelSurface::Responses,
-            })
-            .collect())
+        if !self.discover {
+            return Ok(self.static_models());
+        }
+        match self.discover_models().await {
+            Ok(models) => Ok(models
+                .into_iter()
+                .map(|m| Model {
+                    id: m.slug,
+                    display_name: m.display_name,
+                    created_at: None,
+                    surface: ModelSurface::Responses,
+                })
+                .collect()),
+            // Keep serving the configured catalog when the probe cannot answer
+            // (logged out, upstream error, malformed payload)…
+            Err(e) if !self.models.is_empty() => {
+                tracing::warn!(provider = %self.id, error = ?e, "codex catalog probe failed; using the configured models");
+                Ok(self.static_models())
+            }
+            // …and only surface the failure when there is nothing to fall back to.
+            Err(e) => Err(e),
+        }
     }
 
     async fn chat_completions(
@@ -185,9 +259,10 @@ mod tests {
     use super::*;
     use crate::codex_oauth::Tokens;
     use axum::Router;
+    use axum::http::Uri;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -332,6 +407,192 @@ mod tests {
             ),
             _dir: dir,
         }
+    }
+
+    /// Model-catalog mock: `GET /codex/models`, captures headers + query.
+    #[derive(Default)]
+    struct Catalog {
+        calls: AtomicUsize,
+        headers: Mutex<Vec<HashMap<String, String>>>,
+        queries: Mutex<Vec<String>>,
+    }
+
+    async fn spawn_catalog(status: u16, body: Value) -> (String, Arc<Catalog>) {
+        let state = Arc::new(Catalog::default());
+        let handler_state = state.clone();
+        let app = Router::new().route(
+            "/codex/models",
+            get(move |uri: Uri, headers: HeaderMap| {
+                let state = handler_state.clone();
+                let body = body.clone();
+                async move {
+                    state.calls.fetch_add(1, Ordering::SeqCst);
+                    state.headers.lock().unwrap().push(
+                        headers
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect(),
+                    );
+                    state
+                        .queries
+                        .lock()
+                        .unwrap()
+                        .push(uri.query().unwrap_or_default().to_string());
+                    if status == 200 {
+                        axum::Json(body).into_response()
+                    } else {
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            axum::Json(json!({"detail": "Unauthorized"})),
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), state)
+    }
+
+    /// Provider over `base` with a token manager (logged in unless told not to).
+    async fn provider_with(
+        base: &str,
+        models: Vec<String>,
+        discover: bool,
+        logged_in: bool,
+    ) -> (OpenAiCodexProvider, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openai-codex-oauth-state.json");
+        let manager = Arc::new(CodexTokenManager::new(
+            &path,
+            "http://127.0.0.1:1/oauth/token",
+        ));
+        if logged_in {
+            manager
+                .store_tokens(Tokens {
+                    access: access_token_with_account("acct_1"),
+                    refresh: "rt_1".into(),
+                    expires_at_ms: crate::codex_oauth::now_ms() + 24 * 3600 * 1000,
+                })
+                .await
+                .unwrap();
+        }
+        (
+            OpenAiCodexProvider::with_base_url("openai-codex", base, models, manager)
+                .with_discovery(discover),
+            dir,
+        )
+    }
+
+    fn catalog_body() -> Value {
+        json!({"models": [
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list",
+             "supported_in_api": true, "context_window": 272000, "priority": 1},
+            {"slug": "gpt-daybreak-red-latest", "display_name": "Daybreak Red",
+             "visibility": "hide", "supported_in_api": true},
+            {"slug": "codex-auto-review", "display_name": "Codex Auto Review",
+             "visibility": "hide", "supported_in_api": true},
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list",
+             "supported_in_api": true}
+        ]})
+    }
+
+    #[tokio::test]
+    async fn discovery_probes_the_codex_catalog_with_auth_and_client_version() {
+        let (base, catalog) = spawn_catalog(200, catalog_body()).await;
+        let (provider, _dir) =
+            provider_with(&base, vec!["static-fallback".into()], true, true).await;
+
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|m| (m.id.as_str(), m.display_name.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gpt-5.6-sol", Some("GPT-5.6-Sol")),
+                ("gpt-5.5", Some("GPT-5.5")),
+            ],
+            "hidden models are not offered"
+        );
+        assert!(models.iter().all(|m| m.surface == ModelSurface::Responses));
+        assert_eq!(catalog.calls.load(Ordering::SeqCst), 1);
+
+        // the CLI's own query parameter and the Codex auth/identity headers
+        let query = catalog.queries.lock().unwrap()[0].clone();
+        assert_eq!(
+            query,
+            format!("client_version={}", crate::codex_oauth::client_version()),
+            "got {query}"
+        );
+        let headers = catalog.headers.lock().unwrap()[0].clone();
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some(format!("Bearer {}", access_token_with_account("acct_1")).as_str())
+        );
+        assert_eq!(
+            headers.get("chatgpt-account-id").map(String::as_str),
+            Some("acct_1")
+        );
+        assert_eq!(headers.get("originator").map(String::as_str), Some("pi"));
+        assert_eq!(
+            headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(headers.get("openai-beta"), None);
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_falls_back_to_the_static_list() {
+        let (base, catalog) = spawn_catalog(401, json!({})).await;
+        let (provider, _dir) = provider_with(&base, vec!["gpt-5.6-sol".into()], true, true).await;
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"],
+            "a failed probe keeps the configured catalog"
+        );
+        assert_eq!(catalog.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_without_a_static_list_is_an_error() {
+        let (base, _catalog) = spawn_catalog(500, json!({})).await;
+        let (provider, _dir) = provider_with(&base, vec![], true, true).await;
+        let err = provider.list_models().await.unwrap_err();
+        assert!(
+            matches!(&err, ProviderError::Http { status, .. } if *status == 500),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn logged_out_discovery_falls_back_to_the_static_list() {
+        let (base, catalog) = spawn_catalog(200, catalog_body()).await;
+        let (provider, _dir) = provider_with(&base, vec!["gpt-5.6-sol".into()], true, false).await;
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"],
+            "no credentials: no request, keep the configured catalog"
+        );
+        assert_eq!(catalog.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn discovery_off_never_probes() {
+        let (base, catalog) = spawn_catalog(200, catalog_body()).await;
+        let (provider, _dir) = provider_with(&base, vec!["gpt-5.6-sol".into()], false, true).await;
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"]
+        );
+        assert_eq!(catalog.calls.load(Ordering::SeqCst), 0);
     }
 
     fn expect_err(result: Result<ProviderStream, ProviderError>) -> ProviderError {

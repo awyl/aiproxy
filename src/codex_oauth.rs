@@ -555,6 +555,103 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Resolve the Codex model-catalog endpoint from an upstream base URL.
+/// The Codex CLI builds it as `{base}/models` with the base
+/// `https://chatgpt.com/backend-api/codex` (`CHATGPT_CODEX_BASE_URL`), so a
+/// base that already ends in `/codex` keeps it.
+pub fn codex_models_url(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    let base = if trimmed.is_empty() {
+        DEFAULT_CODEX_BASE_URL
+    } else {
+        trimmed
+    };
+    if base.ends_with("/codex/models") {
+        base.to_string()
+    } else if base.ends_with("/codex") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/codex/models")
+    }
+}
+
+/// `client_version` query value. The Codex CLI sends its own whole `X.Y.Z`
+/// version (`codex_version_to_whole`); the backend's validation is unverified,
+/// so `AIPROXY_CODEX_CLIENT_VERSION` overrides for experiments.
+pub fn client_version() -> String {
+    env_or("AIPROXY_CODEX_CLIENT_VERSION", env!("CARGO_PKG_VERSION"))
+}
+
+/// Headers for the catalog `GET` — the Codex auth/identity set, minus the
+/// Responses-specific `OpenAI-Beta`/SSE negotiation.
+pub fn codex_models_headers(access: &str, account_id: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    hdr(&mut headers, "authorization", &format!("Bearer {access}"));
+    hdr(&mut headers, "chatgpt-account-id", account_id);
+    hdr(&mut headers, "originator", "pi");
+    hdr(&mut headers, "user-agent", &pi_user_agent());
+    hdr(&mut headers, "accept", "application/json");
+    headers
+}
+
+/// One entry of the Codex model catalog, narrowed to what a proxy needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModel {
+    pub slug: String,
+    pub display_name: Option<String>,
+    pub context_window: Option<i64>,
+}
+
+/// Parse the catalog body (`{"models":[{slug, visibility, supported_in_api,
+/// …}]}`) into the models a client may actually pick.
+///
+/// `visibility` is `list` | `hide` | `none`; only `list` is offered. Entries
+/// that explicitly deny API support (`supported_in_api: false`) are dropped.
+/// Both fields are treated as present-and-true when missing, matching the
+/// Codex CLI's lenient handling of older payloads.
+pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError> {
+    let json: Value = serde_json::from_slice(body)
+        .map_err(|e| CodexError::InvalidJson(format!("model catalog: {e}")))?;
+    let models = json
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CodexError::InvalidJson("model catalog: missing `models` array".into()))?;
+    let mut out = Vec::new();
+    for model in models {
+        let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        if slug.is_empty() {
+            continue;
+        }
+        let visible = model
+            .get("visibility")
+            .and_then(Value::as_str)
+            .map(|v| v.eq_ignore_ascii_case("list"))
+            .unwrap_or(true);
+        let in_api = model
+            .get("supported_in_api")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !visible || !in_api {
+            continue;
+        }
+        out.push(CodexModel {
+            slug: slug.to_string(),
+            display_name: model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            context_window: model
+                .get("context_window")
+                .and_then(Value::as_i64)
+                .filter(|w| *w > 0),
+        });
+    }
+    Ok(out)
+}
+
 /// Resolve the Codex responses endpoint from an upstream base URL.
 pub fn codex_responses_url(base: &str) -> String {
     let trimmed = base.trim().trim_end_matches('/');
@@ -1028,6 +1125,22 @@ fn parse_tokens(
 mod tests {
     use super::*;
 
+    // Env mutation is unsafe in edition 2024; cleanup guard (same pattern as
+    // `config`'s tests).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_env_guarded(key: &str, value: &str) -> impl Drop {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var(key, value) };
+        struct Guard(String);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(&self.0) };
+            }
+        }
+        Guard(key.to_string())
+    }
+
     /// base64url (no padding) encoder, independent of the implementation.
     fn b64url(input: &[u8]) -> String {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -1198,6 +1311,127 @@ mod tests {
             parse_authorization_input("http://localhost:1455/auth/callback?code=a%2Fb&state=s"),
             (Some("a/b".into()), Some("s".into()))
         );
+    }
+
+    // ── model catalog ─────────────────────────────────────────────────────
+
+    #[test]
+    fn models_url_joins_like_the_responses_url() {
+        assert_eq!(
+            codex_models_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+        assert_eq!(
+            codex_models_url("https://chatgpt.com/backend-api/"),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+        // the Codex CLI's own base already ends in /codex
+        assert_eq!(
+            codex_models_url("https://chatgpt.com/backend-api/codex"),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+        // idempotent
+        assert_eq!(
+            codex_models_url("https://chatgpt.com/backend-api/codex/models"),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+        assert_eq!(
+            codex_models_url("  "),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+    }
+
+    #[test]
+    fn client_version_is_whole_semver_and_env_overridable() {
+        assert_eq!(client_version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(client_version().split('.').count(), 3, "X.Y.Z");
+        // The backend's accepted value is unverified; the override is the hook
+        // the live smoke uses to try alternatives.
+        let _guard = set_env_guarded("AIPROXY_CODEX_CLIENT_VERSION", "9.9.9");
+        assert_eq!(client_version(), "9.9.9");
+    }
+
+    #[test]
+    fn models_headers_are_the_auth_identity_set_without_responses_negotiation() {
+        let h = codex_models_headers("tok", "acct_1");
+        assert_eq!(get(&h, "authorization"), Some("Bearer tok"));
+        assert_eq!(get(&h, "chatgpt-account-id"), Some("acct_1"));
+        assert_eq!(get(&h, "originator"), Some("pi"));
+        assert_eq!(get(&h, "accept"), Some("application/json"));
+        assert!(get(&h, "user-agent").unwrap().starts_with("pi ("));
+        // a catalog GET is not a Responses stream
+        assert_eq!(get(&h, "openai-beta"), None);
+        assert_eq!(get(&h, "content-type"), None);
+        assert_eq!(get(&h, "session-id"), None);
+    }
+
+    fn catalog(models: Value) -> Vec<CodexModel> {
+        parse_models_response(&serde_json::to_vec(&json!({"models": models})).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn catalog_keeps_list_visible_api_models() {
+        let models = catalog(json!([
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list",
+             "supported_in_api": true, "context_window": 272000, "priority": 1},
+            {"slug": "gpt-daybreak-blue-latest", "display_name": "Daybreak Blue",
+             "visibility": "hide", "supported_in_api": true},
+            {"slug": "gpt-none", "display_name": "None", "visibility": "none",
+             "supported_in_api": true},
+            {"slug": "not-in-api", "display_name": "Nope", "visibility": "list",
+             "supported_in_api": false},
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list",
+             "supported_in_api": true},
+        ]));
+        assert_eq!(
+            models,
+            vec![
+                CodexModel {
+                    slug: "gpt-5.6-sol".into(),
+                    display_name: Some("GPT-5.6-Sol".into()),
+                    context_window: Some(272_000),
+                },
+                CodexModel {
+                    slug: "gpt-5.5".into(),
+                    display_name: Some("GPT-5.5".into()),
+                    context_window: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn catalog_tolerates_missing_optional_fields() {
+        // Older payloads omit visibility/supported_in_api: offer the model.
+        let models = catalog(json!([
+            {"slug": "bare"},
+            {"slug": "empty-name", "display_name": "", "context_window": 0},
+            {"display_name": "no slug"},
+            {"slug": ""},
+            {"slug": "case", "visibility": "LIST"},
+        ]));
+        assert_eq!(
+            models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            vec!["bare", "empty-name", "case"]
+        );
+        assert_eq!(
+            models[1].display_name, None,
+            "empty display name is dropped"
+        );
+        assert_eq!(models[1].context_window, None, "zero window is dropped");
+    }
+
+    #[test]
+    fn catalog_rejects_malformed_bodies() {
+        assert!(matches!(
+            parse_models_response(b"not json"),
+            Err(CodexError::InvalidJson(_))
+        ));
+        assert!(matches!(
+            parse_models_response(br#"{"data":[]}"#),
+            Err(CodexError::InvalidJson(_))
+        ));
+        assert_eq!(parse_models_response(br#"{"models":[]}"#).unwrap(), vec![]);
     }
 
     #[test]

@@ -383,9 +383,9 @@ impl Config {
                     ));
                 }
                 if u.discover {
-                    tracing::warn!(
+                    tracing::debug!(
                         upstream = %u.effective_name(),
-                        "openai-codex has no model-discovery endpoint; `discover: true` is ignored — list models explicitly"
+                        "openai-codex discovery: probing {{base}}/codex/models on the model-refresh tick"
                     );
                 }
             }
@@ -870,7 +870,12 @@ upstreams:
             "https://chatgpt.com/backend-api"
         );
         assert_eq!(cfg.provider_ids(), vec!["openai-codex".to_string()]);
-        // no discovery endpoint: models are explicit, discover is only a no-op
+        // `discover: true` is honored: the Codex backend serves a catalog at
+        // `{base}/codex/models`, so no static list is required.
+        let discovered =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, discover: true }\n").unwrap();
+        assert!(discovered.upstreams[0].discover);
+        assert!(discovered.upstreams[0].models.is_empty());
         assert!(
             Config::from_yaml(
                 "upstreams:\n  - { kind: openai-codex, models: [m], discover: true }\n"
