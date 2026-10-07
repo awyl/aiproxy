@@ -448,6 +448,7 @@ mod tests {
     ) -> OpencodeGoProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            client_version: None,
             token_env: None,
             surface: None,
             name: Some("opencode-go".into()),
@@ -524,6 +525,7 @@ mod tests {
     fn config_override_beats_runtime_and_builtin() {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            client_version: None,
             token_env: None,
             surface: None,
             name: Some("opencode-go".into()),

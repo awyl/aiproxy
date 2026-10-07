@@ -170,8 +170,18 @@ own, so the models appear without a restart.
 backend hides models newer than that version — with no error, just an empty list.
 aiproxy therefore sends a recent Codex CLI version (`CODEX_CLIENT_VERSION` in
 `src/codex_oauth.rs`), **not** its own. Verified live: no parameter → `400`;
-`0.4.0` → `200 {"models":[]}`; `0.161.0` → `200`, 10 models. Override with
-`AIPROXY_CODEX_CLIENT_VERSION` (e.g. when a new model does not show up yet).
+`0.4.0` → `200 {"models":[]}`; `0.161.0` → `200`, 10 models.
+
+Bump it per upstream in the config, or globally in the environment:
+
+```yaml
+- kind: openai-codex
+  name: nyccom
+  client_version: "0.161.0"   # optional; wins over AIPROXY_CODEX_CLIENT_VERSION
+```
+
+Resolution order: `client_version:` → `AIPROXY_CODEX_CLIENT_VERSION` → built-in
+default. `client_version:` is only valid on the `openai-codex` kind.
 
 **More than one subscription.** Give each upstream a `name:` — ids become
 `openai-codex=<name>`, each with its own login, state file and model prefix:

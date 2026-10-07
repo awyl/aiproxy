@@ -208,6 +208,7 @@ mod tests {
     fn provider(base: &str, key: Option<&str>) -> OpenAiProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            client_version: None,
             token_env: None,
             surface: None,
             name: Some("mock".into()),

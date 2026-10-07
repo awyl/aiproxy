@@ -269,6 +269,7 @@ mod tests {
     fn provider(base: &str) -> AnthropicProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            client_version: None,
             token_env: None,
             surface: None,
             name: Some("anthropic".into()),

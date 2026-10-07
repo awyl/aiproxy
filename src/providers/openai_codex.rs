@@ -20,6 +20,10 @@ pub struct OpenAiCodexProvider {
     base_url: String,
     models: Vec<String>,
     discover: bool,
+    /// `client_version:` from the config, when set. The backend hides models
+    /// newer than this value, so it is the first thing to bump when a model is
+    /// missing (see `codex_oauth::CODEX_CLIENT_VERSION`).
+    client_version: Option<String>,
     manager: Arc<CodexTokenManager>,
     client: Client,
 }
@@ -28,6 +32,7 @@ impl OpenAiCodexProvider {
     pub fn new(cfg: &UpstreamConfig, id: &str, manager: Arc<CodexTokenManager>) -> Self {
         Self::with_base_url(id, &cfg.effective_base_url(), cfg.models.clone(), manager)
             .with_discovery(cfg.discover)
+            .with_client_version(cfg.client_version.clone())
     }
 
     pub fn with_base_url(
@@ -41,6 +46,7 @@ impl OpenAiCodexProvider {
             base_url: base_url.to_string(),
             models,
             discover: false,
+            client_version: None,
             manager,
             client: crate::providers::default_http_client(),
         }
@@ -54,6 +60,17 @@ impl OpenAiCodexProvider {
         self
     }
 
+    /// Override the `client_version` sent to the catalog (config `client_version:`).
+    pub fn with_client_version(mut self, version: Option<String>) -> Self {
+        self.client_version = version;
+        self
+    }
+
+    /// Config `client_version:` → `AIPROXY_CODEX_CLIENT_VERSION` → default.
+    fn effective_client_version(&self) -> String {
+        codex_oauth::resolve_client_version(self.client_version.as_deref())
+    }
+
     fn url(&self) -> String {
         codex_oauth::codex_responses_url(&self.base_url)
     }
@@ -62,7 +79,7 @@ impl OpenAiCodexProvider {
         format!(
             "{}?client_version={}",
             codex_oauth::codex_models_url(&self.base_url),
-            codex_oauth::client_version()
+            self.effective_client_version()
         )
     }
 
@@ -104,7 +121,7 @@ impl OpenAiCodexProvider {
             // that failure looks exactly like an empty catalog.
             tracing::warn!(
                 provider = %self.id,
-                client_version = %codex_oauth::client_version(),
+                client_version = %self.effective_client_version(),
                 total = catalog.total,
                 hidden = catalog.hidden,
                 no_slug = catalog.no_slug,
@@ -115,7 +132,7 @@ impl OpenAiCodexProvider {
             return Err(ProviderError::Transport(format!(
                 "codex catalog: {} (client_version={}; the backend hides models newer than the client version)",
                 catalog.empty_reason(),
-                codex_oauth::client_version()
+                self.effective_client_version()
             )));
         }
         Ok(catalog.models)
@@ -650,6 +667,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["gpt-5.6-sol"]
         );
+    }
+
+    #[tokio::test]
+    async fn configured_client_version_is_sent_to_the_catalog() {
+        // The backend hides models newer than `client_version`, so the config
+        // entry has to reach the query string.
+        let (base, catalog) = spawn_catalog(200, catalog_body()).await;
+        let (provider, _dir) = provider_with(&base, vec![], true, true).await;
+        let provider = provider.with_client_version(Some("9.9.9".into()));
+        provider.list_models().await.unwrap();
+        let queries = catalog.queries.lock().unwrap().clone();
+        assert_eq!(queries, vec!["client_version=9.9.9"], "got {queries:?}");
     }
 
     #[tokio::test]

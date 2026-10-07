@@ -97,6 +97,12 @@ pub struct UpstreamConfig {
     pub models: Vec<String>,
     #[serde(default)]
     pub discover: bool,
+    /// `openai-codex` only: the `client_version` sent to the Codex model
+    /// catalog. The backend hides models newer than the client version, so a
+    /// stale value silently yields an empty catalog. Defaults to a recent Codex
+    /// CLI version (`AIPROXY_CODEX_CLIENT_VERSION` overrides it globally).
+    #[serde(default)]
+    pub client_version: Option<String>,
     #[serde(default)]
     pub endpoint_by_model: HashMap<String, String>,
     #[serde(default)]
@@ -385,9 +391,17 @@ impl Config {
                 if u.discover {
                     tracing::debug!(
                         upstream = %u.effective_name(),
+                        client_version = %crate::codex_oauth::resolve_client_version(
+                            u.client_version.as_deref()
+                        ),
                         "openai-codex discovery: probing {{base}}/codex/models on the model-refresh tick"
                     );
                 }
+            } else if u.client_version.is_some() {
+                return bad(format!(
+                    "upstream '{}': client_version is only valid on the openai-codex kind",
+                    u.effective_name()
+                ));
             }
             for (model, surface) in &u.endpoint_by_model {
                 if !matches!(surface.as_str(), "chat" | "messages" | "responses") {
@@ -870,6 +884,12 @@ upstreams:
             "https://chatgpt.com/backend-api"
         );
         assert_eq!(cfg.provider_ids(), vec!["openai-codex".to_string()]);
+        // client_version: per-upstream override, openai-codex only
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, client_version: 9.9.9 }\n")
+                .unwrap();
+        assert_eq!(cfg.upstreams[0].client_version.as_deref(), Some("9.9.9"));
+
         // `discover: true` is honored: the Codex backend serves a catalog at
         // `{base}/codex/models`, so no static list is required.
         let discovered =
@@ -896,6 +916,25 @@ upstreams:
         let yaml = "upstreams:\n  - { kind: openai-codex, token_env: SUB_TOKEN }\n";
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("OAuth"), "got {err}");
+    }
+
+    #[test]
+    fn client_version_parses_on_codex_and_is_rejected_elsewhere() {
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, client_version: '9.9.9' }\n")
+                .unwrap();
+        assert_eq!(cfg.upstreams[0].client_version.as_deref(), Some("9.9.9"));
+
+        // only the Codex catalog takes a client version
+        let err = Config::from_yaml(
+            "upstreams:\n  - { kind: minimax, api_key_env: MINIMAX_API_KEY, client_version: '9.9.9' }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only valid on the openai-codex kind"),
+            "got {err}"
+        );
     }
 
     #[test]

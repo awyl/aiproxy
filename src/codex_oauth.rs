@@ -602,6 +602,17 @@ pub fn client_version() -> String {
     env_or("AIPROXY_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION)
 }
 
+/// Effective `client_version` for one upstream: its configured
+/// `client_version:` (the most specific setting) wins over the environment
+/// override, which wins over [`CODEX_CLIENT_VERSION`].
+pub fn resolve_client_version(configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(client_version)
+}
+
 /// Headers for the catalog `GET` — the Codex auth/identity set, minus the
 /// Responses-specific `OpenAI-Beta`/SSE negotiation.
 pub fn codex_models_headers(access: &str, account_id: &str) -> HeaderMap {
@@ -1621,6 +1632,18 @@ mod tests {
             codex_models_url("  "),
             "https://chatgpt.com/backend-api/codex/models"
         );
+    }
+
+    #[test]
+    fn configured_client_version_wins_over_the_env_override() {
+        // Per-upstream config is the most specific setting; the env var is the
+        // global fallback/debug hook.
+        assert_eq!(resolve_client_version(Some("9.9.9")), "9.9.9");
+        assert_eq!(resolve_client_version(Some(" 9.9.9 ")), "9.9.9");
+        let _guard = set_env_guarded("AIPROXY_CODEX_CLIENT_VERSION", "1.2.3");
+        assert_eq!(resolve_client_version(None), "1.2.3");
+        assert_eq!(resolve_client_version(Some("")), "1.2.3");
+        assert_eq!(resolve_client_version(Some("9.9.9")), "9.9.9");
     }
 
     #[test]
