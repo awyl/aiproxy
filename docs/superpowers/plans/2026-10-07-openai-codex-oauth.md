@@ -73,12 +73,15 @@ for the new signatures.
 
 ## Task 6 — `/setup` page + `/api/codex/*`
 
-`src/setup.rs` (new): `setup_page()`, `codex_start`, `codex_status` handlers, page HTML
-mirroring `pages.rs` styling (user code, verification link, auto-refresh while pending).
-Routes registered outside the auth layer.
+`src/setup.rs` (new): `setup_page()`, `codex_start` (browser PKCE by default, `method=device`
+fallback, `fresh=true` for a new flow), `codex_complete` (paste-back), `codex_status`;
+loopback callback listener on 1455; per-flow `flow_id` so stale poll/timeout loops cannot
+clobber a newer flow. Routes registered outside the auth layer.
 
-Tests: start/status state machine with a mock auth server, unknown provider 400,
-idempotent start, status transitions to logged-in and writes the state file.
+Tests: browser start binds loopback and returns the authorize URL, real callback request
+finishes the login, state mismatch rejected, paste-back (URL / `code#state` / bare code),
+busy-port fallback, unknown method 400, device start + proxy-side completion, idempotent
+start, `fresh` issues a new code.
 
 ## Task 7 — e2e + extension
 
@@ -93,9 +96,11 @@ idempotent start, status transitions to logged-in and writes the state file.
 
 README section + example config + CHANGELOG + version bump (Cargo.toml, both
 package.json), `cargo clippy --all-targets`, `cargo fmt`, extension tests.
-Then the live smoke: real device-code login through `/setup`, one streamed
-`/v1/responses` call, routing proven by the Codex backend's own error/auth behaviour
-relayed through the proxy.
+Then the live smoke: real login through `/setup` (browser first, device fallback), one
+streamed `/v1/responses` call, routing proven by the Codex backend's own error/auth
+behaviour relayed through the proxy. **Skipped by the user's choice** — the real authorize
+URL and loopback listener were produced, but no real token exchange or upstream call was
+made; live routing stays unverified.
 
 ## Completion criteria
 

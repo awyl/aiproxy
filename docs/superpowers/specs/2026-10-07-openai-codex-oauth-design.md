@@ -18,9 +18,17 @@ Reference implementation (read byte-for-byte, replicated exactly — no guessing
 
 1. **Standalone off `main`.** No reuse of `feat/anthropic-oauth` (`src/oauth.rs`,
    `/setup` page). Codex gets its own module, manager, state file, and page.
-2. **Login = device code via the `/setup` page.** The proxy runs the poll loop, so the
-   page can be closed and the flow still completes; works headless/remote (no
-   `localhost:1455` callback).
+2. **Login = browser (PKCE) first, device code as fallback**, both on the `/setup` page
+   (pi's own Codex login offers the same two, with browser as the default —
+   `openaiCodexOAuth.login` in the reference).
+   - Browser: PKCE S256, `redirect_uri=http://localhost:1455/auth/callback` (the client
+     registration expects that exact loopback URL), proxy runs the callback listener.
+     If port 1455 is busy (the Codex CLI uses it too) or the proxy is remote, the page
+     accepts the pasted redirect URL — `POST /api/codex/complete`.
+   - Device: proxy-side poll loop, so the page can be closed mid-flow; headless/remote
+     with no port requirements.
+   - `fresh=true` starts a new flow without waiting out an old one; each flow carries a
+     monotonic `flow_id` so a stale poll/timeout can never overwrite a newer flow.
 3. **Responses surface only.** The Codex backend is a Responses endpoint; chat/messages
    requests for Codex models are rejected before forwarding.
 4. **Plan usage/limits deferred.** Not in this task.
@@ -55,7 +63,23 @@ upstreams:
 - Test hook: `AIPROXY_CODEX_AUTH_BASE_URL` and `AIPROXY_CODEX_TOKEN_URL` override the
   auth base / token endpoint (mock servers in tests).
 
-## Login (device code)
+## Login (browser/PKCE, then device code)
+
+### Browser (default)
+
+`GET /oauth/authorize` on the auth base with `response_type=code`, `client_id`,
+`redirect_uri`, `scope`, `code_challenge` + `code_challenge_method=S256`, `state`,
+`id_token_add_organizations=true`, `codex_cli_simplified_flow=true`, `originator=pi`
+(reference `createAuthorizationFlow("pi")`). PKCE: verifier = base64url(32 random bytes),
+challenge = base64url(SHA-256(verifier)) — asserted against the RFC 7636 vector.
+
+The proxy binds `127.0.0.1:1455` (port 0 in tests → the OS picks, and the redirect URI
+uses the real port) and serves `GET /auth/callback`: validate `state`, exchange the code,
+persist tokens, mark the flow logged in, then answer a plain HTML confirmation and shut
+the listener down. Paste-back (`POST /api/codex/complete`) accepts a full redirect URL,
+`code#state`, `code=..&state=..`, or a bare code; a supplied `state` must match.
+
+### Device code (fallback)
 
 Constants: `CLIENT_ID = app_EMoamEEZ73f0CkXaXp7hrann`,
 `AUTH_BASE_URL = https://auth.openai.com`,
@@ -188,9 +212,23 @@ chat→responses translation, browser-callback login, multi-account.
    `UPSTREAM_KINDS`, then **live smoke**: real device-code login + one streamed request;
    routing proven by the Codex backend's own auth/error surfacing through the proxy.
 
+## Verification status
+
+- Unit + integration: `cargo test` (222 lib tests + `tests/codex_e2e.rs` browser and
+  device end-to-end runs against a real daemon with mock auth/Codex servers), clippy
+  clean, `cargo fmt` clean, extension vitest suite green.
+- **Live smoke against the real ChatGPT backend was NOT run** (user chose to skip it).
+  The real authorize URL and a real loopback listener on 1455 were produced and
+  observed, and the device endpoint returned a real user code (so device login is
+  enabled for the account), but no real token exchange or upstream `/codex/responses`
+  call has been exercised. Treat live routing as unverified.
+
 ## Open items
 
 - Whether the Codex backend tolerates any other field pi's Responses client sends
-  (`max_output_tokens` is the only suspect today, and the transform drops it) — resolved
-  by the live smoke in Task 8.
+  (`max_output_tokens` is the only suspect today, and the transform drops it) — **still
+  open**, since the live smoke was skipped.
+- Whether OpenAI's client registration accepts the dynamic loopback port used in tests
+  (`http://localhost:<ephemeral>/auth/callback`) — production always uses 1455, so this
+  only affects test fidelity, not real logins.
 - `User-Agent` kernel-release detail may need widening if the backend ever gates on it.
