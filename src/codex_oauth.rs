@@ -622,18 +622,20 @@ pub struct CodexCatalog {
     pub total: usize,
     /// Skipped: `visibility` was neither `list` nor absent.
     pub hidden: usize,
-    /// Skipped: `supported_in_api` was explicitly false.
-    pub not_in_api: usize,
     /// Skipped: no usable `slug`.
     pub no_slug: usize,
+    /// Offered, but `supported_in_api: false` — a ChatGPT-only model. Kept,
+    /// because this upstream *is* ChatGPT mode (see the note in
+    /// `parse_models_catalog`); counted so the log shows what was offered.
+    pub chatgpt_only: usize,
 }
 
 impl CodexCatalog {
     /// Human-readable reason when nothing is offerable.
     pub fn empty_reason(&self) -> String {
         format!(
-            "upstream listed {} models, 0 offerable ({} hidden, {} not supported in api, {} without a slug)",
-            self.total, self.hidden, self.not_in_api, self.no_slug
+            "upstream listed {} models, 0 offerable ({} hidden, {} without a slug)",
+            self.total, self.hidden, self.no_slug
         )
     }
 }
@@ -643,6 +645,14 @@ pub fn parse_models_response(body: &[u8]) -> Result<Vec<CodexModel>, CodexError>
 }
 
 /// Parse `GET {base}/codex/models`, counting why entries were skipped.
+///
+/// Offers what the Codex picker offers, exactly: `visibility == "list"`
+/// (`show_in_picker`, `codex-rs/protocol/src/openai_models.rs:967`) and **no**
+/// `supported_in_api` filter. `ModelPreset::filter_by_auth` only applies that
+/// filter outside ChatGPT mode ("In ChatGPT mode, all models are visible",
+/// `openai_models.rs:1007`), and this upstream is the ChatGPT subscription — so
+/// requiring `supported_in_api: true` hid every ChatGPT-only model and made a
+/// logged-in upstream report 0 models.
 pub fn parse_models_catalog(body: &[u8]) -> Result<CodexCatalog, CodexError> {
     let json: Value = serde_json::from_slice(body)
         .map_err(|e| CodexError::InvalidJson(format!("model catalog: {e}")))?;
@@ -677,8 +687,7 @@ pub fn parse_models_catalog(body: &[u8]) -> Result<CodexCatalog, CodexError> {
             continue;
         }
         if !in_api {
-            catalog.not_in_api += 1;
-            continue;
+            catalog.chatgpt_only += 1;
         }
         catalog.models.push(CodexModel {
             slug: slug.to_string(),
@@ -1566,30 +1575,48 @@ mod tests {
     }
 
     #[test]
+    fn catalog_keeps_chatgpt_only_models() {
+        // The reference keeps `supported_in_api: false` models in ChatGPT mode
+        // (this upstream), so a ChatGPT-only model must still be offered.
+        let models = catalog(json!([
+            {"slug": "gpt-5.6-sol", "visibility": "list", "supported_in_api": false},
+            {"slug": "gpt-5.5", "visibility": "list", "supported_in_api": true},
+        ]));
+        assert_eq!(
+            models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol", "gpt-5.5"],
+            "a ChatGPT-only model is visible in ChatGPT mode"
+        );
+    }
+
+    #[test]
     fn catalog_counts_every_skip_reason() {
         let body = serde_json::to_vec(&json!({"models": [
             {"slug": "gpt-5.6-sol", "visibility": "list", "supported_in_api": true},
             {"slug": "gpt-hidden", "visibility": "hide", "supported_in_api": true},
-            {"slug": "gpt-no-api", "visibility": "list", "supported_in_api": false},
+            {"slug": "gpt-chatgpt-only", "visibility": "list", "supported_in_api": false},
             {"display_name": "no slug", "visibility": "list", "supported_in_api": true},
             {"slug": "", "visibility": "list", "supported_in_api": true},
         ]}))
         .unwrap();
         let c = parse_models_catalog(&body).unwrap();
         assert_eq!(c.total, 5);
-        assert_eq!(c.models.len(), 1);
+        assert_eq!(
+            c.models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol", "gpt-chatgpt-only"]
+        );
         assert_eq!(c.hidden, 1);
-        assert_eq!(c.not_in_api, 1);
         assert_eq!(c.no_slug, 2);
+        assert_eq!(c.chatgpt_only, 1);
         // the reason names the numbers, so a 0-model probe is diagnosable
         let empty = CodexCatalog {
             total: 12,
-            not_in_api: 12,
+            hidden: 12,
             ..Default::default()
         };
         assert_eq!(
             empty.empty_reason(),
-            "upstream listed 12 models, 0 offerable (0 hidden, 12 not supported in api, 0 without a slug)"
+            "upstream listed 12 models, 0 offerable (12 hidden, 0 without a slug)"
         );
     }
 
@@ -1598,7 +1625,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_keeps_list_visible_api_models() {
+    fn catalog_keeps_list_visible_models_including_chatgpt_only_ones() {
+        // The picker rule is `visibility == list` (openai_models.rs:967) with no
+        // `supported_in_api` filter in ChatGPT mode — this upstream. `not-in-api`
+        // is therefore offered; `hide` and `none` are not.
         let models = catalog(json!([
             {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list",
              "supported_in_api": true, "context_window": 272000, "priority": 1},
@@ -1618,6 +1648,11 @@ mod tests {
                     slug: "gpt-5.6-sol".into(),
                     display_name: Some("GPT-5.6-Sol".into()),
                     context_window: Some(272_000),
+                },
+                CodexModel {
+                    slug: "not-in-api".into(),
+                    display_name: Some("Nope".into()),
+                    context_window: None,
                 },
                 CodexModel {
                     slug: "gpt-5.5".into(),
