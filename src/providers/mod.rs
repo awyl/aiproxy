@@ -211,7 +211,8 @@ pub fn create_codex_managers(
             // Runtime dir when there is one (it survives a container recreate),
             // else next to the config file; per provider id, so two
             // subscriptions never share a file.
-            let state_path = crate::codex_oauth::codex_state_path(Some(config_path), &id);
+            let state_path =
+                crate::codex_oauth::codex_state_path(Some(config_path), u.name.as_deref());
             managers.insert(
                 id.clone(),
                 Arc::new(crate::codex_oauth::CodexTokenManager::new(
@@ -406,7 +407,7 @@ upstreams:
     }
 
     #[test]
-    fn create_codex_managers_uses_config_dir_and_provider_id() {
+    fn create_codex_managers_names_state_files_by_upstream() {
         let cfg =
             Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [m] }\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -415,9 +416,10 @@ upstreams:
             create_codex_managers(&cfg, Some(&config_path), "http://127.0.0.1:1/oauth/token");
         assert_eq!(managers.len(), 1);
         let manager = managers.values().next().unwrap();
+        // Unnamed upstream: the kind stands in for the name.
         assert_eq!(
             manager.state_path(),
-            dir.path().join("openai-codex-oauth-state.json")
+            dir.path().join("openai-codex-oauth-openai-codex.json")
         );
         // no config path -> no managers (unit-test fallback in build_providers)
         assert!(create_codex_managers(&cfg, None, "http://127.0.0.1:1/oauth/token").is_empty());
@@ -443,11 +445,11 @@ upstreams:
         let bob = managers.get("openai-codex=bob").expect("bob manager");
         assert_eq!(
             alice.state_path(),
-            dir.path().join("openai-codex=alice-oauth-state.json")
+            dir.path().join("openai-codex-oauth-alice.json")
         );
         assert_eq!(
             bob.state_path(),
-            dir.path().join("openai-codex=bob-oauth-state.json")
+            dir.path().join("openai-codex-oauth-bob.json")
         );
         assert_ne!(
             alice.state_path(),

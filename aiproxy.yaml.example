@@ -88,7 +88,8 @@ upstreams:
   # authorize, the browser is sent to localhost:1455/auth/callback and fails to
   # load (nothing listens there); copy that URL from the address bar and paste it
   # into the page. "Use device code" runs the headless flow instead. Tokens live
-  # in `{provider-id}-oauth-state.json` (mode 0600) inside the state dir, which is
+  # in `openai-codex-oauth-<name>.json` (mode 0600), named after this upstream's
+  # name: (or `openai-codex` when unnamed), inside the state dir, which is
   # AIPROXY_CODEX_STATE_DIR, else AIPROXY_RUNTIME_DIR, else /runtime when it
   # exists, else this config file's directory. In a container mount the state dir
   # (or the config directory, not just the file) or the login dies with the

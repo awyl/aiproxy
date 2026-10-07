@@ -63,7 +63,7 @@ docker run -d \
   yourhubuser/aiproxy:0.2.3
 ```
 
-`/runtime` is where OAuth logins live (`{provider-id}-oauth-state.json`). Mount it, or
+`/runtime` is where OAuth logins live (`openai-codex-oauth-{name}.json`). Mount it, or
 mount the config *directory* instead of the single file: mounting only
 `aiproxy.yaml` leaves `/etc/aiproxy` an anonymous volume that is recreated empty with the
 container, so a login stored next to the config file would not survive a container
@@ -155,7 +155,9 @@ model-refresh tick and offers the entries the picker is allowed to show (`visibi
 (logged out, offline, upstream error). Without either, the catalog stays empty until login.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
 
-**Where the login is stored.** `{state-dir}/{provider-id}-oauth-state.json`, mode `0600`.
+**Where the login is stored.** `{state-dir}/openai-codex-oauth-{name}.json`, mode `0600`,
+where `{name}` is the upstream's `name:` (or `openai-codex` when it has none) — the same
+convention as the old opencode-go cookie files, so the file itself says who logged in.
 The state dir is resolved in this order: `AIPROXY_CODEX_STATE_DIR` →
 `AIPROXY_RUNTIME_DIR` → `/runtime` when it exists → the config file's directory.
 `/api/codex/status` reports the exact path

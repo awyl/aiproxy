@@ -914,10 +914,41 @@ fn pick_state_dir(
         .unwrap_or_else(|| config_dir.to_path_buf())
 }
 
-/// State file for one `openai-codex` upstream: `{dir}/{provider-id}-oauth-state.json`.
-/// The provider id keeps multiple subscriptions apart (`openai-codex=alice`).
-pub fn codex_state_path(config_path: Option<&Path>, provider_id: &str) -> PathBuf {
-    codex_state_dir(config_path).join(format!("{provider_id}-oauth-state.json"))
+/// Kind string for this upstream (same as `UpstreamKind::OpenAiCodex.as_str()`;
+/// a test pins them together).
+pub const KIND: &str = "openai-codex";
+
+/// State file name for one `openai-codex` upstream:
+/// `openai-codex-oauth-{name}.json`, where `name` is the upstream's configured
+/// `name:` — or the kind when it has none, giving
+/// `openai-codex-oauth-openai-codex.json`. Same convention as the opencode-go
+/// cookie files (`opencode-cookie_{name}`): the file name says who logged in,
+/// rather than repeating a provider id (`openai-codex=alice`) into a path.
+pub fn codex_state_file_name(name: Option<&str>) -> String {
+    let who = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(KIND);
+    format!("{KIND}-oauth-{}.json", sanitize_file_component(who))
+}
+
+/// Keep a configured `name:` usable as a path component: anything outside
+/// `[A-Za-z0-9._-]` becomes `_`, so a name with a slash cannot escape the dir.
+fn sanitize_file_component(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// State file for one `openai-codex` upstream, in the state dir.
+pub fn codex_state_path(config_path: Option<&Path>, name: Option<&str>) -> PathBuf {
+    codex_state_dir(config_path).join(codex_state_file_name(name))
 }
 
 pub fn token_url() -> String {
@@ -1319,12 +1350,55 @@ mod tests {
     }
 
     #[test]
-    fn codex_state_path_lives_in_the_state_dir_and_is_per_provider() {
+    fn state_file_name_follows_the_cookie_convention() {
+        // Same shape as the opencode-go cookies (`opencode-cookie_{name}`): the
+        // name says who is logged in, and the unnamed case falls back to the kind.
+        assert_eq!(
+            codex_state_file_name(None),
+            "openai-codex-oauth-openai-codex.json"
+        );
+        assert_eq!(
+            codex_state_file_name(Some("")),
+            "openai-codex-oauth-openai-codex.json",
+            "an empty name is the same as no name"
+        );
+        assert_eq!(
+            codex_state_file_name(Some("alice")),
+            "openai-codex-oauth-alice.json"
+        );
+        // a name is a path component: keep it inside the state dir
+        assert_eq!(
+            codex_state_file_name(Some("../../etc/passwd")),
+            "openai-codex-oauth-.._.._etc_passwd.json"
+        );
+        assert_eq!(
+            codex_state_file_name(Some("al ice")),
+            "openai-codex-oauth-al_ice.json"
+        );
+        // the kind string here must stay the one the config uses
+        assert_eq!(KIND, crate::config::UpstreamKind::OpenAiCodex.as_str());
+    }
+
+    #[test]
+    fn codex_state_path_lives_in_the_state_dir_and_is_per_subscription() {
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        // A file left at the old location is ignored, not adopted or moved.
+        let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", runtime.path().to_str().unwrap());
+
+        let config_path = config.path().join("aiproxy.yaml");
+        let alice = codex_state_path(Some(&config_path), Some("alice"));
+        let bob = codex_state_path(Some(&config_path), Some("bob"));
+        assert_eq!(alice, runtime.path().join("openai-codex-oauth-alice.json"));
+        assert_eq!(bob, runtime.path().join("openai-codex-oauth-bob.json"));
+        assert_ne!(alice, bob, "subscriptions must never share a state file");
+        assert_eq!(
+            codex_state_path(Some(&config_path), None),
+            runtime.path().join("openai-codex-oauth-openai-codex.json")
+        );
+        assert!(!alice.exists(), "nothing is created before a login");
+        // An older file name is not read either.
         save_persisted(
-            &config.path().join("openai-codex-oauth-state.json"),
+            &runtime.path().join("openai-codex-oauth-state.json"),
             &Tokens {
                 access: "at_old".into(),
                 refresh: "rt_old".into(),
@@ -1332,23 +1406,6 @@ mod tests {
             },
         )
         .unwrap();
-        let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", runtime.path().to_str().unwrap());
-
-        let config_path = config.path().join("aiproxy.yaml");
-        let alice = codex_state_path(Some(&config_path), "openai-codex=alice");
-        let bob = codex_state_path(Some(&config_path), "openai-codex=bob");
-        assert_eq!(
-            alice,
-            runtime.path().join("openai-codex=alice-oauth-state.json")
-        );
-        assert_eq!(
-            bob,
-            runtime.path().join("openai-codex=bob-oauth-state.json")
-        );
-        assert_ne!(alice, bob, "subscriptions must never share a state file");
-        assert!(!alice.exists(), "nothing is created before a login");
-        // The manager on that path reports logged out — the stale config-dir
-        // file is not consulted.
         let manager = CodexTokenManager::new(&alice, "http://127.0.0.1:1/oauth/token");
         assert!(matches!(
             futures::executor::block_on(manager.status()),
