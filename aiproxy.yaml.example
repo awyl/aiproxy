@@ -105,6 +105,11 @@ upstreams:
   # own state file. Agent ids: openai-codex=alice/gpt-5.6-sol.
   # - { kind: openai-codex, name: alice, models: [gpt-5.6-sol] }
   # - { kind: openai-codex, name: bob,   models: [gpt-5.6-sol] }
+  #
+  # Discovery sends `client_version`; the backend hides models newer than it, and
+  # does so silently (an empty list). The default is a recent Codex CLI version,
+  # NOT aiproxy's own — override with AIPROXY_CODEX_CLIENT_VERSION if a model is
+  # missing from /v1/models.
 
   # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
   # The coding-plan API key (individual or team) goes in ZAI_API_KEY.

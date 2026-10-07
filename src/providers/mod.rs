@@ -179,7 +179,7 @@ pub fn build_providers(cfg: &Config, codex: &CodexManagers) -> Vec<Arc<dyn Provi
                     // No config path (unit tests): a manager with a relative state
                     // path exists but reports logged-out until /setup writes it.
                     Arc::new(crate::codex_oauth::CodexTokenManager::new(
-                        std::path::Path::new("openai-codex-oauth-state.json"),
+                        std::path::Path::new("openai-codex-oauth-openai-codex.json"),
                         &crate::codex_oauth::token_url(),
                     ))
                 });
@@ -195,7 +195,7 @@ pub fn build_providers(cfg: &Config, codex: &CodexManagers) -> Vec<Arc<dyn Provi
 
 /// Create Codex OAuth token managers for openai-codex upstreams, keyed by
 /// provider id. State files live next to the config file as
-/// `{provider-id}-oauth-state.json`.
+/// `openai-codex-oauth-{name}.json`.
 pub fn create_codex_managers(
     cfg: &Config,
     config_path: Option<&std::path::Path>,

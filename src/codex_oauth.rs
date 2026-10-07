@@ -579,11 +579,27 @@ pub fn codex_models_url(base: &str) -> String {
     }
 }
 
-/// `client_version` query value. The Codex CLI sends its own whole `X.Y.Z`
-/// version (`codex_version_to_whole`); the backend's validation is unverified,
-/// so `AIPROXY_CODEX_CLIENT_VERSION` overrides for experiments.
+/// `client_version` for the catalog `GET`, and it is load-bearing: the backend
+/// gates models on it. Verified against the live endpoint with a real ChatGPT
+/// subscription (2026-10-07):
+///
+/// | `client_version` | result |
+/// |---|---|
+/// | absent | `400 Bad Request` |
+/// | `0.4.0` (aiproxy's own version) | `200 {"models":[]}` — every model hidden |
+/// | `0.161.0` (Codex CLI) | `200`, 10 models |
+/// | `999.0.0` | `200`, 10 models |
+///
+/// So it must look like a recent Codex CLI release, **not** this crate's
+/// version — each model entry carries a `minimal_client_version` and the
+/// backend filters on it. Bump this when a model stops appearing; a
+/// too-old value fails silently with an empty catalog.
+pub const CODEX_CLIENT_VERSION: &str = "0.161.0";
+
+/// `client_version` query value: [`CODEX_CLIENT_VERSION`], or
+/// `AIPROXY_CODEX_CLIENT_VERSION` to override (e.g. to reach a newer model).
 pub fn client_version() -> String {
-    env_or("AIPROXY_CODEX_CLIENT_VERSION", env!("CARGO_PKG_VERSION"))
+    env_or("AIPROXY_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION)
 }
 
 /// Headers for the catalog `GET` — the Codex auth/identity set, minus the
@@ -1608,11 +1624,14 @@ mod tests {
     }
 
     #[test]
-    fn client_version_is_whole_semver_and_env_overridable() {
-        assert_eq!(client_version(), env!("CARGO_PKG_VERSION"));
+    fn client_version_is_a_codex_version_and_env_overridable() {
+        // NOT this crate's version: the backend hides every model from a client
+        // version that predates their `minimal_client_version` (verified live:
+        // 0.4.0 → {"models":[]}, 0.161.0 → 10 models).
+        assert_eq!(client_version(), CODEX_CLIENT_VERSION);
+        assert_ne!(client_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(client_version().split('.').count(), 3, "X.Y.Z");
-        // The backend's accepted value is unverified; the override is the hook
-        // the live smoke uses to try alternatives.
+        // the override is the hook for reaching newer models without a rebuild
         let _guard = set_env_guarded("AIPROXY_CODEX_CLIENT_VERSION", "9.9.9");
         assert_eq!(client_version(), "9.9.9");
     }

@@ -342,8 +342,15 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
         .unwrap();
     assert_eq!(status["state"], "logged_in", "got {status}");
 
-    // token file lives next to the config file, owner-only
-    let state_path = _dir.path().join("openai-codex-oauth-state.json");
+    // Token file: owner-only, at the path the proxy itself reports (the state dir
+    // is resolved from env, so reading it from the response keeps this test
+    // independent of where that lands).
+    let state_path = std::path::PathBuf::from(status["state_path"].as_str().unwrap());
+    assert_eq!(
+        state_path.file_name().unwrap().to_str().unwrap(),
+        "openai-codex-oauth-openai-codex.json",
+        "an unnamed upstream is named after its kind"
+    );
     let stored: Value =
         serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
     assert_eq!(stored["refresh"], "rt_e2e");

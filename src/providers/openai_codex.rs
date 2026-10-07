@@ -99,8 +99,12 @@ impl OpenAiCodexProvider {
             // Silence here is what made a logged-in upstream look broken: the
             // probe answered, so nothing failed, and "0 models" said nothing
             // about why. Report the skip reasons instead.
+            // The version is part of the message: the backend hides every model
+            // from a client version below their `minimal_client_version`, and
+            // that failure looks exactly like an empty catalog.
             tracing::warn!(
                 provider = %self.id,
+                client_version = %codex_oauth::client_version(),
                 total = catalog.total,
                 hidden = catalog.hidden,
                 no_slug = catalog.no_slug,
@@ -109,8 +113,9 @@ impl OpenAiCodexProvider {
                 "codex catalog probe returned nothing offerable"
             );
             return Err(ProviderError::Transport(format!(
-                "codex catalog: {}",
-                catalog.empty_reason()
+                "codex catalog: {} (client_version={}; the backend hides models newer than the client version)",
+                catalog.empty_reason(),
+                codex_oauth::client_version()
             )));
         }
         Ok(catalog.models)
@@ -624,6 +629,14 @@ mod tests {
                 && text.contains("1 hidden")
                 && text.contains("1 without a slug"),
             "the empty catalog must explain itself, got {text}"
+        );
+        // the client version is a real cause of an empty catalog, so name it
+        assert!(
+            text.contains(&format!(
+                "client_version={}",
+                crate::codex_oauth::CODEX_CLIENT_VERSION
+            )),
+            "the error must name the client version, got {text}"
         );
         // and with a static list configured, that list still serves
         let (provider, _dir) = provider_with(&base, vec!["gpt-5.6-sol".into()], true, true).await;

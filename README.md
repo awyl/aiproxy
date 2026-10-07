@@ -166,6 +166,13 @@ line, and startup logs `codex credentials path=… logged_in=…` — check that
 login seems to vanish after a restart. A successful login also re-runs discovery on its
 own, so the models appear without a restart.
 
+**`client_version` matters.** The catalog `GET` sends a `client_version`, and the
+backend hides models newer than that version — with no error, just an empty list.
+aiproxy therefore sends a recent Codex CLI version (`CODEX_CLIENT_VERSION` in
+`src/codex_oauth.rs`), **not** its own. Verified live: no parameter → `400`;
+`0.4.0` → `200 {"models":[]}`; `0.161.0` → `200`, 10 models. Override with
+`AIPROXY_CODEX_CLIENT_VERSION` (e.g. when a new model does not show up yet).
+
 **More than one subscription.** Give each upstream a `name:` — ids become
 `openai-codex=<name>`, each with its own login, state file and model prefix:
 

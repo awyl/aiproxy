@@ -42,7 +42,7 @@ pub enum UpstreamKind {
     /// OpenAI Codex (ChatGPT Plus/Pro subscription) — Responses surface only
     /// at chatgpt.com/backend-api/codex/responses. Auth is device-code OAuth
     /// (no api_key_env/token_env); tokens live in
-    /// `{config-dir}/openai-codex-oauth-state.json`.
+    /// `openai-codex-oauth-{name}.json` in the state dir.
     #[serde(rename = "openai-codex", alias = "open-ai-codex")]
     OpenAiCodex,
 }
