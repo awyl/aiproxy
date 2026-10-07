@@ -88,14 +88,22 @@ upstreams:
   # authorize, the browser is sent to localhost:1455/auth/callback and fails to
   # load (nothing listens there); copy that URL from the address bar and paste it
   # into the page. "Use device code" runs the headless flow instead. Tokens live
-  # in `openai-codex-oauth-state.json` next to THIS config file (mode 0600) and
-  # are refreshed automatically — mount that directory, not just the config file,
-  # or the login is gone after a container restart. /setup and /api/codex/status
-  # show the exact path; a successful login re-runs discovery by itself. Model discovery is on by default (`discover:` is
+  # in `{provider-id}-oauth-state.json` (mode 0600) inside the state dir, which is
+  # AIPROXY_CODEX_STATE_DIR, else AIPROXY_RUNTIME_DIR, else /runtime when it
+  # exists, else this config file's directory. In a container mount the state dir
+  # (or the config directory, not just the file) or the login dies with the
+  # container. /setup and /api/codex/status show the exact path; a successful
+  # login re-runs discovery by itself. Model discovery is on by default (`discover:` is
   # implicit for this kind); the `models:` list is the fallback for a failed probe.
   # Agent-facing ids: openai-codex/gpt-5.6-sol → POST /v1/responses
   # - kind: openai-codex           # provider ID = "openai-codex"
   #   models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5]
+  #
+  # Two subscriptions: give each a name. IDs become openai-codex=<name>, each with
+  # its own login (/setup lists both, or use ?provider=openai-codex%3Dalice) and its
+  # own state file. Agent ids: openai-codex=alice/gpt-5.6-sol.
+  # - { kind: openai-codex, name: alice, models: [gpt-5.6-sol] }
+  # - { kind: openai-codex, name: bob,   models: [gpt-5.6-sol] }
 
   # Z.AI GLM Coding Plan — OpenAI-compatible wire (api.z.ai/api/coding/paas/v4).
   # The coding-plan API key (individual or team) goes in ZAI_API_KEY.

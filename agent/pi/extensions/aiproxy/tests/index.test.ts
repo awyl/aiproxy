@@ -27,6 +27,15 @@ afterAll(() => {
 describe("index (glue)", () => {
   it("sets AIPROXY_TOKEN env from config and registers both halves", async () => {
     const before = process.env.AIPROXY_TOKEN;
+    // The factory registers the provider with its own fetch, which would reach
+    // out to the configured baseUrl — a real network call that made this test
+    // flaky (5s timeout) whenever the suite ran in parallel.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
     try {
       const { default: factory } = await import("../index.ts");
       const pi = { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
@@ -35,6 +44,7 @@ describe("index (glue)", () => {
       expect(pi.registerProvider).toHaveBeenCalledTimes(1);
       expect(pi.registerTool).not.toHaveBeenCalled(); // no mcpServers configured
     } finally {
+      globalThis.fetch = realFetch;
       if (before === undefined) delete process.env.AIPROXY_TOKEN;
       else process.env.AIPROXY_TOKEN = before;
     }

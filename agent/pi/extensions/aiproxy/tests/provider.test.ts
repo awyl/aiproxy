@@ -54,6 +54,35 @@ describe("registerProxyProvider", () => {
     expect(m.baseUrl).toBe("http://p:9999");
   });
 
+  it("registers every subscription of one kind, catalog-matched by kind", async () => {
+    // Two openai-codex upstreams: ids carry the subscription suffix, the catalog
+    // key does not — both must resolve to the same metadata and stay distinct
+    // model ids for pi.
+    const catalog = new Map([
+      ["openai-codex/gpt-5.6-sol", { api: "openai-codex-responses", contextWindow: 272_000 }],
+    ]);
+    const { pi } = await registerWith(
+      {
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: "openai-codex=alice/gpt-5.6-sol", surface: "responses" },
+            { id: "openai-codex=bob/gpt-5.6-sol", surface: "responses" },
+          ],
+        }),
+      },
+      catalog,
+    );
+    const cfg = pi.registerProvider.mock.calls[0][1];
+    expect(cfg.models).toHaveLength(2);
+    for (const id of ["openai-codex=alice/gpt-5.6-sol", "openai-codex=bob/gpt-5.6-sol"]) {
+      const m = cfg.models.find((x: { id: string }) => x.id === id);
+      expect(m, `${id} must register`).toBeTruthy();
+      expect(m.contextWindow).toBe(272_000);
+      expect(m.api).toBe("openai-responses");
+    }
+  });
+
   it("falls back to display_name and openai-completions for unknown models without catalog", async () => {
     const { pi } = await registerWith(modelsResponse);
     const m = pi.registerProvider.mock.calls[0][1].models.find((x: { id: string }) => x.id === "opencode-go/mimo-v2.5");

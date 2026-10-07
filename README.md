@@ -55,12 +55,20 @@ DOCKER_USER=yourhubuser ./docker-push.sh 0.2.3
 # Run
 docker run -d \
   -v ./aiproxy.yaml:/etc/aiproxy/aiproxy.yaml:ro \
+  -v aiproxy-runtime:/runtime \
   -v aiproxy-models:/models \
   -e AIPROXY_TOKEN=secret \
   -e OPENCODE_GO_API_KEY=... \
   -p 8080:8080 \
   yourhubuser/aiproxy:0.2.3
 ```
+
+`/runtime` is where OAuth logins live (`{provider-id}-oauth-state.json`). Mount it, or
+mount the config *directory* instead of the single file: mounting only
+`aiproxy.yaml` leaves `/etc/aiproxy` an anonymous volume that is recreated empty with the
+container, so a login stored next to the config file would not survive a container
+recreate. Override the location with `AIPROXY_CODEX_STATE_DIR` (Codex only) or
+`AIPROXY_RUNTIME_DIR` (shared).
 
 The image includes Node.js (`npx`), Python/uv (`uvx`) for MCP servers, and ONNX Runtime (via fastembed) for local embeddings. Embedding models auto-download to `/models` on first use.
 
@@ -147,13 +155,29 @@ model-refresh tick and offers the entries the picker is allowed to show (`visibi
 (logged out, offline, upstream error). Without either, the catalog stays empty until login.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
 
-**Credentials and reloading models.** `/api/codex/status` reports the exact path the
-proxy reads (`state_path`) and whether a file is actually there (`state_file`), and the
-same path is logged at startup as `codex credentials path=… logged_in=…`. That is the
-first thing to check when a login seems to vanish after a restart: the path follows the
-**config file's directory**, so a container that mounts only `aiproxy.yaml` loses
-`openai-codex-oauth-state.json` when it is recreated. A successful login also re-runs
-discovery on its own, so the models appear without a restart.
+**Where the login is stored.** `{state-dir}/{provider-id}-oauth-state.json`, mode `0600`.
+The state dir is resolved in this order: `AIPROXY_CODEX_STATE_DIR` →
+`AIPROXY_RUNTIME_DIR` → `/runtime` when it exists → the config file's directory. A file
+left at the old config-dir location is moved into the state dir on first use, so a login
+made before this change keeps working. `/api/codex/status` reports the exact path
+(`state_path`) and whether a file is really there (`state_file`), `/setup` shows the same
+line, and startup logs `codex credentials path=… logged_in=…` — check that first when a
+login seems to vanish after a restart. A successful login also re-runs discovery on its
+own, so the models appear without a restart.
+
+**More than one subscription.** Give each upstream a `name:` — ids become
+`openai-codex=<name>`, each with its own login, state file and model prefix:
+
+```yaml
+upstreams:
+  - { kind: openai-codex, name: alice, models: [gpt-5.6-sol] }
+  - { kind: openai-codex, name: bob,   models: [gpt-5.6-sol] }
+```
+
+`/setup` then lists both and links to one page per subscription (`/setup?provider=openai-codex%3Dalice`);
+the JSON APIs take the same `?provider=` parameter, and `GET /api/codex/providers` lists
+every subscription with its `logged_in` flag and state path. Agent-facing ids are
+`openai-codex=alice/gpt-5.6-sol` and `openai-codex=bob/gpt-5.6-sol`.
 
 Plan usage/limits for the subscription are not fetched (deferred).
 

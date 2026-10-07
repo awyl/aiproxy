@@ -235,6 +235,7 @@ pub async fn build_with_options(
         .route("/api/codex/start", post(crate::setup::codex_start))
         .route("/api/codex/complete", post(crate::setup::codex_complete))
         .route("/api/codex/status", get(crate::setup::codex_status))
+        .route("/api/codex/providers", get(crate::setup::codex_providers))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
         .merge(anthropic_router_with_subs(
             token.clone(),

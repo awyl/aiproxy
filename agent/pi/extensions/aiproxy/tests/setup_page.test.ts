@@ -33,8 +33,9 @@ interface Posted {
   body: unknown;
 }
 
-/** jsdom document with a stubbed fetch; returns the DOM plus what was POSTed. */
-async function page(status: Record<string, unknown>) {
+/** jsdom document with a stubbed fetch; returns the DOM plus what was POSTed.
+ * `subs` stands in for GET /api/codex/providers (the multi-subscription list). */
+async function page(status: Record<string, unknown>, subs?: unknown[]) {
   const posted: Posted[] = [];
   const dom = new JSDOM(PAGE, {
     runScripts: "dangerously",
@@ -49,7 +50,10 @@ async function page(status: Record<string, unknown>) {
             headers: { "content-type": "application/json" },
           });
         }
-        return new Response(JSON.stringify(status), {
+        const body = url.startsWith("/api/codex/providers")
+          ? { providers: subs ?? [] }
+          : status;
+        return new Response(JSON.stringify(body), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -59,6 +63,21 @@ async function page(status: Record<string, unknown>) {
   await settle(dom);
   return { dom, posted };
 }
+
+const TWO_SUBS = [
+  {
+    id: "openai-codex=alice",
+    logged_in: true,
+    state_path: "/runtime/openai-codex=alice-oauth-state.json",
+    state_file: { exists: true, size: 300 },
+  },
+  {
+    id: "openai-codex=bob",
+    logged_in: false,
+    state_path: "/runtime/openai-codex=bob-oauth-state.json",
+    state_file: { exists: false },
+  },
+];
 
 /** Let the page's initial async render finish. */
 async function settle(dom: JSDOM) {
@@ -176,6 +195,26 @@ describe("setup page", () => {
     expect(cardText(dom)).toContain("credentials file present (412 bytes)");
     const link = dom.window.document.querySelector(".card a");
     expect(link?.getAttribute("href")).toBe("/reload");
+  });
+
+  it("offers a picker when the proxy serves several subscriptions", async () => {
+    const { dom } = await page(AUTHORIZING, TWO_SUBS);
+    const text = cardText(dom);
+    expect(text).toContain("2 openai-codex upstreams");
+    const links = [...dom.window.document.querySelectorAll(".card a")];
+    const hrefs = links.map((a) => a.getAttribute("href"));
+    // one link per subscription, carrying the provider id (encoded — the id
+    // contains "=")
+    expect(hrefs).toContain("?provider=openai-codex%3Dalice");
+    expect(hrefs).toContain("?provider=openai-codex%3Dbob");
+    expect(text).toContain("connected");
+    expect(text).toContain("not logged in");
+  });
+
+  it("shows the login card, not the picker, with a single subscription", async () => {
+    const { dom } = await page(AUTHORIZING, [TWO_SUBS[0]]);
+    expect(cardText(dom)).toContain("Waiting for the browser login");
+    expect(cardText(dom)).not.toContain("upstreams");
   });
 
   it("does not re-render an unchanged status into the DOM", async () => {

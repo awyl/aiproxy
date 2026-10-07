@@ -11,6 +11,7 @@
   h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
   p.sub { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
   .creds { font-size: 0.8rem; color: #666; word-break: break-all; }
+  .provider { padding: 0.4rem 0; border-top: 1px solid #eee; }
   .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
   .card h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
   .state { font-weight: 600; }
@@ -37,6 +38,9 @@
 <script>
 const provider = new URLSearchParams(location.search).get('provider') || '';
 let timer = null;
+// Subscriptions reported by GET /api/codex/providers. A proxy can serve several
+// openai-codex upstreams; each has its own login, so the page has to ask which.
+let subs = [];
 
 function q() { return provider ? '?provider=' + encodeURIComponent(provider) : ''; }
 
@@ -85,6 +89,20 @@ function creds(s) {
     ? 'credentials file present (' + f.size + ' bytes)'
     : 'no credentials file — a login writes it';
   return '<p class="msg creds"><code>' + s.state_path + '</code><br>' + where + '</p>';
+}
+
+// Several subscriptions: one card listing them, each linking to its own page.
+function renderPicker() {
+  clearInterval(timer); timer = null;
+  const el = document.getElementById('cards');
+  el.innerHTML = '<div class="card"><h2>ChatGPT subscriptions</h2>' +
+    '<p class="msg">This proxy has ' + subs.length + ' openai-codex upstreams. ' +
+    'Pick one to connect or check it.</p>' +
+    subs.map(s =>
+      '<div class="provider"><a href="?provider=' + encodeURIComponent(s.id) + '">' +
+      s.id + '</a> — ' + (s.logged_in ? 'connected' : 'not logged in') + '</div>'
+    ).join('') +
+    '</div>';
 }
 
 function render(s) {
@@ -160,7 +178,15 @@ async function finish() {
     clearInterval(timer); timer = null;
   } catch (e) { fail(e.message); }
 }
-refresh();
+async function init() {
+  try {
+    const r = await fetch('/api/codex/providers');
+    if (r.ok) subs = (await r.json()).providers || [];
+  } catch (e) { /* older proxy, or no codex upstreams configured */ }
+  if (!provider && subs.length > 1) { renderPicker(); return; }
+  refresh();
+}
+init();
 </script>
 </body>
 </html>

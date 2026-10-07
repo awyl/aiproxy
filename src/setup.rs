@@ -328,10 +328,15 @@ async fn start_device_flow(
 /// port 1455 is taken).
 pub async fn codex_complete(
     State(state): State<AppState>,
+    Query(query): Query<StatusQuery>,
     body: Option<Json<CompleteBody>>,
 ) -> Result<Json<Value>, ApiError> {
     let body = body.map(|Json(b)| b).unwrap_or_default();
-    let (id, manager) = select_provider(&state, body.provider.as_deref())?;
+    // `?provider=` wins, then the body — the /setup page puts it in the query
+    // (one card per subscription), so ignoring it broke Finish login whenever
+    // more than one openai-codex upstream was configured.
+    let requested = query.provider.clone().or_else(|| body.provider.clone());
+    let (id, manager) = select_provider(&state, requested.as_deref())?;
     let (verifier, expected_state, redirect_uri) = {
         let flows = state.codex_flows.lock().await;
         match flows.get(&id) {
@@ -494,6 +499,31 @@ pub async fn codex_status(
     body["state_path"] = json!(manager.state_path().display().to_string());
     body["state_file"] = state_file_json(manager.state_path());
     Ok(Json(body))
+}
+
+/// `GET /api/codex/providers` — every `openai-codex` upstream and whether it is
+/// logged in. The `/setup` page needs this to offer a picker when a proxy serves
+/// more than one subscription (each gets its own state file and login flow).
+pub async fn codex_providers(State(state): State<AppState>) -> Json<Value> {
+    let mut ids: Vec<&String> = state.codex_managers.keys().collect();
+    ids.sort();
+    let mut providers = Vec::new();
+    for id in ids {
+        let manager = &state.codex_managers[id];
+        let status = manager.status().await;
+        let (logged_in, expires_at_ms) = match status {
+            codex_oauth::CodexStatus::LoggedIn { expires_at_ms } => (true, Some(expires_at_ms)),
+            codex_oauth::CodexStatus::LoggedOut => (false, None),
+        };
+        providers.push(json!({
+            "id": id,
+            "logged_in": logged_in,
+            "expires_at_ms": expires_at_ms,
+            "state_path": manager.state_path().display().to_string(),
+            "state_file": state_file_json(manager.state_path()),
+        }));
+    }
+    Json(json!({"providers": providers}))
 }
 
 /// A login just changed what the upstream can answer, so re-run discovery.
@@ -724,6 +754,47 @@ mod tests {
         manager: Arc<CodexTokenManager>,
     }
 
+    /// Two openai-codex upstreams: `openai-codex=alice` and `openai-codex=bob`,
+    /// each with its own state file.
+    async fn multi_env(auth_base: &str, ids: &[&str]) -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        let mut managers = HashMap::new();
+        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+        let mut first = None;
+        for id in ids {
+            let manager = Arc::new(CodexTokenManager::new(
+                &dir.path().join(format!("{id}-oauth-state.json")),
+                &format!("{auth_base}/oauth/token"),
+            ));
+            managers.insert((*id).to_string(), manager.clone());
+            providers.push(Arc::new(MockProvider::with_surface(
+                id,
+                vec!["gpt-5.6-sol".into()],
+                crate::provider::ModelSurface::Responses,
+            )));
+            first.get_or_insert(manager);
+        }
+        let flows: CodexFlows = Default::default();
+        let state = AppState {
+            registry: Arc::new(crate::discovery::ModelRegistry::new(providers)),
+            embeddings: Arc::new(crate::embeddings::EmbeddingManager::new(
+                &crate::config::EmbeddingsConfig::default(),
+            )),
+            token: None,
+            subscriptions: Default::default(),
+            usage: crate::usage::UsageTracker::new(),
+            codex_managers: Arc::new(managers),
+            codex_auth_base: auth_base.to_string(),
+            codex_flows: flows.clone(),
+        };
+        Env {
+            _dir: dir,
+            state,
+            flow: flows,
+            manager: first.expect("at least one id"),
+        }
+    }
+
     async fn env(auth_base: &str, provider_id: &str) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join(format!("{provider_id}-oauth-state.json"));
@@ -766,6 +837,7 @@ mod tests {
             .route("/api/codex/start", post(codex_start))
             .route("/api/codex/complete", post(codex_complete))
             .route("/api/codex/status", get(codex_status))
+            .route("/api/codex/providers", get(codex_providers))
             .with_state(state.clone())
     }
 
@@ -868,6 +940,92 @@ mod tests {
             vec!["openai-codex/gpt-5.6-sol"],
             "a login must re-run discovery so clients see the new catalog"
         );
+    }
+
+    #[tokio::test]
+    async fn providers_endpoint_lists_every_subscription() {
+        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
+        let e = multi_env(&auth, &["openai-codex=alice", "openai-codex=bob"]).await;
+
+        let (status, body) = get_json(router(&e.state), "/api/codex/providers").await;
+        assert_eq!(status, StatusCode::OK);
+        let subs = body["providers"].as_array().expect("providers array");
+        let ids: Vec<&str> = subs.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["openai-codex=alice", "openai-codex=bob"]);
+        for sub in subs {
+            assert_eq!(sub["logged_in"], false, "got {sub}");
+            assert!(
+                sub["state_path"]
+                    .as_str()
+                    .unwrap()
+                    .contains("oauth-state.json"),
+                "each subscription must report where its credentials live: {sub}"
+            );
+        }
+        assert_ne!(
+            subs[0]["state_path"], subs[1]["state_path"],
+            "subscriptions must not share a state file"
+        );
+
+        // With more than one subscription, the bare status endpoint must say so
+        // rather than silently answering for one of them.
+        let (status, body) = get_json(router(&e.state), "/api/codex/status").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("multiple"),
+            "got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn logging_in_one_subscription_leaves_the_other_alone() {
+        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
+        let e = multi_env(&auth, &["openai-codex=alice", "openai-codex=bob"]).await;
+
+        // start + paste-back against alice only
+        let (status, body) = post_json(
+            router(&e.state),
+            "/api/codex/start?provider=openai-codex=alice",
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        let state = state_of(&body);
+        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
+        let (status, body) = post_json(
+            router(&e.state),
+            "/api/codex/complete?provider=openai-codex=alice",
+            &json!({"input": format!("{redirect_uri}?code=ac_alice&state={state}")}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+
+        let (_, body) = get_json(
+            router(&e.state),
+            "/api/codex/status?provider=openai-codex=alice",
+        )
+        .await;
+        assert_eq!(body["state"], "logged_in", "got {body}");
+        assert_eq!(body["state_file"]["exists"], true, "got {body}");
+
+        let (_, body) = get_json(
+            router(&e.state),
+            "/api/codex/status?provider=openai-codex=bob",
+        )
+        .await;
+        assert_eq!(
+            body["state"], "logged_out",
+            "the other subscription must be untouched: {body}"
+        );
+        assert_eq!(body["state_file"]["exists"], false, "got {body}");
+
+        let (_, body) = get_json(router(&e.state), "/api/codex/providers").await;
+        let subs = body["providers"].as_array().unwrap();
+        assert_eq!(subs[0]["logged_in"], true, "alice: {body}");
+        assert_eq!(subs[1]["logged_in"], false, "bob: {body}");
     }
 
     #[tokio::test]
