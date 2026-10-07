@@ -135,6 +135,7 @@ mod tests {
             codex_auth_base: String::new(),
             codex_flows: Default::default(),
             codex_callback_port: crate::codex_oauth::BROWSER_CALLBACK_PORT,
+            codex_listeners: Default::default(),
         }
     }
 

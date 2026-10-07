@@ -142,6 +142,7 @@ pub async fn build_with_options(
         codex_auth_base: codex.auth_base_url.clone(),
         codex_flows: Default::default(),
         codex_callback_port: codex.callback_port,
+        codex_listeners: Default::default(),
     };
 
     // Background usage fetcher for upstreams with billing endpoints.

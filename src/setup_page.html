@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiproxy — Setup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  p.sub { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+  .state { font-weight: 600; }
+  .ok { color: #16a34a; }
+  .wait { color: #d97706; }
+  .bad { color: #dc2626; }
+  code.user-code { display: inline-block; font-size: 1.6rem; font-weight: 700;
+                   letter-spacing: 0.15em; padding: 0.4rem 0.8rem; background: #f3f4f6;
+                   border-radius: 6px; margin: 0.5rem 0; }
+  button { font-size: 1rem; padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #d1d5db;
+           background: #111827; color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: #111827; }
+  input[type=text] { font-size: 0.95rem; padding: 0.5rem; border: 1px solid #d1d5db;
+                     border-radius: 6px; width: 100%; margin-top: 0.5rem; }
+  a { color: #2563eb; }
+  .msg { color: #666; font-size: 0.85rem; margin-top: 0.5rem; }
+  .row { margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<h1>aiproxy Setup</h1>
+<p class="sub">Connect a ChatGPT (Codex) subscription. Nothing is stored outside the proxy's config directory.</p>
+<div id="cards">Loading...</div>
+<script>
+const provider = new URLSearchParams(location.search).get('provider') || '';
+let timer = null;
+
+function q() { return provider ? '?provider=' + encodeURIComponent(provider) : ''; }
+
+async function post(path, body) {
+  const r = await fetch(path + q(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP ' + r.status));
+  return data;
+}
+async function get(path) {
+  const r = await fetch(path + q());
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP ' + r.status));
+  return data;
+}
+
+// Show a transient error card and forget the last rendered status, so the next
+// poll puts the real card back instead of skipping it as "unchanged".
+function fail(message) {
+  lastKey = null;
+  document.getElementById('cards').innerHTML =
+    '<div class="card"><p class="state bad">' + message + '</p></div>';
+}
+
+function pasteBox(hint) {
+  return '<p class="msg">' + hint + '</p>' +
+    '<input type="text" id="paste" placeholder="http://localhost:1455/auth/callback?code=...&state=..." autocomplete="off"' +
+    ' oninput="pasteValue = this.value" onfocus="pasteFocused = true" onblur="pasteFocused = false">' +
+    '<div class="row"><button onclick="finish()">Finish login</button></div>';
+}
+
+// The card is rebuilt from every status poll. Anything the user typed lives
+// here, not in the DOM, so a re-render cannot eat a pasted callback URL.
+let pasteValue = '';
+let pasteFocused = false;
+let lastKey = null;
+
+function render(s) {
+  const el = document.getElementById('cards');
+  const name = s.provider || 'openai-codex';
+  // Same status as last time: leave the DOM (and the user's typing) alone.
+  const key = JSON.stringify(s);
+  if (key === lastKey && el.querySelector('.card')) return;
+  lastKey = key;
+  let body;
+  if (s.state === 'logged_in') {
+    body = '<p class="state ok">Connected</p>' +
+      '<p class="msg">Codex models are ready through this proxy.</p>';
+    clearInterval(timer); timer = null;
+  } else if (s.state === 'authorizing') {
+    // Browser (PKCE) login — pi's default flow.
+    body = '<p class="state wait">Waiting for the browser login</p>' +
+      '<div class="row"><button onclick="window.open(\'' + s.auth_url + '\', \'_blank\')">Open ChatGPT login</button>' +
+      '<button class="secondary" onclick="start(false, true)">Use device code</button></div>' +
+      (s.callback_listening
+        ? '<p class="msg">Finish the login in the opened tab — this page will update on its own.</p>'
+        : '<p class="msg">Port 1455 is busy (another Codex login is probably running), so the callback cannot land here. Authorize in the opened tab, then copy the <code>localhost:1455/auth/callback?...</code> URL from the address bar and paste it below.</p>') +
+      pasteBox('Or paste the redirect URL / authorization code here:');
+    if (!timer) timer = setInterval(refresh, 2000);
+  } else if (s.state === 'pending') {
+    // Device-code fallback (headless).
+    body = '<p class="state wait">Waiting for authorization (device code)</p>' +
+      '<code class="user-code">' + s.user_code + '</code>' +
+      '<p>Open <a href="' + s.verification_uri + '" target="_blank" rel="noreferrer">' + s.verification_uri + '</a> and enter the code above.</p>' +
+      '<p class="msg">The proxy polls for you; you can close this page once you have authorized.</p>' +
+      '<div class="row"><button onclick="start(true, false)">New code</button></div>';
+    if (!timer) timer = setInterval(refresh, 2000);
+  } else if (s.state === 'failed') {
+    body = '<p class="state bad">Login failed</p><p class="msg">' + (s.message || '') + '</p>' +
+      '<div class="row"><button onclick="start(true, false)">Try again</button>' +
+      '<button class="secondary" onclick="start(true, true)">Use device code</button></div>';
+    clearInterval(timer); timer = null;
+  } else {
+    body = '<p class="state">Not connected</p>' +
+      '<div class="row"><button onclick="start(false, false)">Connect ChatGPT</button>' +
+      '<button class="secondary" onclick="start(false, true)">Use device code</button></div>' +
+      '<p class="msg">Browser login opens auth.openai.com and returns to localhost:1455. Device code is for headless or remote proxies.</p>';
+    clearInterval(timer); timer = null;
+  }
+  el.innerHTML = '<div class="card"><h2>' + name + '</h2>' + body + '</div>';
+  // Restore what the user was doing before the card was replaced.
+  const box = document.getElementById('paste');
+  if (box) {
+    box.value = pasteValue;
+    if (pasteFocused) {
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    }
+  }
+}
+
+async function refresh() {
+  try { render(await get('/api/codex/status')); }
+  catch (e) { fail(e.message); }
+}
+async function start(fresh, device) {
+  try { render(await post('/api/codex/start', { fresh: !!fresh, method: device ? 'device' : 'browser' })); }
+  catch (e) { fail(e.message); }
+}
+async function finish() {
+  const box = document.getElementById('paste');
+  const input = box ? box.value : pasteValue;
+  try {
+    const result = await post('/api/codex/complete', { input: input });
+    pasteValue = '';
+    pasteFocused = false;
+    render(result);
+    clearInterval(timer); timer = null;
+  } catch (e) { fail(e.message); }
+}
+refresh();
+</script>
+</body>
+</html>

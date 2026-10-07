@@ -16,6 +16,7 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "~0.84.4",
     "@earendil-works/pi-coding-agent": "~0.84.4",
+    "jsdom": "^30.1.2",
     "typescript": "^5.6.0",
     "vitest": "^4.1.11"
   },
