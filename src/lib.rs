@@ -10,4 +10,5 @@ pub mod pages;
 pub mod provider;
 pub mod providers;
 pub mod server;
+pub mod setup;
 pub mod usage;

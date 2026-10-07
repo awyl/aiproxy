@@ -215,6 +215,10 @@ pub struct AppState {
     /// the /setup page reads and reloads them after a device-code login.
     pub codex_managers:
         Arc<std::collections::HashMap<String, Arc<crate::codex_oauth::CodexTokenManager>>>,
+    /// Auth base URL for the Codex device flow (mock-server hook in tests).
+    pub codex_auth_base: String,
+    /// Live device-code login flows by provider id (see `crate::setup`).
+    pub codex_flows: crate::setup::CodexFlows,
 }
 
 /// Which agent-facing error schema to speak when translating failures.

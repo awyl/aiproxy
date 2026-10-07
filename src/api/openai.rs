@@ -316,6 +316,8 @@ mod tests {
             subscriptions: Default::default(),
             usage: crate::usage::UsageTracker::new(),
             codex_managers: Default::default(),
+            codex_auth_base: String::new(),
+            codex_flows: Default::default(),
         }
     }
 

@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::discovery::ModelRegistry;
 use crate::providers::build_providers;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -107,6 +107,8 @@ pub async fn build_with_port(
         subscriptions,
         usage: usage.clone(),
         codex_managers: codex_managers.clone(),
+        codex_auth_base: crate::codex_oauth::auth_base_url(),
+        codex_flows: Default::default(),
     };
 
     // Background usage fetcher for upstreams with billing endpoints.
@@ -187,6 +189,9 @@ pub async fn build_with_port(
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/usage", get(crate::pages::usage_page))
+        .route("/setup", get(crate::setup::setup_page))
+        .route("/api/codex/start", post(crate::setup::codex_start))
+        .route("/api/codex/status", get(crate::setup::codex_status))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
         .merge(anthropic_router_with_subs(
             token.clone(),
@@ -207,10 +212,7 @@ pub async fn build(
     build_with_port(config, config_path, None).await
 }
 
-pub async fn run(
-    config: Config,
-    config_path: std::path::PathBuf,
-) -> Result<(), ServerError> {
+pub async fn run(config: Config, config_path: std::path::PathBuf) -> Result<(), ServerError> {
     let (listener, app) = build(config, config_path).await?;
     serve(listener, app).await
 }

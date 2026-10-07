@@ -4,7 +4,8 @@
 pub mod anthropic;
 pub mod go;
 pub mod openai;
-pub mod openai_codex;#[cfg(test)]
+pub mod openai_codex;
+#[cfg(test)]
 pub mod test_mock_upstream;
 
 use crate::config::{Config, UpstreamConfig, UpstreamKind};
@@ -361,14 +362,16 @@ upstreams:
 
     #[tokio::test]
     async fn openai_codex_build_arm_is_responses_catalog_only() {
-        let cfg = Config::from_yaml(
-            "upstreams:\n  - { kind: openai-codex, models: [gpt-5.6-sol] }\n",
-        )
-        .unwrap();
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [gpt-5.6-sol] }\n")
+                .unwrap();
         let providers = build_providers(&cfg, &Default::default());
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id(), "openai-codex");
-        assert_eq!(providers[0].surface_of("gpt-5.6-sol"), ModelSurface::Responses);
+        assert_eq!(
+            providers[0].surface_of("gpt-5.6-sol"),
+            ModelSurface::Responses
+        );
         let models = providers[0].list_models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].surface, ModelSurface::Responses);
@@ -378,8 +381,8 @@ upstreams:
 
     #[test]
     fn create_codex_managers_uses_config_dir_and_provider_id() {
-        let cfg = Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [m] }\n")
-            .unwrap();
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [m] }\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("aiproxy.yaml");
         let managers = create_codex_managers(&cfg, Some(&config_path));

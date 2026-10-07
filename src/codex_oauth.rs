@@ -108,6 +108,11 @@ impl CodexTokenManager {
         &self.state_path
     }
 
+    /// OAuth token endpoint this manager refreshes against.
+    pub fn token_url(&self) -> &str {
+        &self.token_url
+    }
+
     /// A valid access token, refreshing when needed (single-flight).
     pub async fn access(&self) -> Result<String, CodexError> {
         let mut inner = self.inner.lock().await;
@@ -190,7 +195,8 @@ impl CodexTokenManager {
 
     /// Persist freshly exchanged tokens (after a device-code login).
     pub async fn store_tokens(&self, tokens: Tokens) -> Result<(), CodexError> {
-        save_persisted(&self.state_path, &tokens).map_err(|e| CodexError::Transport(e.to_string()))?;
+        save_persisted(&self.state_path, &tokens)
+            .map_err(|e| CodexError::Transport(e.to_string()))?;
         let mut inner = self.inner.lock().await;
         inner.tokens = Some(tokens);
         inner.bad_refresh = None;
@@ -254,7 +260,11 @@ impl CodexTokenManager {
     /// Single-flight refresh: the caller holds the manager lock for the whole
     /// HTTP round trip, so concurrent 401s coalesce into one refresh.
     async fn refresh_locked(&self, inner: &mut ManagerInner) -> Result<String, CodexError> {
-        let current = match inner.tokens.clone().or_else(|| load_persisted(&self.state_path)) {
+        let current = match inner
+            .tokens
+            .clone()
+            .or_else(|| load_persisted(&self.state_path))
+        {
             Some(tokens) => tokens,
             None => {
                 inner.tokens = None;
@@ -342,7 +352,10 @@ pub fn account_id_from_token(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64_url_decode(payload)?;
     let json: Value = serde_json::from_slice(&decoded).ok()?;
-    let id = json.get(JWT_CLAIM_PATH)?.get("chatgpt_account_id")?.as_str()?;
+    let id = json
+        .get(JWT_CLAIM_PATH)?
+        .get("chatgpt_account_id")?
+        .as_str()?;
     if id.is_empty() {
         return None;
     }
@@ -420,8 +433,8 @@ pub struct CodexRequest {
 
 /// Apply the Codex request shape to a client Responses body.
 pub fn transform_codex_body(body: Bytes) -> Result<CodexRequest, CodexError> {
-    let mut value: Value = serde_json::from_slice(&body)
-        .map_err(|e| CodexError::InvalidJson(e.to_string()))?;
+    let mut value: Value =
+        serde_json::from_slice(&body).map_err(|e| CodexError::InvalidJson(e.to_string()))?;
     let obj = value
         .as_object_mut()
         .ok_or_else(|| CodexError::InvalidJson("request body must be a JSON object".into()))?;
@@ -459,12 +472,13 @@ pub fn transform_codex_body(body: Bytes) -> Result<CodexRequest, CodexError> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    if session_id.is_none() {
-        if let Some(sid) = obj.get("session_id").and_then(|v| v.as_str()) {
-            if !sid.is_empty() {
-                obj.insert("prompt_cache_key".into(), json!(sid));
-            }
-        }
+    if session_id.is_none()
+        && let Some(sid) = obj
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    {
+        obj.insert("prompt_cache_key".into(), json!(sid));
     }
     if !obj.contains_key("tool_choice") {
         obj.insert("tool_choice".into(), json!("auto"));
@@ -528,20 +542,31 @@ pub fn token_url() -> String {
     env_or("AIPROXY_CODEX_TOKEN_URL", TOKEN_URL)
 }
 
-pub fn device_user_code_url() -> String {
-    format!("{}/api/accounts/deviceauth/usercode", auth_base_url())
+/// Device-flow + token endpoints for one auth base URL.
+#[derive(Debug, Clone)]
+pub struct CodexEndpoints {
+    pub user_code_url: String,
+    pub device_token_url: String,
+    pub verification_uri: String,
+    pub redirect_uri: String,
 }
 
-pub fn device_token_url() -> String {
-    format!("{}/api/accounts/deviceauth/token", auth_base_url())
-}
-
-pub fn device_verification_uri() -> String {
-    format!("{}/codex/device", auth_base_url())
-}
-
-pub fn device_redirect_uri() -> String {
-    format!("{}/deviceauth/callback", auth_base_url())
+impl CodexEndpoints {
+    /// Empty base → the real `https://auth.openai.com`.
+    pub fn from_auth_base(base: &str) -> Self {
+        let trimmed = base.trim().trim_end_matches('/');
+        let base = if trimmed.is_empty() {
+            AUTH_BASE_URL
+        } else {
+            trimmed
+        };
+        Self {
+            user_code_url: format!("{base}/api/accounts/deviceauth/usercode"),
+            device_token_url: format!("{base}/api/accounts/deviceauth/token"),
+            verification_uri: format!("{base}/codex/device"),
+            redirect_uri: format!("{base}/deviceauth/callback"),
+        }
+    }
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -581,7 +606,10 @@ pub struct Tokens {
 }
 
 /// `POST {url}` with `{"client_id": CLIENT_ID}` → device code + user code.
-pub async fn start_device_flow(client: &reqwest::Client, url: &str) -> Result<DeviceFlow, CodexError> {
+pub async fn start_device_flow(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<DeviceFlow, CodexError> {
     let resp = client
         .post(url)
         .json(&json!({"client_id": CLIENT_ID}))
@@ -951,7 +979,10 @@ mod tests {
         .unwrap();
         let v = parse(&out.body);
         assert_eq!(v["instructions"], "be terse");
-        assert_eq!(v["include"], json!(["reasoning.encrypted_content", "other"]));
+        assert_eq!(
+            v["include"],
+            json!(["reasoning.encrypted_content", "other"])
+        );
         assert_eq!(v["text"], json!({"verbosity": "high"}));
         assert_eq!(out.session_id, None);
     }
@@ -960,7 +991,10 @@ mod tests {
     fn transform_appends_missing_include_entry() {
         let out = transform_codex_body(body(json!({"model": "m", "include": ["other"]}))).unwrap();
         let v = parse(&out.body);
-        assert_eq!(v["include"], json!(["reasoning.encrypted_content", "other"]));
+        assert_eq!(
+            v["include"],
+            json!(["reasoning.encrypted_content", "other"])
+        );
     }
 
     #[test]
@@ -1059,7 +1093,10 @@ mod tests {
         assert_eq!(flow.user_code, "ABCD-EFGH");
         assert_eq!(flow.interval_secs, 3);
         let (_, body) = seen.lock().unwrap().clone();
-        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["client_id"], CLIENT_ID);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["client_id"],
+            CLIENT_ID
+        );
     }
 
     #[tokio::test]
@@ -1072,10 +1109,7 @@ mod tests {
         let err = start_device_flow(&client(), &format!("{base}/usercode"))
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("not enabled"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("not enabled"), "got {err}");
     }
 
     #[tokio::test]
@@ -1157,11 +1191,7 @@ mod tests {
         let app = axum::Router::new().route(
             "/token",
             post(|| async {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "slow_down"})),
-                )
-                    .into_response()
+                (StatusCode::BAD_REQUEST, Json(json!({"error": "slow_down"}))).into_response()
             }),
         );
         let base = spawn_router(app).await;
@@ -1185,7 +1215,10 @@ mod tests {
         let app = axum::Router::new().route(
             "/token",
             post(|| async {
-                (StatusCode::BAD_REQUEST, Json(json!({"error": {"code": "boom"}})))
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"code": "boom"}})),
+                )
                     .into_response()
             }),
         );
@@ -1239,7 +1272,10 @@ mod tests {
             "got {ctype}"
         );
         assert!(body.contains("grant_type=authorization_code"), "got {body}");
-        assert!(body.contains(&format!("client_id={CLIENT_ID}")), "got {body}");
+        assert!(
+            body.contains(&format!("client_id={CLIENT_ID}")),
+            "got {body}"
+        );
         assert!(body.contains("code=ac_1"), "got {body}");
         assert!(body.contains("code_verifier=cv_1"), "got {body}");
         assert!(
@@ -1288,7 +1324,10 @@ mod tests {
         assert!(ctype.starts_with("application/x-www-form-urlencoded"));
         assert!(body.contains("grant_type=refresh_token"), "got {body}");
         assert!(body.contains("refresh_token=rt_1"), "got {body}");
-        assert!(body.contains(&format!("client_id={CLIENT_ID}")), "got {body}");
+        assert!(
+            body.contains(&format!("client_id={CLIENT_ID}")),
+            "got {body}"
+        );
         assert!(!body.contains("scope="), "no scope in refresh: {body}");
     }
 
@@ -1329,7 +1368,10 @@ mod tests {
         let app = axum::Router::new().route(
             "/oauth/token",
             post(|| async {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"oops": true})))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"oops": true})),
+                )
                     .into_response()
             }),
         );
@@ -1453,16 +1495,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(on_disk.access, "at_new");
         assert_eq!(on_disk.refresh, "rt_new");
-        assert_eq!(mgr.status().await, CodexStatus::LoggedIn {
-            expires_at_ms: on_disk.expires_at_ms
-        });
+        assert_eq!(
+            mgr.status().await,
+            CodexStatus::LoggedIn {
+                expires_at_ms: on_disk.expires_at_ms
+            }
+        );
     }
 
     #[tokio::test]
     async fn manager_keeps_old_refresh_when_response_omits_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = state_path(&dir);
-        let srv = token_server(|_| (200, json!({"access_token": "at_new", "expires_in": 3600}))).await;
+        let srv =
+            token_server(|_| (200, json!({"access_token": "at_new", "expires_in": 3600}))).await;
         write_state(&path, "at_old", "rt_old", now_ms() - 1000);
         let mgr = manager(&path, &srv.base);
         assert_eq!(mgr.access().await.unwrap(), "at_new");
@@ -1480,7 +1526,11 @@ mod tests {
         let mgr = manager(&path, &srv.base);
         assert!(matches!(mgr.access().await, Err(CodexError::LoggedOut)));
         assert!(matches!(mgr.access().await, Err(CodexError::LoggedOut)));
-        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "latch prevents re-polling");
+        assert_eq!(
+            srv.calls.load(Ordering::SeqCst),
+            1,
+            "latch prevents re-polling"
+        );
         assert_eq!(mgr.status().await, CodexStatus::LoggedOut);
     }
 
@@ -1519,9 +1569,17 @@ mod tests {
             Err(CodexError::Http { status: 500, .. })
         ));
         assert!(mgr.access().await.is_err());
-        assert_eq!(srv.calls.load(Ordering::SeqCst), 1, "backoff suppresses retry");
+        assert_eq!(
+            srv.calls.load(Ordering::SeqCst),
+            1,
+            "backoff suppresses retry"
+        );
         assert!(mgr.force_refresh().await.is_err());
-        assert_eq!(srv.calls.load(Ordering::SeqCst), 2, "force_refresh bypasses backoff");
+        assert_eq!(
+            srv.calls.load(Ordering::SeqCst),
+            2,
+            "force_refresh bypasses backoff"
+        );
     }
 
     #[tokio::test]

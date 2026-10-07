@@ -54,8 +54,8 @@ impl OpenAiCodexProvider {
         session_id: Option<&str>,
     ) -> Result<reqwest::Response, ProviderError> {
         let access = self.manager.access().await.map_err(codex_err)?;
-        let account_id =
-            codex_oauth::account_id_from_token(&access).ok_or_else(|| codex_err(CodexError::LoggedOut))?;
+        let account_id = codex_oauth::account_id_from_token(&access)
+            .ok_or_else(|| codex_err(CodexError::LoggedOut))?;
         self.client
             .post(self.url())
             .headers(codex_oauth::codex_headers(&access, &account_id, session_id))
@@ -192,7 +192,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const SSE: &str = "event: response.output_text.delta\ndata: {\"delta\":\"hel\"}\n\ndata: [DONE]\n\n";
+    const SSE: &str =
+        "event: response.output_text.delta\ndata: {\"delta\":\"hel\"}\n\ndata: [DONE]\n\n";
 
     #[derive(Default)]
     struct Upstream {
@@ -402,7 +403,10 @@ mod tests {
             headers.get("accept").map(String::as_str),
             Some("text/event-stream")
         );
-        assert_eq!(headers.get("session-id").map(String::as_str), Some("sess-7"));
+        assert_eq!(
+            headers.get("session-id").map(String::as_str),
+            Some("sess-7")
+        );
         assert_eq!(
             headers.get("x-client-request-id").map(String::as_str),
             Some("sess-7")
@@ -478,11 +482,7 @@ mod tests {
             vec!["gpt-5.6-sol".into()],
             manager,
         );
-        let err = expect_err(
-            provider
-                .responses(response_body(None), &ctx())
-                .await,
-        );
+        let err = expect_err(provider.responses(response_body(None), &ctx()).await);
         match err {
             ProviderError::Http { status, body } => {
                 assert_eq!(status, 502);
@@ -496,7 +496,11 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
-        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0, "never hit upstream");
+        assert_eq!(
+            upstream.calls.load(Ordering::SeqCst),
+            0,
+            "never hit upstream"
+        );
     }
 
     #[tokio::test]
@@ -533,7 +537,10 @@ mod tests {
     #[tokio::test]
     async fn surface_and_catalog_are_responses_only() {
         let fx = fixture("http://127.0.0.1:1", "http://127.0.0.1:1", "at").await;
-        assert_eq!(fx.provider.surface_of("gpt-5.6-sol"), ModelSurface::Responses);
+        assert_eq!(
+            fx.provider.surface_of("gpt-5.6-sol"),
+            ModelSurface::Responses
+        );
         assert_eq!(fx.provider.id(), "openai-codex");
         let models = fx.provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
@@ -545,7 +552,11 @@ mod tests {
     async fn chat_and_messages_are_rejected_with_a_hint() {
         let fx = fixture("http://127.0.0.1:1", "http://127.0.0.1:1", "at").await;
         for err in [
-            expect_err(fx.provider.chat_completions(response_body(None), &ctx()).await),
+            expect_err(
+                fx.provider
+                    .chat_completions(response_body(None), &ctx())
+                    .await,
+            ),
             expect_err(fx.provider.messages(response_body(None), &ctx()).await),
         ] {
             match err {
