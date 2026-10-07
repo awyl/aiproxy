@@ -1430,7 +1430,9 @@ mod tests {
         ));
     }
 
-    /// base64url (no padding) encoder, independent of the implementation.
+    /// base64url (no padding) encoder, deliberately NOT `base64_url_encode`:
+    /// this builds the fake JWTs that the account-id parser must decode, so
+    /// reusing the production encoder would only prove it agrees with itself.
     fn b64url(input: &[u8]) -> String {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut out = String::new();
