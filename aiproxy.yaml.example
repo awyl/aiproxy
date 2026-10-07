@@ -13,8 +13,9 @@ bind: 127.0.0.1:8080          # listen "host:port"; 0.0.0.0:8080 = all interface
                                # (reverse proxy recommended for anything public)
 token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disabled.
 model_refresh_secs: 0              # discovery interval; 0 = fetch once at startup (default)
-                               # Re-run discovery any time at http://127.0.0.1:8080/reload
-                               # (or POST /api/reload) — it shows each upstream's result,
+                               # See every upstream's models at http://127.0.0.1:8080/models
+                               # (GET /api/models); re-run discovery there with the
+                               # Reload button (POST /api/reload), which shows each result,
                                # which is how you see why an upstream has no models.
 
 # Multi-subscription: give each upstream its own bearer token. The token both
@@ -122,9 +123,13 @@ upstreams:
 
 
   # OpenAI-compatible gateway with a pinned model list (no probing):
+  # `surface:` says which wire these models are served on (chat | messages |
+  # responses) so /v1/models tells clients where to send them; without it they
+  # are catalog-only (surface unknown, not streamable).
   - kind: openai                   # provider ID = "openai"
     api_key_env: OPENAI_API_KEY
     models: [gpt-4o, gpt-4o-mini]
+    surface: chat
 
   # Anthropic-compatible gateway, discovery enabled:
   - kind: anthropic                # provider ID = "anthropic"

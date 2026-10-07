@@ -62,7 +62,11 @@ impl Provider for StaticProvider {
                 id: m.clone(),
                 display_name: None,
                 created_at: None,
-                surface: ModelSurface::Unknown,
+                // The configured surface, not Unknown: clients read this from
+                // /v1/models to pick the wire API, so a static upstream that
+                // declared `surface: responses` must not be advertised as
+                // unknown (and it must agree with `surface_of`).
+                surface: self.surface.unwrap_or(ModelSurface::Unknown),
             })
             .collect())
     }
@@ -275,6 +279,44 @@ pub(crate) fn default_http_client() -> reqwest::Client {
 mod tests {
     use super::*;
     use crate::provider::testutil::MockProvider;
+
+    #[tokio::test]
+    async fn static_catalog_entries_carry_the_configured_surface() {
+        // /v1/models is how a client picks the wire API, so a static upstream
+        // with `surface: responses` must advertise responses — Unknown made the
+        // catalog disagree with surface_of (the routing answer).
+        let cfg = crate::config::UpstreamConfig {
+            name: None,
+            kind: crate::config::UpstreamKind::Openai,
+            base_url: None,
+            api_key_env: None,
+            token_env: None,
+            models: vec!["gpt-5.6-sol".into()],
+            discover: false,
+            client_version: None,
+            endpoint_by_model: Default::default(),
+            surface_map_url: None,
+            surface: Some(crate::provider::ModelSurface::Responses),
+        };
+        let provider = StaticProvider::from_cfg(&cfg, "openai", None).unwrap();
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models[0].surface, crate::provider::ModelSurface::Responses);
+        assert_eq!(
+            provider.surface_of("gpt-5.6-sol"),
+            crate::provider::ModelSurface::Responses,
+            "catalog and routing must agree"
+        );
+        // no `surface:` and no kind default: still Unknown (catalog-only)
+        let bare = crate::config::UpstreamConfig {
+            surface: None,
+            ..cfg
+        };
+        let provider = StaticProvider::from_cfg(&bare, "openai", None).unwrap();
+        assert_eq!(
+            provider.list_models().await.unwrap()[0].surface,
+            crate::provider::ModelSurface::Unknown
+        );
+    }
 
     #[tokio::test]
     async fn no_discovery_wrapper_passes_through_routing_but_not_probing() {

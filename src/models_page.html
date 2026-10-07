@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiproxy — Models</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; padding: 0 1rem; color: #111; }
+h1 { font-size: 1.4rem; }
+.sub { color: #666; margin-bottom: 1rem; }
+button { font-size: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+details.provider { border: 1px solid #ddd; border-radius: 6px; margin: 0.5rem 0; }
+details.provider > summary { cursor: pointer; padding: 0.6rem 1rem; display: flex; gap: 1rem; align-items: baseline; }
+details.provider[open] > summary { border-bottom: 1px solid #eee; }
+.id { font-family: ui-monospace, monospace; font-weight: 600; }
+.count { color: #16a34a; white-space: nowrap; }
+.count.zero { color: #999; }
+.error { color: #dc2626; font-family: ui-monospace, monospace; font-size: 0.8rem; }
+ul { margin: 0; padding: 0.5rem 1rem 0.75rem 2rem; }
+li { font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 0.1rem 0; }
+li .surface { color: #666; font-size: 0.75rem; margin-left: 0.5rem; }
+.body-error { color: #dc2626; font-family: ui-monospace, monospace; font-size: 0.8rem; padding: 0.5rem 1rem; }
+.updated { color: #999; font-size: 0.8rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>aiproxy models</h1>
+<p class="sub">Every upstream and the models it offers. Click one to show or hide its
+models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
+<button id="go" onclick="reloadModels()">Reload models</button>
+<div id="data">Loading...</div>
+<div class="updated" id="updated"></div>
+<script>
+// Which sections the reader opened. Kept outside the DOM so a re-render (after a
+// reload) does not collapse everything.
+const openIds = new Set();
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function render(data) {
+  const providers = data.providers || [];
+  if (!providers.length) {
+    document.getElementById('data').innerHTML = '<p class="sub">No upstreams.</p>';
+    return;
+  }
+  document.getElementById('data').innerHTML = providers.map(p => {
+    const models = p.models || [];
+    const count = '<span class="count' + (models.length ? '' : ' zero') + '">' +
+      models.length + (models.length === 1 ? ' model' : ' models') + '</span>';
+    const flag = p.error ? ' <span class="error">probe failed</span>' : '';
+    const list = models.map(m =>
+      '<li>' + escapeHtml(m.id) +
+      (m.surface ? '<span class="surface">' + escapeHtml(m.surface) + '</span>' : '') +
+      '</li>').join('');
+    const errorLine = p.error
+      ? '<div class="body-error">' + escapeHtml(p.error) + '</div>'
+      : '';
+    return '<details class="provider" data-id="' + escapeHtml(p.id) + '"' +
+      (openIds.has(p.id) ? ' open' : '') + '>' +
+      '<summary><span class="id">' + escapeHtml(p.id) + '</span>' + count + flag + '</summary>' +
+      errorLine +
+      (models.length ? '<ul>' + list + '</ul>' : '') +
+      '</details>';
+  }).join('');
+  document.querySelectorAll('details.provider').forEach(d => {
+    d.addEventListener('toggle', () => {
+      if (d.open) { openIds.add(d.dataset.id); } else { openIds.delete(d.dataset.id); }
+    });
+  });
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    const data = await r.json();
+    if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP ' + r.status));
+    render(data);
+    document.getElementById('updated').textContent = 'Total ' + data.total + ' models';
+  } catch (e) {
+    document.getElementById('data').innerHTML = '<p class="error">' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function reloadModels() {
+  const button = document.getElementById('go');
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = 'Reloading…';
+  try {
+    const r = await fetch('/api/reload', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP ' + r.status));
+    render(data);
+    document.getElementById('updated').textContent =
+      'Total ' + data.total + ' models · reloaded ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('data').innerHTML = '<p class="error">' + escapeHtml(e.message) + '</p>';
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+loadModels();
+</script>
+</body>
+</html>

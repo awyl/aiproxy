@@ -15,6 +15,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelSurface {
+    /// `chat` is accepted in config as well: it is the wire name this enum
+    /// reports everywhere else (`/v1/models`, `endpoint_by_model`), so it is the
+    /// one a reader of those would write.
+    #[serde(alias = "chat")]
     ChatCompletions,
     Messages,
     Responses,

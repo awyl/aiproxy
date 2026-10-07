@@ -184,7 +184,7 @@ describe("setup page", () => {
     expect(cardText(dom)).toContain("no credentials file");
   });
 
-  it("points at /reload once connected", async () => {
+  it("points at /models once connected", async () => {
     const { dom } = await page({
       provider: "openai-codex",
       state: "logged_in",
@@ -194,7 +194,7 @@ describe("setup page", () => {
     expect(cardText(dom)).toContain("Connected");
     expect(cardText(dom)).toContain("credentials file present (412 bytes)");
     const link = dom.window.document.querySelector(".card a");
-    expect(link?.getAttribute("href")).toBe("/reload");
+    expect(link?.getAttribute("href")).toBe("/models");
   });
 
   it("offers a picker when the proxy serves several subscriptions", async () => {

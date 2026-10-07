@@ -10,6 +10,10 @@ use tokio::task::JoinSet;
 pub struct ModelRegistry {
     providers: Vec<Arc<dyn Provider>>,
     catalog: RwLock<BTreeMap<String, Vec<Model>>>,
+    /// Last probe failure per provider, kept so the `/models` page can show why
+    /// a provider has no models (a failed probe retains last-known entries, so
+    /// the count alone does not say a probe failed).
+    last_errors: RwLock<BTreeMap<String, String>>,
 }
 
 impl std::fmt::Debug for ModelRegistry {
@@ -21,6 +25,32 @@ impl std::fmt::Debug for ModelRegistry {
             )
             .finish()
     }
+}
+
+/// One provider's slice of the catalog, for the `/models` page: the models as
+/// stored (no `{prefix}/`), plus why the last probe failed if it did.
+#[derive(Debug, Clone)]
+pub struct ProviderCatalog {
+    pub id: String,
+    pub models: Vec<Model>,
+    pub error: Option<String>,
+}
+
+/// Next error map for a discovery round: a provider that answered clears its
+/// error, a failure sets it, and a provider not in this round keeps what it had.
+fn merge_errors(
+    prev: &BTreeMap<String, String>,
+    failed: &[(String, String)],
+    answered: &[String],
+) -> BTreeMap<String, String> {
+    let mut next = prev.clone();
+    for id in answered {
+        next.remove(id);
+    }
+    for (id, error) in failed {
+        next.insert(id.clone(), error.clone());
+    }
+    next
 }
 
 /// Outcome of one provider's discovery round (`refresh_report`).
@@ -39,6 +69,7 @@ impl ModelRegistry {
         Self {
             providers,
             catalog: RwLock::new(BTreeMap::new()),
+            last_errors: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -105,19 +136,51 @@ impl ModelRegistry {
                 error: None,
             })
             .collect();
-        for (id, error) in failed {
-            match report.iter_mut().find(|r| r.id == id) {
-                Some(entry) => entry.error = Some(error),
+        for (id, error) in &failed {
+            match report.iter_mut().find(|r| &r.id == id) {
+                Some(entry) => entry.error = Some(error.clone()),
                 None => report.push(RefreshOutcome {
-                    id,
+                    id: id.clone(),
                     models: 0,
-                    error: Some(error),
+                    error: Some(error.clone()),
                 }),
             }
         }
         report.sort_by(|a, b| a.id.cmp(&b.id));
         *self.catalog.write().unwrap() = updated;
+        // `updated` also holds the retained entries of providers that failed, so
+        // pass only the ids that actually answered this round.
+        let answered: Vec<String> = report
+            .iter()
+            .filter(|r| r.error.is_none())
+            .map(|r| r.id.clone())
+            .collect();
+        let next = {
+            let errors = self.last_errors.read().unwrap();
+            merge_errors(&errors, &failed, &answered)
+        };
+        *self.last_errors.write().unwrap() = next;
         report
+    }
+
+    /// Catalog as served, grouped by provider (models keep their bare ids), with
+    /// the last probe error. One entry per configured provider, in registry
+    /// order — a provider with nothing discovered still appears, which is the
+    /// case worth looking at.
+    pub fn catalog_snapshot(&self) -> Vec<ProviderCatalog> {
+        let cat = self.catalog.read().unwrap();
+        let errors = self.last_errors.read().unwrap();
+        self.providers
+            .iter()
+            .map(|p| {
+                let id = p.id().to_string();
+                ProviderCatalog {
+                    models: cat.get(&id).cloned().unwrap_or_default(),
+                    error: errors.get(&id).cloned(),
+                    id,
+                }
+            })
+            .collect()
     }
 
     /// Flattened prefixed catalog, sorted by id, deduplicated.
@@ -161,6 +224,7 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ModelSurface;
     use crate::provider::Provider;
     use crate::provider::testutil::MockProvider;
     use std::sync::Arc;
@@ -201,6 +265,75 @@ mod tests {
         );
         // the failing provider's last-known entries are still retained
         assert!(reg.models().iter().any(|m| m.id == "openai/gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn catalog_snapshot_lists_every_provider_its_models_and_last_error() {
+        let reg = ModelRegistry::new(vec![
+            Arc::new(MockProvider::with_surface(
+                "openai",
+                vec!["gpt-4o".into()],
+                ModelSurface::ChatCompletions,
+            )),
+            Arc::new(MockProvider::failing("openai-codex")),
+            Arc::new(MockProvider::new("empty", vec![])),
+        ]);
+        // before the first round: every provider is listed, nothing is known yet
+        let snap = reg.catalog_snapshot();
+        assert_eq!(
+            snap.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["openai", "openai-codex", "empty"]
+        );
+        assert!(
+            snap.iter()
+                .all(|p| p.models.is_empty() && p.error.is_none())
+        );
+
+        reg.refresh().await;
+        let snap = reg.catalog_snapshot();
+        let openai = snap.iter().find(|p| p.id == "openai").unwrap();
+        assert_eq!(
+            openai
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-4o"],
+            "unprefixed ids: the page shows the model, not the routing key"
+        );
+        assert_eq!(openai.models[0].surface, ModelSurface::ChatCompletions);
+        assert_eq!(openai.error, None);
+        let codex = snap.iter().find(|p| p.id == "openai-codex").unwrap();
+        assert!(
+            codex
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mock failure"),
+            "the probe's failure belongs next to its (empty) model list: {codex:?}"
+        );
+        // a provider that answered with nothing is still listed
+        assert_eq!(snap.iter().find(|p| p.id == "empty").unwrap().error, None);
+    }
+
+    #[test]
+    fn merge_errors_clears_providers_that_recovered() {
+        let prev = BTreeMap::from([
+            ("stale".to_string(), "boom".to_string()),
+            ("failing".to_string(), "old".to_string()),
+        ]);
+        let merged = merge_errors(
+            &prev,
+            &[("failing".to_string(), "new".to_string())],
+            &["stale".to_string()],
+        );
+        assert_eq!(
+            merged.get("stale"),
+            None,
+            "a provider that answered this round has no error to show"
+        );
+        assert_eq!(merged.get("failing").map(String::as_str), Some("new"));
+        assert_eq!(merged.len(), 1);
     }
 
     #[tokio::test]

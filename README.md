@@ -118,7 +118,7 @@ embeddings:
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
-Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/reload`** to re-run discovery and see per-upstream results (`POST /api/reload` returns the same JSON: one entry per upstream with its model count, or the probe's error). A login to `openai-codex` triggers this automatically.
+Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface}], error}`. A login to `openai-codex` triggers discovery automatically.
 
 ### ChatGPT / Codex subscription (`openai-codex`)
 

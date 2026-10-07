@@ -919,6 +919,31 @@ upstreams:
     }
 
     #[test]
+    fn surface_accepts_the_wire_name() {
+        // `/v1/models` reports `chat`, so config must accept that spelling too.
+        let cfg =
+            Config::from_yaml("upstreams:\n  - { kind: openai, models: [m], surface: chat }\n")
+                .unwrap();
+        assert_eq!(
+            cfg.upstreams[0].surface,
+            Some(ModelSurface::ChatCompletions)
+        );
+        let cfg = Config::from_yaml(
+            "upstreams:\n  - { kind: openai, models: [m], surface: chatcompletions }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.upstreams[0].surface,
+            Some(ModelSurface::ChatCompletions)
+        );
+        let cfg = Config::from_yaml(
+            "upstreams:\n  - { kind: openai, models: [m], surface: responses }\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.upstreams[0].surface, Some(ModelSurface::Responses));
+    }
+
+    #[test]
     fn client_version_parses_on_codex_and_is_rejected_elsewhere() {
         let cfg =
             Config::from_yaml("upstreams:\n  - { kind: openai-codex, client_version: '9.9.9' }\n")
