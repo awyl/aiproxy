@@ -26,6 +26,9 @@ pub enum CodexFlowState {
         verification_uri: String,
         interval_secs: u64,
         started_at_ms: u64,
+        /// Distinguishes this flow from a later one for the same provider, so a
+        /// stale poll loop can never overwrite a newer flow's state.
+        flow_id: u64,
     },
     LoggedIn,
     Failed(String),
@@ -33,14 +36,25 @@ pub enum CodexFlowState {
 
 pub type CodexFlows = Arc<tokio::sync::Mutex<HashMap<String, CodexFlowState>>>;
 
+/// Monotonic flow ids; see `CodexFlowState::Pending::flow_id`.
+static FLOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_flow_id() -> u64 {
+    FLOW_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct StartBody {
     pub provider: Option<String>,
+    /// Force a brand-new device code even while another flow is pending (a lost
+    /// or expired code — the page can't wait out the old flow).
+    pub fresh: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct StatusQuery {
     pub provider: Option<String>,
+    pub fresh: Option<bool>,
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -126,13 +140,18 @@ pub async fn codex_start(
     Query(query): Query<StatusQuery>,
     body: Option<Json<StartBody>>,
 ) -> Result<Json<Value>, ApiError> {
+    let fresh = query
+        .fresh
+        .or(body.as_ref().and_then(|Json(b)| b.fresh))
+        .unwrap_or(false);
     let requested = query
         .provider
         .or_else(|| body.and_then(|Json(b)| b.provider));
     let (id, manager) = select_provider(&state, requested.as_deref())?;
 
-    // Reuse a live flow: the page may be reloaded, or two tabs opened.
-    {
+    // Reuse a live flow: the page may be reloaded, or two tabs opened. `fresh`
+    // forces a new code for one that was lost or has expired.
+    if !fresh {
         let flows = state.codex_flows.lock().await;
         if let Some(existing) = flows
             .get(&id)
@@ -153,13 +172,19 @@ pub async fn codex_start(
         verification_uri: endpoints.verification_uri.clone(),
         interval_secs: device.interval_secs,
         started_at_ms: codex_oauth::now_ms(),
+        flow_id: next_flow_id(),
     };
     let response = flow_json(&id, Some(&flow));
+    let flow_id = match &flow {
+        CodexFlowState::Pending { flow_id, .. } => *flow_id,
+        _ => unreachable!("just built a Pending flow"),
+    };
     state.codex_flows.lock().await.insert(id.clone(), flow);
 
     spawn_poll_loop(
         state.codex_flows.clone(),
         id,
+        flow_id,
         manager,
         endpoints,
         device,
@@ -200,10 +225,24 @@ pub async fn codex_status(
     Ok(Json(body))
 }
 
+/// Write this flow's result, but never over a newer flow's slot: a `fresh`
+/// start (lost/expired code) owns the provider until it finishes.
+async fn set_flow_state(flows: &CodexFlows, id: &str, flow_id: u64, state: CodexFlowState) {
+    let mut flows = flows.lock().await;
+    let current = match flows.get(id) {
+        Some(CodexFlowState::Pending { flow_id, .. }) => Some(*flow_id),
+        _ => None,
+    };
+    if current == Some(flow_id) {
+        flows.insert(id.to_string(), state);
+    }
+}
+
 /// Background poll loop: pending → slow_down → complete → exchange → store.
 fn spawn_poll_loop(
     flows: CodexFlows,
     id: String,
+    flow_id: u64,
     manager: Arc<CodexTokenManager>,
     endpoints: CodexEndpoints,
     device: DeviceFlow,
@@ -224,10 +263,7 @@ fn spawn_poll_loop(
                 } else {
                     "Device flow timed out"
                 };
-                flows
-                    .lock()
-                    .await
-                    .insert(id.clone(), CodexFlowState::Failed(message.into()));
+                set_flow_state(&flows, &id, flow_id, CodexFlowState::Failed(message.into())).await;
                 return;
             }
             match codex_oauth::poll_device_flow(&client, &endpoints.device_token_url, &device).await
@@ -259,14 +295,12 @@ fn spawn_poll_loop(
                         Ok(()) => CodexFlowState::LoggedIn,
                         Err(e) => CodexFlowState::Failed(e.to_string()),
                     };
-                    flows.lock().await.insert(id.clone(), state);
+                    set_flow_state(&flows, &id, flow_id, state).await;
                     return;
                 }
                 Err(e) => {
-                    flows
-                        .lock()
-                        .await
-                        .insert(id.clone(), CodexFlowState::Failed(e.to_string()));
+                    set_flow_state(&flows, &id, flow_id, CodexFlowState::Failed(e.to_string()))
+                        .await;
                     return;
                 }
             }
@@ -351,11 +385,12 @@ function render(s) {
     body = '<p class="state wait">Waiting for authorization</p>' +
       '<code class="user-code">' + s.user_code + '</code>' +
       '<p>Open <a href="' + s.verification_uri + '" target="_blank" rel="noreferrer">' + s.verification_uri + '</a> and enter the code above.</p>' +
-      '<p class="msg">This page refreshes itself; you can close it once you have authorized.</p>';
+      '<p class="msg">This page refreshes itself; you can close it once you have authorized.</p>' +
+      '<button onclick="start(true)">New code</button>';
     if (!timer) timer = setInterval(refresh, 2000);
   } else if (s.state === 'failed') {
     body = '<p class="state bad">Login failed</p><p class="msg">' + (s.message || '') + '</p>' +
-      '<button onclick="start()">Try again</button>';
+      '<button onclick="start(true)">Get a new code</button>';
     clearInterval(timer); timer = null;
   } else {
     body = '<p class="state">Not connected</p>' +
@@ -370,8 +405,8 @@ async function refresh() {
   try { render(await get('/api/codex/status')); }
   catch (e) { document.getElementById('cards').innerHTML = '<div class="card"><p class="state bad">' + e.message + '</p></div>'; }
 }
-async function start() {
-  try { render(await post('/api/codex/start', {})); }
+async function start(fresh) {
+  try { render(await post('/api/codex/start', { fresh: !!fresh })); }
   catch (e) { document.getElementById('cards').innerHTML = '<div class="card"><p class="state bad">' + e.message + '</p></div>'; }
 }
 refresh();
@@ -696,6 +731,91 @@ mod tests {
             user_code_calls.load(Ordering::SeqCst),
             1,
             "second start reuses the live flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_start_issues_a_new_code_and_ignores_the_stale_flow() {
+        let user_code_calls = Arc::new(AtomicUsize::new(0));
+        let auth = spawn_auth_server(user_code_calls.clone()).await;
+        let e = env(&auth, "openai-codex").await;
+        let app = router(&e.state);
+
+        let post_start = |uri: &'static str| {
+            let app = app.clone();
+            async move {
+                body_json(
+                    app.oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .method("POST")
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+                )
+                .await
+            }
+        };
+
+        let (_, first) = post_start("/api/codex/start").await;
+        assert_eq!(first["state"], "pending");
+        let first_flow_id = match e.flow.lock().await.get("openai-codex").cloned().unwrap() {
+            CodexFlowState::Pending { flow_id, .. } => flow_id,
+            other => panic!("expected pending, got {other:?}"),
+        };
+
+        let (status, second) = post_start("/api/codex/start?fresh=true").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["state"], "pending");
+        assert_eq!(
+            user_code_calls.load(Ordering::SeqCst),
+            2,
+            "fresh forces a new device code"
+        );
+        let second_flow_id = match e.flow.lock().await.get("openai-codex").cloned().unwrap() {
+            CodexFlowState::Pending { flow_id, .. } => flow_id,
+            other => panic!("expected pending, got {other:?}"),
+        };
+        assert_ne!(first_flow_id, second_flow_id);
+    }
+
+    #[tokio::test]
+    async fn stale_poll_loop_cannot_clobber_a_newer_flow() {
+        let user_code_calls = Arc::new(AtomicUsize::new(0));
+        let auth = spawn_auth_server(user_code_calls).await;
+        let e = env(&auth, "openai-codex").await;
+
+        // A newer flow owns the slot …
+        let newer = CodexFlowState::Pending {
+            user_code: "NEW-CODE".into(),
+            verification_uri: format!("{auth}/codex/device"),
+            interval_secs: 60,
+            started_at_ms: codex_oauth::now_ms(),
+            flow_id: 9_999,
+        };
+        e.flow
+            .lock()
+            .await
+            .insert("openai-codex".into(), newer.clone());
+
+        // … and a stale loop's failure must not overwrite it.
+        let flows = e.flow.clone();
+        let stale = CodexFlowState::Failed("Device flow timed out".into());
+        let current = match flows.lock().await.get("openai-codex") {
+            Some(CodexFlowState::Pending { flow_id, .. }) => Some(*flow_id),
+            _ => None,
+        };
+        assert_eq!(current, Some(9_999), "stale flow id 1 does not match");
+        if current == Some(1) {
+            flows.lock().await.insert("openai-codex".into(), stale);
+        }
+        let after = flows.lock().await.get("openai-codex").cloned().unwrap();
+        assert!(
+            matches!(after, CodexFlowState::Pending { flow_id, .. } if flow_id == 9_999),
+            "newer flow survives, got {after:?}"
         );
     }
 
