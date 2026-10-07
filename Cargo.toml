@@ -22,6 +22,8 @@ fastembed = { version = "6", default-features = false, features = ["ort-download
 regex = "1"
 rmcp = { version = "=3.1.4", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "transport-child-process", "transport-io", "tower"] }
 chrono = "0.4"
+sha2 = "0.10"
+getrandom = "0.3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

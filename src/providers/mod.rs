@@ -196,7 +196,11 @@ pub fn build_providers(cfg: &Config, codex: &CodexManagers) -> Vec<Arc<dyn Provi
 /// Create Codex OAuth token managers for openai-codex upstreams, keyed by
 /// provider id. State files live next to the config file as
 /// `{provider-id}-oauth-state.json`.
-pub fn create_codex_managers(cfg: &Config, config_path: Option<&std::path::Path>) -> CodexManagers {
+pub fn create_codex_managers(
+    cfg: &Config,
+    config_path: Option<&std::path::Path>,
+    token_url: &str,
+) -> CodexManagers {
     let mut managers = CodexManagers::new();
     let Some(config_path) = config_path else {
         return managers;
@@ -206,7 +210,7 @@ pub fn create_codex_managers(cfg: &Config, config_path: Option<&std::path::Path>
         .filter(|p| !p.as_os_str().is_empty())
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let token_url = crate::codex_oauth::token_url();
+    let token_url = token_url.to_string();
     for (u, id) in cfg.upstreams.iter().zip(cfg.provider_ids()) {
         if u.kind == UpstreamKind::OpenAiCodex {
             let state_path = dir.join(format!("{id}-oauth-state.json"));
@@ -385,7 +389,8 @@ upstreams:
             Config::from_yaml("upstreams:\n  - { kind: openai-codex, models: [m] }\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("aiproxy.yaml");
-        let managers = create_codex_managers(&cfg, Some(&config_path));
+        let managers =
+            create_codex_managers(&cfg, Some(&config_path), "http://127.0.0.1:1/oauth/token");
         assert_eq!(managers.len(), 1);
         let manager = managers.values().next().unwrap();
         assert_eq!(
@@ -393,6 +398,6 @@ upstreams:
             dir.path().join("openai-codex-oauth-state.json")
         );
         // no config path -> no managers (unit-test fallback in build_providers)
-        assert!(create_codex_managers(&cfg, None).is_empty());
+        assert!(create_codex_managers(&cfg, None, "http://127.0.0.1:1/oauth/token").is_empty());
     }
 }

@@ -30,6 +30,10 @@ pub const MIN_POLL_INTERVAL_MS: u64 = 1000;
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 /// RFC 8628 §3.5: `slow_down` widens the interval by 5s.
 pub const SLOW_DOWN_INCREMENT_MS: u64 = 5000;
+/// Browser login: loopback callback (the client registration expects
+/// `localhost:1455`, the port the Codex CLI also uses).
+pub const BROWSER_CALLBACK_PORT: u16 = 1455;
+pub const BROWSER_CALLBACK_PATH: &str = "/auth/callback";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodexError {
@@ -45,6 +49,171 @@ pub enum CodexError {
     Transport(String),
     #[error("device flow: {0}")]
     DeviceFlow(String),
+}
+
+// ── Browser (PKCE) login ───────────────────────────────────────────────────
+
+/// PKCE verifier + challenge (RFC 7636 S256), matching pi's `generatePKCE`:
+/// verifier = base64url(32 random bytes), challenge = base64url(SHA-256(verifier)).
+pub fn generate_pkce() -> Result<(String, String), CodexError> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| CodexError::Transport(format!("random bytes: {e}")))?;
+    let verifier = base64_url_encode(&bytes);
+    let challenge = base64_url_encode(&sha256(verifier.as_bytes()));
+    Ok((verifier, challenge))
+}
+
+fn sha256(input: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    hasher.finalize().into()
+}
+
+/// base64url without padding (JWT payloads, PKCE values).
+pub fn base64_url_encode(input: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(A[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(A[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// Browser (PKCE) login flow: authorize URL plus what the callback and the
+/// paste-back path need to finish it.
+#[derive(Debug, Clone)]
+pub struct BrowserFlow {
+    pub auth_url: String,
+    pub redirect_uri: String,
+    pub verifier: String,
+    pub state: String,
+}
+
+/// Build the browser login flow for a callback listener on `port`.
+/// Mirrors the reference's `createAuthorizationFlow("pi")`.
+pub fn build_browser_flow(port: u16) -> Result<BrowserFlow, CodexError> {
+    let (verifier, challenge) = generate_pkce()?;
+    let mut state_bytes = [0u8; 16];
+    getrandom::fill(&mut state_bytes)
+        .map_err(|e| CodexError::Transport(format!("random bytes: {e}")))?;
+    let state = hex(&state_bytes);
+    let redirect_uri = format!("http://localhost:{port}{BROWSER_CALLBACK_PATH}");
+    let mut url = format!(
+        "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}",
+        auth_base_url(),
+        CLIENT_ID,
+        percent_encode(&redirect_uri),
+        percent_encode(SCOPE),
+    );
+    url.push_str(&format!(
+        "&code_challenge={challenge}&code_challenge_method=S256&state={state}"
+    ));
+    url.push_str("&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=pi");
+    Ok(BrowserFlow {
+        auth_url: url,
+        redirect_uri,
+        verifier,
+        state,
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse pasted authorization input: a full redirect URL, `code#state`,
+/// `code=..&state=..`, or a bare code (reference: `parseAuthorizationInput`).
+pub fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
+    let value = input.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+    // A full redirect URL (what the browser lands on when the callback port is
+    // unreachable) — the code/state live in its query string.
+    if value.starts_with("http://") || value.starts_with("https://") {
+        let query = value.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let query = query.split('#').next().unwrap_or(query);
+        return (query_param(query, "code"), query_param(query, "state"));
+    }
+    // `code#state` (OpenAI's paste format)
+    if let Some((code, state)) = value.split_once('#') {
+        let code = non_empty(code);
+        let state = non_empty(state);
+        if code.is_some() || state.is_some() {
+            return (code, state);
+        }
+    }
+    if value.contains("code=") {
+        return (query_param(value, "code"), query_param(value, "state"));
+    }
+    (non_empty(value), None)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// First `key=value` pair in a query string, percent-decoded.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k == key {
+            Some(percent_decode(v))
+        } else {
+            None
+        }
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 // ── Token manager ──────────────────────────────────────────────────────────
@@ -542,6 +711,15 @@ pub fn token_url() -> String {
     env_or("AIPROXY_CODEX_TOKEN_URL", TOKEN_URL)
 }
 
+/// Loopback callback port for browser login; `AIPROXY_CODEX_CALLBACK_PORT`
+/// overrides (test hook — 0 asks the OS for a free port).
+pub fn browser_callback_port() -> u16 {
+    std::env::var("AIPROXY_CODEX_CALLBACK_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(BROWSER_CALLBACK_PORT)
+}
+
 /// Device-flow + token endpoints for one auth base URL.
 #[derive(Debug, Clone)]
 pub struct CodexEndpoints {
@@ -924,6 +1102,101 @@ mod tests {
         assert_eq!(
             codex_responses_url(""),
             "https://chatgpt.com/backend-api/codex/responses"
+        );
+    }
+
+    // ── browser (PKCE) flow ────────────────────────────────────────────────
+
+    #[test]
+    fn pkce_matches_rfc7636_vector() {
+        // RFC 7636 appendix B: verifier → S256 challenge.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = base64_url_encode(&sha256(verifier.as_bytes()));
+        assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn generate_pkce_is_urlsafe_and_challenge_derives_from_verifier() {
+        let (verifier, challenge) = generate_pkce().unwrap();
+        assert_eq!(verifier.len(), 43, "32 random bytes, base64url, no padding");
+        assert_eq!(challenge, base64_url_encode(&sha256(verifier.as_bytes())));
+        assert!(
+            !verifier.contains(['+', '/', '=']),
+            "verifier must be url-safe: {verifier}"
+        );
+        let (verifier2, _) = generate_pkce().unwrap();
+        assert_ne!(verifier, verifier2, "verifiers must not repeat");
+    }
+
+    #[test]
+    fn browser_flow_url_carries_the_reference_parameters() {
+        let flow = build_browser_flow(BROWSER_CALLBACK_PORT).unwrap();
+        assert_eq!(flow.redirect_uri, "http://localhost:1455/auth/callback");
+        assert!(
+            flow.auth_url
+                .starts_with("https://auth.openai.com/oauth/authorize?")
+        );
+        for expected in [
+            "response_type=code",
+            "client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+            "redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+            "scope=openid%20profile%20email%20offline_access",
+            "code_challenge_method=S256",
+            "id_token_add_organizations=true",
+            "codex_cli_simplified_flow=true",
+            "originator=pi",
+        ] {
+            assert!(
+                flow.auth_url.contains(expected),
+                "missing {expected}: {}",
+                flow.auth_url
+            );
+        }
+        let challenge = base64_url_encode(&sha256(flow.verifier.as_bytes()));
+        assert!(
+            flow.auth_url
+                .contains(&format!("code_challenge={challenge}")),
+            "challenge must derive from the verifier"
+        );
+        assert!(flow.auth_url.contains(&format!("state={}", flow.state)));
+        assert_eq!(flow.state.len(), 32, "16 random bytes as hex");
+    }
+
+    #[test]
+    fn browser_flow_redirect_uri_follows_the_bound_port() {
+        let flow = build_browser_flow(0).unwrap();
+        assert_eq!(flow.redirect_uri, "http://localhost:0/auth/callback");
+    }
+
+    #[test]
+    fn parse_authorization_input_matrix() {
+        // full redirect URL (what lands in the address bar when the callback
+        // port is unreachable)
+        assert_eq!(
+            parse_authorization_input("http://localhost:1455/auth/callback?code=abc&state=xyz"),
+            (Some("abc".into()), Some("xyz".into()))
+        );
+        // OpenAI paste format
+        assert_eq!(
+            parse_authorization_input("abc#xyz"),
+            (Some("abc".into()), Some("xyz".into()))
+        );
+        // query-string fragment
+        assert_eq!(
+            parse_authorization_input("code=abc&state=xyz"),
+            (Some("abc".into()), Some("xyz".into()))
+        );
+        // bare code
+        assert_eq!(
+            parse_authorization_input("  abc  "),
+            (Some("abc".into()), None)
+        );
+        // empty / garbage
+        assert_eq!(parse_authorization_input("   "), (None, None));
+        // percent-decoded values
+        assert_eq!(
+            parse_authorization_input("http://localhost:1455/auth/callback?code=a%2Fb&state=s"),
+            (Some("a/b".into()), Some("s".into()))
         );
     }
 

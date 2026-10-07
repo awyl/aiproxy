@@ -162,17 +162,18 @@ async fn wait_for_login(base: &str) {
     panic!("device login did not complete");
 }
 
-#[tokio::test]
-async fn codex_device_login_then_responses_relay_end_to_end() {
+/// Real daemon + mock ChatGPT auth server + mock Codex backend.
+struct Stack {
+    base: String,
+    auth: String,
+    backend: Arc<Backend>,
+    _dir: tempfile::TempDir,
+}
+
+async fn spawn_stack() -> Stack {
     let auth = spawn_auth_server().await;
     let backend = Arc::new(Backend::default());
     let codex_base = spawn_codex_backend(backend.clone()).await;
-
-    // Test hooks: point the device flow + token refresh at the mock auth server.
-    unsafe {
-        std::env::set_var("AIPROXY_CODEX_AUTH_BASE_URL", &auth);
-        std::env::set_var("AIPROXY_CODEX_TOKEN_URL", format!("{auth}/oauth/token"));
-    }
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("aiproxy.yaml");
@@ -184,80 +185,60 @@ async fn codex_device_login_then_responses_relay_end_to_end() {
     )
     .unwrap();
     let cfg = Config::load(&config_path).unwrap();
-    let (listener, router) = server::build(cfg, config_path.clone()).await.unwrap();
+    // Mock auth server + an OS-assigned loopback callback port, supplied
+    // explicitly rather than through process-global env hooks.
+    let options = server::CodexOptions {
+        auth_base_url: auth.clone(),
+        token_url: format!("{auth}/oauth/token"),
+        callback_port: 0,
+    };
+    let (listener, router) = server::build_with_options(cfg, config_path.clone(), None, options)
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    let base = format!("http://{addr}");
-
-    // 1. the catalog exposes the codex model on the responses surface
-    let models: Value = reqwest::Client::new()
-        .get(format!("{base}/v1/models"))
-        .bearer_auth("e2e-tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let entry = models["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["id"] == "openai-codex/gpt-5.6-sol")
-        .expect("codex model in catalog");
-    assert_eq!(entry["surface"], "responses");
-
-    // 2. before login the request fails with the /setup hint (no upstream hit)
-    let pre = reqwest::Client::new()
-        .post(format!("{base}/v1/responses"))
-        .bearer_auth("e2e-tok")
-        .json(&json!({"model": "openai-codex/gpt-5.6-sol", "input": "hi"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(pre.status(), 502);
-    let pre_body: Value = pre.json().await.unwrap();
-    assert!(
-        pre_body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("/setup"),
-        "got {pre_body}"
-    );
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
-
-    // 3. device login through the setup API, polled proxy-side
-    let start: Value = reqwest::Client::new()
-        .post(format!("{base}/api/codex/start"))
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(start["user_code"], "E2E1-2345");
-    assert_eq!(start["verification_uri"], format!("{auth}/codex/device"));
-    wait_for_login(&base).await;
-
-    // the token file lives next to the config file, owner-only
-    let state_path = dir.path().join("openai-codex-oauth-state.json");
-    let stored: Value =
-        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
-    assert_eq!(stored["refresh"], "rt_e2e");
-    assert_eq!(stored["access"], access_token());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+    Stack {
+        base: format!("http://{addr}"),
+        auth,
+        backend,
+        _dir: dir,
     }
+}
 
-    // 4. a streamed /v1/responses call relays the Codex SSE bytes verbatim
+/// The upstream wire-shape assertions shared by both login flows.
+fn assert_codex_wire(backend: &Backend) {
+    let seen = backend.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (headers, body) = &seen[0];
+    assert_eq!(
+        headers.get("authorization").map(String::as_str),
+        Some(format!("Bearer {}", access_token()).as_str())
+    );
+    assert_eq!(
+        headers.get("chatgpt-account-id").map(String::as_str),
+        Some("acct_e2e")
+    );
+    assert_eq!(headers.get("originator").map(String::as_str), Some("pi"));
+    assert_eq!(
+        headers.get("openai-beta").map(String::as_str),
+        Some("responses=experimental")
+    );
+    assert_eq!(
+        headers.get("session-id").map(String::as_str),
+        Some("e2e-session")
+    );
+    assert_eq!(body["store"], false);
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["instructions"], "You are a helpful assistant.");
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(body["text"], json!({"verbosity": "low"}));
+    assert!(body.get("max_output_tokens").is_none());
+}
+
+/// One streamed /v1/responses call, relayed verbatim.
+async fn streamed_responses_call(base: &str) -> String {
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/responses"))
         .bearer_auth("e2e-tok")
@@ -277,40 +258,112 @@ async fn codex_device_login_then_responses_relay_end_to_end() {
             .and_then(|v| v.to_str().ok()),
         Some("text/event-stream")
     );
-    let relayed = resp.text().await.unwrap();
-    assert_eq!(relayed, SSE, "SSE must be relayed verbatim");
+    resp.text().await.unwrap()
+}
 
-    // 5. the Codex backend saw the Codex wire shape
+#[tokio::test]
+async fn codex_browser_login_then_responses_relay_end_to_end() {
+    let Stack {
+        base,
+        auth: _auth,
+        backend,
+        _dir,
+    } = spawn_stack().await;
+
+    // pre-login: 502 with the /setup hint, and no upstream traffic
+    let pre = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("e2e-tok")
+        .json(&json!({"model": "openai-codex/gpt-5.6-sol", "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), 502);
+    let pre_body: Value = pre.json().await.unwrap();
+    assert!(
+        pre_body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/setup"),
+        "got {pre_body}"
+    );
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+
+    // browser login: the loopback callback finishes it
+    let start: Value = reqwest::Client::new()
+        .post(format!("{base}/api/codex/start"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start["state"], "authorizing", "got {start}");
+    assert_eq!(start["method"], "browser");
+    assert_eq!(start["callback_listening"], true);
+    let auth_url = start["auth_url"].as_str().unwrap();
+    // authorize URL follows the (mocked) auth base and carries the reference
+    // parameters
+    assert!(auth_url.contains("/oauth/authorize?"), "got {auth_url}");
+    for expected in [
+        "response_type=code",
+        "client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+        "code_challenge_method=S256",
+        "codex_cli_simplified_flow=true",
+        "originator=pi",
+    ] {
+        assert!(
+            auth_url.contains(expected),
+            "missing {expected}: {auth_url}"
+        );
+    }
+    let redirect_uri = start["redirect_uri"].as_str().unwrap().to_string();
+    let state = auth_url
+        .split("state=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .unwrap();
+
+    let callback = reqwest::Client::new()
+        .get(format!("{redirect_uri}?code=ac_e2e_browser&state={state}"))
+        .send()
+        .await
+        .expect("loopback callback");
+    assert_eq!(callback.status(), 200);
+    assert!(
+        callback.text().await.unwrap().contains("Login complete"),
+        "callback must confirm the login"
+    );
+
+    let status: Value = reqwest::get(format!("{base}/api/codex/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "logged_in", "got {status}");
+
+    // token file lives next to the config file, owner-only
+    let state_path = _dir.path().join("openai-codex-oauth-state.json");
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(stored["refresh"], "rt_e2e");
+    assert_eq!(stored["access"], access_token());
+    #[cfg(unix)]
     {
-        let seen = backend.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1);
-        let (headers, body) = &seen[0];
+        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            headers.get("authorization").map(String::as_str),
-            Some(format!("Bearer {}", access_token()).as_str())
+            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
-        assert_eq!(
-            headers.get("chatgpt-account-id").map(String::as_str),
-            Some("acct_e2e")
-        );
-        assert_eq!(headers.get("originator").map(String::as_str), Some("pi"));
-        assert_eq!(
-            headers.get("openai-beta").map(String::as_str),
-            Some("responses=experimental")
-        );
-        assert_eq!(
-            headers.get("session-id").map(String::as_str),
-            Some("e2e-session")
-        );
-        assert_eq!(body["store"], false);
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["instructions"], "You are a helpful assistant.");
-        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-        assert_eq!(body["text"], json!({"verbosity": "low"}));
-        assert!(body.get("max_output_tokens").is_none());
     }
 
-    // 6. the chat surface stays closed for a codex model
+    // the streamed relay, and the Codex wire shape the backend saw
+    assert_eq!(streamed_responses_call(&base).await, SSE);
+    assert_codex_wire(&backend);
+
+    // chat surface stays closed for a codex model
     let chat = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth("e2e-tok")
@@ -332,4 +385,50 @@ async fn codex_device_login_then_responses_relay_end_to_end() {
         1,
         "no extra upstream calls"
     );
+}
+
+#[tokio::test]
+async fn codex_device_login_then_responses_relay_end_to_end() {
+    let Stack {
+        base,
+        auth,
+        backend,
+        _dir,
+    } = spawn_stack().await;
+
+    // catalog exposes the codex model on the responses surface
+    let models: Value = reqwest::Client::new()
+        .get(format!("{base}/v1/models"))
+        .bearer_auth("e2e-tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "openai-codex/gpt-5.6-sol")
+        .expect("codex model in catalog");
+    assert_eq!(entry["surface"], "responses");
+
+    // device-code fallback: the proxy polls, so this finishes on its own
+    let start: Value = reqwest::Client::new()
+        .post(format!("{base}/api/codex/start?method=device"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start["state"], "pending", "got {start}");
+    assert_eq!(start["user_code"], "E2E1-2345");
+    assert_eq!(start["verification_uri"], format!("{auth}/codex/device"));
+    wait_for_login(&base).await;
+
+    assert_eq!(streamed_responses_call(&base).await, SSE);
+    assert_codex_wire(&backend);
 }

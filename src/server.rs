@@ -23,6 +23,27 @@ pub enum ServerError {
     Config(#[from] crate::config::ConfigError),
 }
 
+/// Codex OAuth endpoints + loopback callback port. Defaults come from the env
+/// hooks (`AIPROXY_CODEX_AUTH_BASE_URL`, `AIPROXY_CODEX_TOKEN_URL`,
+/// `AIPROXY_CODEX_CALLBACK_PORT`) so integration tests can point a real daemon
+/// at mock servers instead of mutating process-global env mid-run.
+#[derive(Debug, Clone)]
+pub struct CodexOptions {
+    pub auth_base_url: String,
+    pub token_url: String,
+    pub callback_port: u16,
+}
+
+impl CodexOptions {
+    pub fn from_env() -> Self {
+        Self {
+            auth_base_url: crate::codex_oauth::auth_base_url(),
+            token_url: crate::codex_oauth::token_url(),
+            callback_port: crate::codex_oauth::browser_callback_port(),
+        }
+    }
+}
+
 /// Build the app. Binds per `config.bind` unless `port_override` is set
 /// (CLI `--port`), which replaces the port portion of the bind string.
 /// `config_path` locates on-disk state that sits next to the config file
@@ -32,12 +53,23 @@ pub async fn build_with_port(
     config_path: std::path::PathBuf,
     port_override: Option<u16>,
 ) -> Result<(TcpListener, Router), ServerError> {
+    build_with_options(config, config_path, port_override, CodexOptions::from_env()).await
+}
+
+/// `build_with_port` with the Codex endpoints supplied explicitly.
+pub async fn build_with_options(
+    config: Config,
+    config_path: std::path::PathBuf,
+    port_override: Option<u16>,
+    codex: CodexOptions,
+) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
     let port = port_override.unwrap_or(port);
 
     let codex_managers = Arc::new(crate::providers::create_codex_managers(
         &config,
         Some(config_path.as_path()),
+        &codex.token_url,
     ));
     let providers = build_providers(&config, &codex_managers);
     let registry = Arc::new(ModelRegistry::new(providers));
@@ -107,8 +139,9 @@ pub async fn build_with_port(
         subscriptions,
         usage: usage.clone(),
         codex_managers: codex_managers.clone(),
-        codex_auth_base: crate::codex_oauth::auth_base_url(),
+        codex_auth_base: codex.auth_base_url.clone(),
         codex_flows: Default::default(),
+        codex_callback_port: codex.callback_port,
     };
 
     // Background usage fetcher for upstreams with billing endpoints.
@@ -191,6 +224,7 @@ pub async fn build_with_port(
         .route("/usage", get(crate::pages::usage_page))
         .route("/setup", get(crate::setup::setup_page))
         .route("/api/codex/start", post(crate::setup::codex_start))
+        .route("/api/codex/complete", post(crate::setup::codex_complete))
         .route("/api/codex/status", get(crate::setup::codex_status))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
         .merge(anthropic_router_with_subs(

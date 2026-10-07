@@ -219,6 +219,8 @@ pub struct AppState {
     pub codex_auth_base: String,
     /// Live device-code login flows by provider id (see `crate::setup`).
     pub codex_flows: crate::setup::CodexFlows,
+    /// Loopback port the browser login binds (default 1455; 0 in tests).
+    pub codex_callback_port: u16,
 }
 
 /// Which agent-facing error schema to speak when translating failures.
