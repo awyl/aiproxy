@@ -77,9 +77,10 @@ upstreams:
     discover: true          # safe: GET /v1/models is keyless (396 models)
 
   # ChatGPT / Codex subscription (ChatGPT Plus or Pro) — Responses surface only.
-  # NO API KEY: authentication is the ChatGPT OAuth device-code login. Start the
-  # proxy, open http://127.0.0.1:8080/setup, and enter the code it shows at
-  # https://auth.openai.com/codex/device. Tokens live in
+  # NO API KEY: authentication is the ChatGPT OAuth login. Start the proxy and
+  # open http://127.0.0.1:8080/setup — browser login (PKCE) by default, returning
+  # to localhost:1455; paste the redirect URL if that port is taken or the proxy
+  # is remote; "Use device code" runs the headless flow. Tokens live in
   # `openai-codex-oauth-state.json` next to this config file (mode 0600) and are
   # refreshed automatically. There is no model-discovery endpoint, so list the
   # models explicitly (`discover: true` is ignored with a warning).
