@@ -6,7 +6,7 @@
 //! `pi-ai/dist/api/openai-codex-responses.js`.
 
 use axum::body::Bytes;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 // ── Constants (mirror the reference verbatim) ───────────────────────────────
@@ -39,6 +39,8 @@ pub enum CodexError {
     LoggedOut,
     #[error("codex upstream error {status}: {body}")]
     Http { status: u16, body: Value },
+    #[error("refresh token rejected (invalid_grant) — open /setup")]
+    InvalidGrant,
     #[error("transport: {0}")]
     Transport(String),
     #[error("device flow: {0}")]
@@ -216,6 +218,315 @@ pub fn codex_headers(access: &str, account_id: &str, session_id: Option<&str>) -
 fn hdr(map: &mut HeaderMap, name: &'static str, value: &str) {
     if let Ok(v) = HeaderValue::from_str(value) {
         map.insert(HeaderName::from_static(name), v);
+    }
+}
+
+// ── Endpoint resolution (env-overridable test hooks) ────────────────────────
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Auth base URL; `AIPROXY_CODEX_AUTH_BASE_URL` overrides (test hook).
+pub fn auth_base_url() -> String {
+    env_or("AIPROXY_CODEX_AUTH_BASE_URL", AUTH_BASE_URL)
+}
+
+/// Token endpoint; `AIPROXY_CODEX_TOKEN_URL` overrides (test hook).
+pub fn token_url() -> String {
+    env_or("AIPROXY_CODEX_TOKEN_URL", TOKEN_URL)
+}
+
+pub fn device_user_code_url() -> String {
+    format!("{}/api/accounts/deviceauth/usercode", auth_base_url())
+}
+
+pub fn device_token_url() -> String {
+    format!("{}/api/accounts/deviceauth/token", auth_base_url())
+}
+
+pub fn device_verification_uri() -> String {
+    format!("{}/codex/device", auth_base_url())
+}
+
+pub fn device_redirect_uri() -> String {
+    format!("{}/deviceauth/callback", auth_base_url())
+}
+
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ── Device-code flow ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceFlow {
+    pub device_auth_id: String,
+    pub user_code: String,
+    pub interval_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCredentials {
+    pub authorization_code: String,
+    pub code_verifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollStatus {
+    Pending,
+    SlowDown { interval_secs: Option<u64> },
+    Complete(DeviceCredentials),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Tokens {
+    pub access: String,
+    pub refresh: String,
+    pub expires_at_ms: u64,
+}
+
+/// `POST {url}` with `{"client_id": CLIENT_ID}` → device code + user code.
+pub async fn start_device_flow(client: &reqwest::Client, url: &str) -> Result<DeviceFlow, CodexError> {
+    let resp = client
+        .post(url)
+        .json(&json!({"client_id": CLIENT_ID}))
+        .send()
+        .await
+        .map_err(|e| CodexError::Transport(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status == 404 {
+        return Err(CodexError::DeviceFlow(
+            "OpenAI Codex device code login is not enabled for this server".into(),
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return Err(CodexError::DeviceFlow(format!(
+            "device code request failed with status {status}{}",
+            detail(&text)
+        )));
+    }
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|e| CodexError::DeviceFlow(format!("invalid device code response: {e}")))?;
+    let device_auth_id = json
+        .get("device_auth_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let user_code = json
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    // The reference accepts a numeric string for `interval` too.
+    let interval = json.get("interval").and_then(|v| match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    });
+    match (device_auth_id, user_code, interval) {
+        (Some(device_auth_id), Some(user_code), Some(interval_secs)) => Ok(DeviceFlow {
+            device_auth_id: device_auth_id.to_string(),
+            user_code: user_code.to_string(),
+            interval_secs,
+        }),
+        _ => Err(CodexError::DeviceFlow(format!(
+            "invalid device code response: {text}"
+        ))),
+    }
+}
+
+/// One poll of `POST {url}` with `{device_auth_id, user_code}`.
+pub async fn poll_device_flow(
+    client: &reqwest::Client,
+    url: &str,
+    flow: &DeviceFlow,
+) -> Result<PollStatus, CodexError> {
+    let resp = client
+        .post(url)
+        .json(&json!({
+            "device_auth_id": flow.device_auth_id,
+            "user_code": flow.user_code,
+        }))
+        .send()
+        .await
+        .map_err(|e| CodexError::Transport(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if (200..300).contains(&status) {
+        let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let code = json
+            .get("authorization_code")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let verifier = json
+            .get("code_verifier")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        return match (code, verifier) {
+            (Some(authorization_code), Some(code_verifier)) => {
+                Ok(PollStatus::Complete(DeviceCredentials {
+                    authorization_code: authorization_code.to_string(),
+                    code_verifier: code_verifier.to_string(),
+                }))
+            }
+            _ => Err(CodexError::DeviceFlow(format!(
+                "invalid device auth token response: {text}"
+            ))),
+        };
+    }
+    if status == 403 || status == 404 {
+        return Ok(PollStatus::Pending);
+    }
+    match error_code(&text).as_deref() {
+        Some("deviceauth_authorization_pending") => Ok(PollStatus::Pending),
+        Some("slow_down") => Ok(PollStatus::SlowDown {
+            interval_secs: None,
+        }),
+        _ => Err(CodexError::DeviceFlow(format!(
+            "device auth failed with status {status}{}",
+            detail(&text)
+        ))),
+    }
+}
+
+fn detail(text: &str) -> String {
+    if text.trim().is_empty() {
+        String::new()
+    } else {
+        format!(": {text}")
+    }
+}
+
+/// `error.code` or `error` from an OAuth-style error body.
+fn error_code(text: &str) -> Option<String> {
+    let json: Value = serde_json::from_str(text).ok()?;
+    match json.get("error")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("code")?.as_str().map(str::to_string),
+        _ => None,
+    }
+}
+
+// ── Token exchange + refresh ───────────────────────────────────────────────
+
+/// Exchange an authorization code (form-encoded, per the reference).
+pub async fn exchange_code(
+    client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<Tokens, CodexError> {
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("client_id", CLIENT_ID),
+        ("code", code),
+        ("code_verifier", verifier),
+        ("redirect_uri", redirect_uri),
+    ];
+    let resp = client
+        .post(token_url)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(form_encode(&form))
+        .send()
+        .await
+        .map_err(|e| CodexError::Transport(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    parse_tokens(status, &text, None)
+}
+
+/// Refresh an access token. `existing_refresh` is kept when the server omits
+/// `refresh_token` (rotation safety; the reference always sends one).
+pub async fn refresh_tokens(
+    client: &reqwest::Client,
+    token_url: &str,
+    refresh: &str,
+) -> Result<Tokens, CodexError> {
+    let form = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh),
+        ("client_id", CLIENT_ID),
+    ];
+    let resp = client
+        .post(token_url)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(form_encode(&form))
+        .send()
+        .await
+        .map_err(|e| CodexError::Transport(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    parse_tokens(status, &text, Some(refresh))
+}
+
+/// `application/x-www-form-urlencoded` body (reqwest's `form()` needs a feature
+/// this crate does not enable).
+fn form_encode(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn parse_tokens(
+    status: u16,
+    text: &str,
+    existing_refresh: Option<&str>,
+) -> Result<Tokens, CodexError> {
+    let json: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        if (status == 400 || status == 401) && text.contains("invalid_grant") {
+            return Err(CodexError::InvalidGrant);
+        }
+        let body = if json.is_null() {
+            json!({"error": text})
+        } else {
+            json
+        };
+        return Err(CodexError::Http { status, body });
+    }
+    let access = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let refresh = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| existing_refresh.map(str::to_string));
+    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
+    match (access, refresh, expires_in) {
+        (Some(access), Some(refresh), Some(expires_in)) => Ok(Tokens {
+            access,
+            refresh,
+            expires_at_ms: now_ms() + expires_in * 1000,
+        }),
+        _ => Err(CodexError::DeviceFlow(format!(
+            "token response missing fields: {text}"
+        ))),
     }
 }
 
@@ -399,5 +710,348 @@ mod tests {
         let h = codex_headers("tok", "acct", None);
         assert!(get(&h, "session-id").is_none());
         assert!(get(&h, "x-client-request-id").is_none());
+    }
+
+    // ── device-code + token client tests ───────────────────────────────────
+
+    use axum::Json;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    type Seen = Arc<StdMutex<(String, String)>>;
+
+    async fn spawn_router(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn capture(state: Seen, headers: HeaderMap, body: String) {
+        let ctype = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        *state.lock().unwrap() = (ctype, body);
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn device_start_parses_numeric_string_interval_and_sends_client_id() {
+        let seen: Seen = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().route(
+            "/usercode",
+            post(move |headers: HeaderMap, body: String| {
+                let s = s.clone();
+                async move {
+                    capture(s, headers, body);
+                    Json(json!({
+                        "device_auth_id": "dev_1",
+                        "user_code": "ABCD-EFGH",
+                        "interval": "3"
+                    }))
+                }
+            }),
+        );
+        let base = spawn_router(app).await;
+        let flow = start_device_flow(&client(), &format!("{base}/usercode"))
+            .await
+            .unwrap();
+        assert_eq!(flow.device_auth_id, "dev_1");
+        assert_eq!(flow.user_code, "ABCD-EFGH");
+        assert_eq!(flow.interval_secs, 3);
+        let (_, body) = seen.lock().unwrap().clone();
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["client_id"], CLIENT_ID);
+    }
+
+    #[tokio::test]
+    async fn device_start_404_is_device_flow_error() {
+        let app = axum::Router::new().route(
+            "/usercode",
+            post(|| async { StatusCode::NOT_FOUND.into_response() }),
+        );
+        let base = spawn_router(app).await;
+        let err = start_device_flow(&client(), &format!("{base}/usercode"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not enabled"),
+            "got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_poll_pending_then_complete_and_sends_device_shape() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen: Seen = Default::default();
+        let (c, s) = (calls.clone(), seen.clone());
+        let app = axum::Router::new().route(
+            "/token",
+            post(move |headers: HeaderMap, body: String| {
+                let (c, s) = (c.clone(), s.clone());
+                async move {
+                    capture(s, headers, body);
+                    if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (StatusCode::FORBIDDEN, Json(json!({}))).into_response()
+                    } else {
+                        Json(json!({
+                            "authorization_code": "ac_1",
+                            "code_verifier": "cv_1"
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let base = spawn_router(app).await;
+        let url = format!("{base}/token");
+        let flow = DeviceFlow {
+            device_auth_id: "dev_1".into(),
+            user_code: "CODE".into(),
+            interval_secs: 5,
+        };
+        assert_eq!(
+            poll_device_flow(&client(), &url, &flow).await.unwrap(),
+            PollStatus::Pending
+        );
+        let done = poll_device_flow(&client(), &url, &flow).await.unwrap();
+        assert_eq!(
+            done,
+            PollStatus::Complete(DeviceCredentials {
+                authorization_code: "ac_1".into(),
+                code_verifier: "cv_1".into(),
+            })
+        );
+        let (_, body) = seen.lock().unwrap().clone();
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["device_auth_id"], "dev_1");
+        assert_eq!(v["user_code"], "CODE");
+    }
+
+    #[tokio::test]
+    async fn device_poll_authorization_pending_error_code_is_pending() {
+        let app = axum::Router::new().route(
+            "/token",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"code": "deviceauth_authorization_pending"}})),
+                )
+                    .into_response()
+            }),
+        );
+        let base = spawn_router(app).await;
+        let flow = DeviceFlow {
+            device_auth_id: "d".into(),
+            user_code: "c".into(),
+            interval_secs: 5,
+        };
+        assert_eq!(
+            poll_device_flow(&client(), &format!("{base}/token"), &flow)
+                .await
+                .unwrap(),
+            PollStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn device_poll_slow_down_is_reported() {
+        let app = axum::Router::new().route(
+            "/token",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "slow_down"})),
+                )
+                    .into_response()
+            }),
+        );
+        let base = spawn_router(app).await;
+        let flow = DeviceFlow {
+            device_auth_id: "d".into(),
+            user_code: "c".into(),
+            interval_secs: 5,
+        };
+        assert_eq!(
+            poll_device_flow(&client(), &format!("{base}/token"), &flow)
+                .await
+                .unwrap(),
+            PollStatus::SlowDown {
+                interval_secs: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn device_poll_other_error_is_device_flow_error() {
+        let app = axum::Router::new().route(
+            "/token",
+            post(|| async {
+                (StatusCode::BAD_REQUEST, Json(json!({"error": {"code": "boom"}})))
+                    .into_response()
+            }),
+        );
+        let base = spawn_router(app).await;
+        let flow = DeviceFlow {
+            device_auth_id: "d".into(),
+            user_code: "c".into(),
+            interval_secs: 5,
+        };
+        let err = poll_device_flow(&client(), &format!("{base}/token"), &flow)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CodexError::DeviceFlow(_)), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn exchange_code_sends_form_shape_and_parses_tokens() {
+        let seen: Seen = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(move |headers: HeaderMap, body: String| {
+                let s = s.clone();
+                async move {
+                    capture(s, headers, body);
+                    Json(json!({
+                        "access_token": "at_1",
+                        "refresh_token": "rt_1",
+                        "expires_in": 3600
+                    }))
+                }
+            }),
+        );
+        let base = spawn_router(app).await;
+        let before = now_ms();
+        let tokens = exchange_code(
+            &client(),
+            &format!("{base}/oauth/token"),
+            "ac_1",
+            "cv_1",
+            "https://auth.openai.com/deviceauth/callback",
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokens.access, "at_1");
+        assert_eq!(tokens.refresh, "rt_1");
+        assert!(tokens.expires_at_ms >= before + 3_600_000);
+        let (ctype, body) = seen.lock().unwrap().clone();
+        assert!(
+            ctype.starts_with("application/x-www-form-urlencoded"),
+            "got {ctype}"
+        );
+        assert!(body.contains("grant_type=authorization_code"), "got {body}");
+        assert!(body.contains(&format!("client_id={CLIENT_ID}")), "got {body}");
+        assert!(body.contains("code=ac_1"), "got {body}");
+        assert!(body.contains("code_verifier=cv_1"), "got {body}");
+        assert!(
+            body.contains("redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback"),
+            "got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_missing_refresh_token_is_error() {
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(|| async { Json(json!({"access_token": "at", "expires_in": 10})) }),
+        );
+        let base = spawn_router(app).await;
+        let err = exchange_code(&client(), &format!("{base}/oauth/token"), "c", "v", "r")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing fields"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn refresh_sends_form_shape_without_scope() {
+        let seen: Seen = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(move |headers: HeaderMap, body: String| {
+                let s = s.clone();
+                async move {
+                    capture(s, headers, body);
+                    Json(json!({
+                        "access_token": "at_2",
+                        "refresh_token": "rt_2",
+                        "expires_in": 60
+                    }))
+                }
+            }),
+        );
+        let base = spawn_router(app).await;
+        let tokens = refresh_tokens(&client(), &format!("{base}/oauth/token"), "rt_1")
+            .await
+            .unwrap();
+        assert_eq!(tokens.refresh, "rt_2");
+        let (ctype, body) = seen.lock().unwrap().clone();
+        assert!(ctype.starts_with("application/x-www-form-urlencoded"));
+        assert!(body.contains("grant_type=refresh_token"), "got {body}");
+        assert!(body.contains("refresh_token=rt_1"), "got {body}");
+        assert!(body.contains(&format!("client_id={CLIENT_ID}")), "got {body}");
+        assert!(!body.contains("scope="), "no scope in refresh: {body}");
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_old_token_when_response_omits_it() {
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(|| async { Json(json!({"access_token": "at_2", "expires_in": 60})) }),
+        );
+        let base = spawn_router(app).await;
+        let tokens = refresh_tokens(&client(), &format!("{base}/oauth/token"), "rt_1")
+            .await
+            .unwrap();
+        assert_eq!(tokens.refresh, "rt_1");
+    }
+
+    #[tokio::test]
+    async fn refresh_invalid_grant_maps_to_invalid_grant() {
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_grant"})),
+                )
+                    .into_response()
+            }),
+        );
+        let base = spawn_router(app).await;
+        let err = refresh_tokens(&client(), &format!("{base}/oauth/token"), "rt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CodexError::InvalidGrant), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn refresh_http_error_is_http_error() {
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            post(|| async {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"oops": true})))
+                    .into_response()
+            }),
+        );
+        let base = spawn_router(app).await;
+        let err = refresh_tokens(&client(), &format!("{base}/oauth/token"), "rt")
+            .await
+            .unwrap_err();
+        match err {
+            CodexError::Http { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Http, got {other}"),
+        }
     }
 }
