@@ -8,6 +8,7 @@
 use axum::body::Bytes;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 // ── Constants (mirror the reference verbatim) ───────────────────────────────
 
@@ -807,6 +808,112 @@ pub fn auth_base_url() -> String {
 }
 
 /// Token endpoint; `AIPROXY_CODEX_TOKEN_URL` overrides (test hook).
+/// Conventional runtime dir in the container image (`VOLUME /runtime`), where
+/// the opencode-go cookies and the parked Anthropic OAuth state also lived.
+pub const RUNTIME_DIR: &str = "/runtime";
+
+/// Which directory holds the Codex OAuth state. In order:
+///
+/// 1. `AIPROXY_CODEX_STATE_DIR` — explicit override;
+/// 2. `AIPROXY_RUNTIME_DIR` — the shared runtime dir (cookies used this);
+/// 3. `/runtime`, when it exists (the container image declares it a volume);
+/// 4. the config file's directory — bare-metal installs with no runtime dir.
+///
+/// The runtime dir matters because the config file is often mounted *by file*
+/// (`-v ./aiproxy.yaml:/etc/aiproxy/aiproxy.yaml:ro`), which leaves
+/// `/etc/aiproxy` an anonymous volume that is recreated empty with the
+/// container — taking a login stored there with it.
+pub fn codex_state_dir(config_path: Option<&Path>) -> PathBuf {
+    let explicit = non_empty_env("AIPROXY_CODEX_STATE_DIR");
+    let runtime_env = non_empty_env("AIPROXY_RUNTIME_DIR");
+    let config_dir = config_dir_of(config_path);
+    pick_state_dir(
+        explicit,
+        runtime_env,
+        Path::new(RUNTIME_DIR).is_dir(),
+        &config_dir,
+    )
+}
+
+fn non_empty_env(key: &str) -> Option<PathBuf> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn config_dir_of(config_path: Option<&Path>) -> PathBuf {
+    config_path
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Pure preference order behind [`codex_state_dir`] (the filesystem check is
+/// passed in so it can be tested without a real `/runtime`).
+fn pick_state_dir(
+    explicit: Option<PathBuf>,
+    runtime_env: Option<PathBuf>,
+    runtime_exists: bool,
+    config_dir: &Path,
+) -> PathBuf {
+    explicit
+        .or(runtime_env)
+        .or_else(|| runtime_exists.then(|| PathBuf::from(RUNTIME_DIR)))
+        .unwrap_or_else(|| config_dir.to_path_buf())
+}
+
+/// State file for one `openai-codex` upstream: `{dir}/{provider-id}-oauth-state.json`.
+/// The provider id keeps multiple subscriptions apart (`openai-codex=alice`).
+///
+/// A state file left at the old config-dir location is **moved** into the state
+/// dir the first time it is resolved, so a login made before this change keeps
+/// working and lands in the directory that survives a container recreate. If the
+/// move is impossible (unwritable runtime dir), the old path is kept and logged —
+/// an existing login is never stranded.
+pub fn codex_state_path(config_path: Option<&Path>, provider_id: &str) -> PathBuf {
+    let name = format!("{provider_id}-oauth-state.json");
+    let target = codex_state_dir(config_path).join(&name);
+    let legacy = config_dir_of(config_path).join(&name);
+    if legacy == target || !legacy.exists() || target.exists() {
+        return target;
+    }
+    match migrate_state_file(&legacy, &target) {
+        Ok(()) => {
+            tracing::info!(
+                from = %legacy.display(),
+                to = %target.display(),
+                "moved codex credentials into the state dir"
+            );
+            target
+        }
+        Err(e) => {
+            tracing::warn!(
+                from = %legacy.display(),
+                to = %target.display(),
+                "could not move codex credentials ({e}); keeping the existing file"
+            );
+            legacy
+        }
+    }
+}
+
+fn migrate_state_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // different filesystems: copy first, remove only after it landed
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)
+        }
+    }
+}
+
 pub fn token_url() -> String {
     env_or("AIPROXY_CODEX_TOKEN_URL", TOKEN_URL)
 }
@@ -1123,16 +1230,152 @@ mod tests {
     // `config`'s tests).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn set_env_guarded(key: &str, value: &str) -> impl Drop {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var(key, value) };
-        struct Guard(String);
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var(&self.0) };
+    fn set_env_guarded(key: &str, value: &str) -> EnvGuard {
+        set_envs_guarded(&[(key, value)])
+    }
+
+    struct EnvGuard(
+        Vec<String>,
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    );
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                unsafe { std::env::remove_var(key) };
             }
         }
-        Guard(key.to_string())
+    }
+
+    /// Set several env vars for the body of one test, holding the lock for the
+    /// whole body (env is process-global; tests run in parallel).
+    fn set_envs_guarded(pairs: &[(&str, &str)]) -> EnvGuard {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (key, value) in pairs {
+            unsafe { std::env::set_var(key, value) };
+        }
+        EnvGuard(pairs.iter().map(|(k, _)| k.to_string()).collect(), lock)
+    }
+
+    // ── state file location ────────────────────────────────────────────
+
+    #[test]
+    fn state_dir_preference_order() {
+        let cfg = PathBuf::from("/etc/aiproxy");
+        // explicit dir for codex state wins
+        assert_eq!(
+            pick_state_dir(
+                Some(PathBuf::from("/a")),
+                Some(PathBuf::from("/b")),
+                true,
+                &cfg
+            ),
+            PathBuf::from("/a")
+        );
+        // then the shared runtime dir
+        assert_eq!(
+            pick_state_dir(None, Some(PathBuf::from("/b")), true, &cfg),
+            PathBuf::from("/b")
+        );
+        // then the conventional /runtime, when it exists
+        assert_eq!(
+            pick_state_dir(None, None, true, &cfg),
+            PathBuf::from("/runtime")
+        );
+        // then the config file's own directory (bare-metal installs)
+        assert_eq!(pick_state_dir(None, None, false, &cfg), cfg);
+        // a config path with no directory component resolves to "."
+        assert_eq!(config_dir_of(None), PathBuf::from("."));
+        assert_eq!(
+            config_dir_of(Some(Path::new("aiproxy.yaml"))),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn codex_state_dir_reads_the_env_overrides() {
+        let _g = set_envs_guarded(&[
+            ("AIPROXY_CODEX_STATE_DIR", "/tmp/codex-explicit"),
+            ("AIPROXY_RUNTIME_DIR", "/tmp/runtime-shared"),
+        ]);
+        assert_eq!(
+            codex_state_dir(Some(std::path::Path::new("/etc/aiproxy/aiproxy.yaml"))),
+            PathBuf::from("/tmp/codex-explicit")
+        );
+    }
+
+    #[test]
+    fn codex_state_dir_falls_back_to_the_runtime_env() {
+        let _g = set_envs_guarded(&[("AIPROXY_RUNTIME_DIR", "/tmp/runtime-shared")]);
+        assert_eq!(
+            codex_state_dir(Some(std::path::Path::new("/etc/aiproxy/aiproxy.yaml"))),
+            PathBuf::from("/tmp/runtime-shared")
+        );
+    }
+
+    #[test]
+    fn codex_state_path_moves_a_config_dir_file_into_the_runtime_dir() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let legacy = config.path().join("openai-codex-oauth-state.json");
+        save_persisted(
+            &legacy,
+            &Tokens {
+                access: "at_legacy".into(),
+                refresh: "rt_legacy".into(),
+                expires_at_ms: now_ms() + 3_600_000,
+            },
+        )
+        .unwrap();
+        let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", runtime.path().to_str().unwrap());
+
+        let path = codex_state_path(Some(&config.path().join("aiproxy.yaml")), "openai-codex");
+        assert_eq!(path, runtime.path().join("openai-codex-oauth-state.json"));
+        assert!(
+            path.exists(),
+            "the state file must follow into the runtime dir"
+        );
+        assert!(
+            !legacy.exists(),
+            "the fragile config-dir copy must be gone after the move"
+        );
+        // the login survives: a manager on the new path reads the same tokens
+        let manager = CodexTokenManager::new(&path, "http://127.0.0.1:1/oauth/token");
+        assert_eq!(
+            manager.state_path(),
+            path.as_path(),
+            "the manager must use the runtime path"
+        );
+        assert!(matches!(
+            futures::executor::block_on(manager.status()),
+            CodexStatus::LoggedIn { .. }
+        ));
+    }
+
+    #[test]
+    fn codex_state_path_keeps_the_old_location_when_it_cannot_move() {
+        let config = tempfile::tempdir().unwrap();
+        let legacy = config.path().join("openai-codex-oauth-state.json");
+        save_persisted(
+            &legacy,
+            &Tokens {
+                access: "at_legacy".into(),
+                refresh: "rt_legacy".into(),
+                expires_at_ms: now_ms() + 3_600_000,
+            },
+        )
+        .unwrap();
+        // a "runtime dir" whose parent is a file: create_dir_all fails
+        let blocker = config.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let unusable = blocker.join("state");
+        let _g = set_env_guarded("AIPROXY_CODEX_STATE_DIR", unusable.to_str().unwrap());
+
+        let path = codex_state_path(Some(&config.path().join("aiproxy.yaml")), "openai-codex");
+        assert_eq!(
+            path, legacy,
+            "an unusable runtime dir must not strand the existing login"
+        );
+        assert!(path.exists());
     }
 
     /// base64url (no padding) encoder, independent of the implementation.

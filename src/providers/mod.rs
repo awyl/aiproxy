@@ -205,15 +205,13 @@ pub fn create_codex_managers(
     let Some(config_path) = config_path else {
         return managers;
     };
-    let dir = config_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
     let token_url = token_url.to_string();
     for (u, id) in cfg.upstreams.iter().zip(cfg.provider_ids()) {
         if u.kind == UpstreamKind::OpenAiCodex {
-            let state_path = dir.join(format!("{id}-oauth-state.json"));
+            // Runtime dir when there is one (it survives a container recreate),
+            // else next to the config file; per provider id, so two
+            // subscriptions never share a file.
+            let state_path = crate::codex_oauth::codex_state_path(Some(config_path), &id);
             managers.insert(
                 id.clone(),
                 Arc::new(crate::codex_oauth::CodexTokenManager::new(
@@ -423,5 +421,38 @@ upstreams:
         );
         // no config path -> no managers (unit-test fallback in build_providers)
         assert!(create_codex_managers(&cfg, None, "http://127.0.0.1:1/oauth/token").is_empty());
+    }
+
+    #[test]
+    fn create_codex_managers_gives_each_subscription_its_own_state_file() {
+        let cfg = Config::from_yaml(
+            "upstreams:\n  - { kind: openai-codex, name: alice, models: [m] }\n  - { kind: openai-codex, name: bob, models: [m] }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.provider_ids(),
+            vec!["openai-codex=alice", "openai-codex=bob"],
+            "two subscriptions must get distinct provider ids"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("aiproxy.yaml");
+        let managers =
+            create_codex_managers(&cfg, Some(&config_path), "http://127.0.0.1:1/oauth/token");
+        assert_eq!(managers.len(), 2);
+        let alice = managers.get("openai-codex=alice").expect("alice manager");
+        let bob = managers.get("openai-codex=bob").expect("bob manager");
+        assert_eq!(
+            alice.state_path(),
+            dir.path().join("openai-codex=alice-oauth-state.json")
+        );
+        assert_eq!(
+            bob.state_path(),
+            dir.path().join("openai-codex=bob-oauth-state.json")
+        );
+        assert_ne!(
+            alice.state_path(),
+            bob.state_path(),
+            "subscriptions must never share a state file"
+        );
     }
 }
