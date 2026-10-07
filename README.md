@@ -110,6 +110,8 @@ embeddings:
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
+Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/reload`** to re-run discovery and see per-upstream results (`POST /api/reload` returns the same JSON: one entry per upstream with its model count, or the probe's error). A login to `openai-codex` triggers this automatically.
+
 ### ChatGPT / Codex subscription (`openai-codex`)
 
 Runs Codex models on a ChatGPT Plus/Pro subscription instead of an API key:
@@ -144,6 +146,14 @@ model-refresh tick and offers the entries the picker is allowed to show (`visibi
 `models:` list is optional; when present it is the fallback if the probe cannot answer
 (logged out, offline, upstream error). Without either, the catalog stays empty until login.
 - Not logged in yet? Requests fail `502` with a hint to open `/setup`.
+
+**Credentials and reloading models.** `/api/codex/status` reports the exact path the
+proxy reads (`state_path`) and whether a file is actually there (`state_file`), and the
+same path is logged at startup as `codex credentials path=… logged_in=…`. That is the
+first thing to check when a login seems to vanish after a restart: the path follows the
+**config file's directory**, so a container that mounts only `aiproxy.yaml` loses
+`openai-codex-oauth-state.json` when it is recreated. A successful login also re-runs
+discovery on its own, so the models appear without a restart.
 
 Plan usage/limits for the subscription are not fetched (deferred).
 

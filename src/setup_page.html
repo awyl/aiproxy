@@ -10,6 +10,7 @@
          max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
   h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
   p.sub { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .creds { font-size: 0.8rem; color: #666; word-break: break-all; }
   .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
   .card h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
   .state { font-weight: 600; }
@@ -77,6 +78,15 @@ let pasteValue = '';
 let pasteFocused = false;
 let lastKey = null;
 
+function creds(s) {
+  if (!s.state_path) return '';
+  const f = s.state_file || {};
+  const where = f.exists
+    ? 'credentials file present (' + f.size + ' bytes)'
+    : 'no credentials file — a login writes it';
+  return '<p class="msg creds"><code>' + s.state_path + '</code><br>' + where + '</p>';
+}
+
 function render(s) {
   const el = document.getElementById('cards');
   const name = s.provider || 'openai-codex';
@@ -87,7 +97,7 @@ function render(s) {
   let body;
   if (s.state === 'logged_in') {
     body = '<p class="state ok">Connected</p>' +
-      '<p class="msg">Codex models are ready through this proxy.</p>';
+      '<p class="msg">Codex models are ready through this proxy. If your client\'s model list is still empty, re-run discovery on the <a href="/reload">/reload</a> page, then reload the client.</p>';
     clearInterval(timer); timer = null;
   } else if (s.state === 'authorizing') {
     // Browser (PKCE) login — pi's default flow. Nothing listens on the
@@ -119,7 +129,7 @@ function render(s) {
       '<p class="msg">Browser login opens auth.openai.com and returns to localhost:1455. Device code is for headless or remote proxies.</p>';
     clearInterval(timer); timer = null;
   }
-  el.innerHTML = '<div class="card"><h2>' + name + '</h2>' + body + '</div>';
+  el.innerHTML = '<div class="card"><h2>' + name + '</h2>' + body + creds(s) + '</div>';
   // Restore what the user was doing before the card was replaced.
   const box = document.getElementById('paste');
   if (box) {

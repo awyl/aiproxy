@@ -13,6 +13,9 @@ bind: 127.0.0.1:8080          # listen "host:port"; 0.0.0.0:8080 = all interface
                                # (reverse proxy recommended for anything public)
 token_env: AIPROXY_TOKEN           # or token: "literal". Omit both = auth disabled.
 model_refresh_secs: 0              # discovery interval; 0 = fetch once at startup (default)
+                               # Re-run discovery any time at http://127.0.0.1:8080/reload
+                               # (or POST /api/reload) — it shows each upstream's result,
+                               # which is how you see why an upstream has no models.
 
 # Multi-subscription: give each upstream its own bearer token. The token both
 # authenticates the request AND locks it to that subscription's models; requests
@@ -85,8 +88,10 @@ upstreams:
   # authorize, the browser is sent to localhost:1455/auth/callback and fails to
   # load (nothing listens there); copy that URL from the address bar and paste it
   # into the page. "Use device code" runs the headless flow instead. Tokens live
-  # in `openai-codex-oauth-state.json` next to this config file (mode 0600) and
-  # are refreshed automatically. Model discovery is on by default (`discover:` is
+  # in `openai-codex-oauth-state.json` next to THIS config file (mode 0600) and
+  # are refreshed automatically — mount that directory, not just the config file,
+  # or the login is gone after a container restart. /setup and /api/codex/status
+  # show the exact path; a successful login re-runs discovery by itself. Model discovery is on by default (`discover:` is
   # implicit for this kind); the `models:` list is the fallback for a failed probe.
   # Agent-facing ids: openai-codex/gpt-5.6-sol → POST /v1/responses
   # - kind: openai-codex           # provider ID = "openai-codex"

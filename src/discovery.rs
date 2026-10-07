@@ -23,6 +23,17 @@ impl std::fmt::Debug for ModelRegistry {
     }
 }
 
+/// Outcome of one provider's discovery round (`refresh_report`).
+#[derive(Debug, Clone)]
+pub struct RefreshOutcome {
+    pub id: String,
+    /// Models now in the catalog for this provider (last-known count if the
+    /// probe failed).
+    pub models: usize,
+    /// `None` when the probe answered; the failure otherwise.
+    pub error: Option<String>,
+}
+
 impl ModelRegistry {
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         Self {
@@ -35,29 +46,46 @@ impl ModelRegistry {
     /// timeout. Failing providers are logged and skipped; last-known
     /// catalog entries for them are retained.
     pub async fn refresh(&self) {
+        let _ = self.refresh_report().await;
+    }
+
+    /// One discovery round, reporting per provider what happened — the same
+    /// work as `refresh`, but the failures come back to the caller instead of
+    /// only reaching the log (`POST /api/reload` shows them).
+    pub async fn refresh_report(&self) -> Vec<RefreshOutcome> {
         let mut set = JoinSet::new();
         for p in &self.providers {
             let p = p.clone();
             set.spawn(async move {
                 let deadline = tokio::time::timeout(Duration::from_secs(10), p.list_models());
-                let models = match deadline.await {
-                    Ok(Ok(models)) => models,
+                match deadline.await {
+                    Ok(Ok(models)) => (p.id().to_string(), Some(models), None),
                     Ok(Err(e)) => {
                         tracing::warn!(provider = %p.id(), "model discovery failed: {e:?}");
-                        return None;
+                        (p.id().to_string(), None, Some(format!("{e:?}")))
                     }
                     Err(_) => {
                         tracing::warn!(provider = %p.id(), "model discovery timed out");
-                        return None;
+                        (
+                            p.id().to_string(),
+                            None,
+                            Some("timed out after 10s".to_string()),
+                        )
                     }
-                };
-                Some((p.id().to_string(), models))
+                }
             });
         }
         let mut updated: BTreeMap<String, Vec<Model>> = BTreeMap::new();
+        let mut failed: Vec<(String, String)> = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok(Some((id, models))) = res {
-                updated.insert(id, models);
+            if let Ok((id, models, error)) = res {
+                match (models, error) {
+                    (Some(models), _) => {
+                        updated.insert(id, models);
+                    }
+                    (None, Some(error)) => failed.push((id, error)),
+                    (None, None) => {}
+                }
             }
         }
         // retain last-known entries for providers that failed this round
@@ -67,7 +95,29 @@ impl ModelRegistry {
                 updated.entry(id.clone()).or_insert_with(|| models.clone());
             }
         }
+        // counts come after the retain, so they show what a client will actually
+        // see (a failed probe keeps serving last-known models)
+        let mut report: Vec<RefreshOutcome> = updated
+            .iter()
+            .map(|(id, models)| RefreshOutcome {
+                id: id.clone(),
+                models: models.len(),
+                error: None,
+            })
+            .collect();
+        for (id, error) in failed {
+            match report.iter_mut().find(|r| r.id == id) {
+                Some(entry) => entry.error = Some(error),
+                None => report.push(RefreshOutcome {
+                    id,
+                    models: 0,
+                    error: Some(error),
+                }),
+            }
+        }
+        report.sort_by(|a, b| a.id.cmp(&b.id));
         *self.catalog.write().unwrap() = updated;
+        report
     }
 
     /// Flattened prefixed catalog, sorted by id, deduplicated.
@@ -126,6 +176,31 @@ mod tests {
                 vec!["claude-sonnet-4".into()],
             )),
         ]
+    }
+
+    #[tokio::test]
+    async fn refresh_report_names_each_provider_and_its_failure() {
+        let reg = ModelRegistry::new(vec![
+            Arc::new(MockProvider::new("openai", vec!["gpt-4o".into()])),
+            Arc::new(MockProvider::failing("openai-codex")),
+        ]);
+        let report = reg.refresh_report().await;
+        assert_eq!(report.len(), 2, "one entry per provider");
+        let openai = report.iter().find(|r| r.id == "openai").unwrap();
+        assert_eq!(openai.models, 1);
+        assert_eq!(openai.error, None);
+        let codex = report.iter().find(|r| r.id == "openai-codex").unwrap();
+        assert_eq!(codex.models, 0);
+        assert!(
+            codex
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mock failure"),
+            "a failed probe must be reported, not silent: {codex:?}"
+        );
+        // the failing provider's last-known entries are still retained
+        assert!(reg.models().iter().any(|m| m.id == "openai/gpt-4o"));
     }
 
     #[tokio::test]

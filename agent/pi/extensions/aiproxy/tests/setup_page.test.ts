@@ -24,6 +24,8 @@ const AUTHORIZING = {
   auth_url: "https://auth.openai.com/oauth/authorize?x=1",
   redirect_uri: "http://localhost:1455/auth/callback",
   expires_in: 900,
+  state_path: "/srv/aiproxy/openai-codex-oauth-state.json",
+  state_file: { exists: false },
 };
 
 interface Posted {
@@ -155,6 +157,25 @@ describe("setup page", () => {
 
     expect(cardText(dom)).toContain("Waiting for the browser login");
     expect(cardText(dom)).not.toContain("state mismatch");
+  });
+
+  it("shows where credentials are looked for", async () => {
+    const { dom } = await page(AUTHORIZING);
+    expect(cardText(dom)).toContain("/srv/aiproxy/openai-codex-oauth-state.json");
+    expect(cardText(dom)).toContain("no credentials file");
+  });
+
+  it("points at /reload once connected", async () => {
+    const { dom } = await page({
+      provider: "openai-codex",
+      state: "logged_in",
+      state_path: "/srv/aiproxy/openai-codex-oauth-state.json",
+      state_file: { exists: true, size: 412 },
+    });
+    expect(cardText(dom)).toContain("Connected");
+    expect(cardText(dom)).toContain("credentials file present (412 bytes)");
+    const link = dom.window.document.querySelector(".card a");
+    expect(link?.getAttribute("href")).toBe("/reload");
   });
 
   it("does not re-render an unchanged status into the DOM", async () => {

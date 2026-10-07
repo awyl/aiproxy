@@ -77,6 +77,16 @@ pub async fn build_with_options(
     // any access token inside the 60-minute margin. The manager coalesces
     // concurrent refreshes and backs off on failures.
     for manager in codex_managers.values() {
+        // Say where credentials are looked for, at boot. "The login vanished
+        // after a restart" is almost always this path pointing at a directory
+        // that did not survive the restart (e.g. only the config file is
+        // mounted), and the log is the only place that shows it.
+        let state = manager.status().await;
+        tracing::info!(
+            path = %manager.state_path().display(),
+            logged_in = matches!(state, crate::codex_oauth::CodexStatus::LoggedIn { .. }),
+            "codex credentials"
+        );
         let manager = manager.clone();
         tokio::spawn(async move {
             loop {
@@ -219,6 +229,8 @@ pub async fn build_with_options(
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/usage", get(crate::pages::usage_page))
+        .route("/reload", get(crate::pages::reload_page))
+        .route("/api/reload", post(crate::pages::reload_models))
         .route("/setup", get(crate::setup::setup_page))
         .route("/api/codex/start", post(crate::setup::codex_start))
         .route("/api/codex/complete", post(crate::setup::codex_complete))

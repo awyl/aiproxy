@@ -318,6 +318,7 @@ async fn start_device_flow(
         endpoints,
         device,
         client,
+        state.registry.clone(),
     );
     Ok(Json(response))
 }
@@ -377,6 +378,7 @@ pub async fn codex_complete(
     };
 
     finish_browser_login(&state, &id, &manager, &code, &verifier, &redirect_uri).await?;
+    spawn_discovery_after_login(state.registry.clone());
     Ok(Json(json!({"provider": id, "state": "logged_in"})))
 }
 
@@ -406,6 +408,35 @@ async fn finish_browser_login(
     )
     .await;
     Ok(())
+}
+
+/// What is on disk at the credential path: existence, size, and mtime. Reported
+/// by `GET /api/codex/status` so a login that "disappeared" can be traced to a
+/// path that no longer has a file behind it.
+fn state_file_json(path: &std::path::Path) -> Value {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let mtime_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let mode = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    format!("{:o}", meta.permissions().mode() & 0o777)
+                }
+                #[cfg(not(unix))]
+                {
+                    String::new()
+                }
+            };
+            json!({"exists": true, "size": meta.len(), "mtime_ms": mtime_ms, "mode": mode})
+        }
+        Err(_) => json!({"exists": false}),
+    }
 }
 
 async fn current_flow_id(flows: &CodexFlows, id: &str) -> Option<u64> {
@@ -456,7 +487,31 @@ pub async fn codex_status(
             }
         }
     }
+    // Where the credentials are looked for, and what is actually there. This is
+    // the difference between "the login vanished" and "the file is elsewhere":
+    // the path follows the config file's directory, so a container that mounts
+    // only the config file loses the state file when it is recreated.
+    body["state_path"] = json!(manager.state_path().display().to_string());
+    body["state_file"] = state_file_json(manager.state_path());
     Ok(Json(body))
+}
+
+/// A login just changed what the upstream can answer, so re-run discovery.
+/// Discovery otherwise only happens at startup (`model_refresh_secs: 0`), which
+/// left the Codex catalog empty until the proxy was restarted. Spawned, so the
+/// login response does not wait on upstream probes.
+fn spawn_discovery_after_login(registry: Arc<crate::discovery::ModelRegistry>) {
+    tokio::spawn(async move {
+        let report = registry.refresh_report().await;
+        for p in &report {
+            tracing::info!(
+                provider = %p.id,
+                models = p.models,
+                error = p.error.as_deref().unwrap_or(""),
+                "model discovery refreshed after login"
+            );
+        }
+    });
 }
 
 /// Write this flow's result, but never over a newer flow's slot: a `fresh`
@@ -470,6 +525,7 @@ async fn set_flow_state(flows: &CodexFlows, id: &str, flow_id: u64, state: Codex
 }
 
 /// Background poll loop: pending → slow_down → complete → exchange → store.
+#[allow(clippy::too_many_arguments)]
 fn spawn_poll_loop(
     flows: CodexFlows,
     id: String,
@@ -478,6 +534,7 @@ fn spawn_poll_loop(
     endpoints: CodexEndpoints,
     device: DeviceFlow,
     client: reqwest::Client,
+    registry: Arc<crate::discovery::ModelRegistry>,
 ) {
     tokio::spawn(async move {
         let deadline = codex_oauth::now_ms() + DEVICE_CODE_TIMEOUT_SECS * 1000;
@@ -523,7 +580,11 @@ fn spawn_poll_loop(
                         Err(e) => Err(e),
                     };
                     let state = match result {
-                        Ok(()) => CodexFlowState::LoggedIn,
+                        Ok(()) => {
+                            // the upstream just gained a subscription: re-probe
+                            spawn_discovery_after_login(registry.clone());
+                            CodexFlowState::LoggedIn
+                        }
                         Err(e) => CodexFlowState::Failed(e.to_string()),
                     };
                     set_flow_state(&flows, &id, flow_id, state).await;
@@ -676,7 +737,6 @@ mod tests {
             crate::provider::ModelSurface::Responses,
         ))];
         let registry = crate::discovery::ModelRegistry::new(providers);
-        registry.refresh().await;
         let mut managers = HashMap::new();
         managers.insert(provider_id.to_string(), manager.clone());
         let flows: CodexFlows = Default::default();
@@ -716,6 +776,98 @@ mod tests {
             .unwrap();
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    /// GET a route and parse the JSON body.
+    async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        body_json(resp).await
+    }
+
+    #[tokio::test]
+    async fn status_reports_where_credentials_live() {
+        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
+        let e = env(&auth, "openai-codex").await;
+        let state_path = e.manager.state_path().to_path_buf();
+
+        // logged out: the path is reported, and the file is not there
+        let (status, body) = get_json(router(&e.state), "/api/codex/status").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "logged_out", "got {body}");
+        assert_eq!(body["state_path"], state_path.display().to_string());
+        assert_eq!(body["state_file"]["exists"], false);
+
+        // after a login the same path reports a real file — this is the line to
+        // check when a restart appears to lose the login
+        let body = start_browser(&e).await;
+        let state = state_of(&body);
+        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
+        let (status, body) = post_json(
+            router(&e.state),
+            "/api/codex/complete",
+            &json!({"input": format!("{redirect_uri}?code=ac_paste&state={state}")}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+
+        let (_, body) = get_json(router(&e.state), "/api/codex/status").await;
+        assert_eq!(body["state"], "logged_in", "got {body}");
+        assert_eq!(body["state_file"]["exists"], true, "got {body}");
+        assert!(
+            body["state_file"]["size"].as_u64().unwrap_or(0) > 0,
+            "got {body}"
+        );
+        assert!(
+            body["state_file"]["mtime_ms"].as_u64().unwrap_or(0) > 0,
+            "got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_triggers_model_discovery() {
+        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
+        let e = env(&auth, "openai-codex").await;
+        // The catalog starts empty (discovery runs at startup in production).
+        assert!(
+            e.state.registry.models().is_empty(),
+            "fixture must start with an unpopulated catalog"
+        );
+
+        let body = start_browser(&e).await;
+        let state = state_of(&body);
+        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
+        let (status, body) = post_json(
+            router(&e.state),
+            "/api/codex/complete",
+            &json!({"input": format!("{redirect_uri}?code=ac_paste&state={state}")}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+
+        // The refresh is spawned (the login response must not wait on upstream
+        // probes), so poll briefly for it to land.
+        let mut ids: Vec<String> = Vec::new();
+        for _ in 0..100 {
+            ids = e
+                .state
+                .registry
+                .models()
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            if !ids.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            ids,
+            vec!["openai-codex/gpt-5.6-sol"],
+            "a login must re-run discovery so clients see the new catalog"
+        );
     }
 
     #[tokio::test]
