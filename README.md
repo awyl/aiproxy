@@ -124,13 +124,14 @@ upstreams:
 the ChatGPT OAuth login, stored in `{config-dir}/openai-codex-oauth-state.json` (mode
 `0600`) next to your config file.
 - **Log in at `http://<proxy>/setup`** — browser login by default (PKCE, like pi's own
-Codex login): the page opens `auth.openai.com` and the callback returns to
-`localhost:1455`, so it works when the browser is on the proxy's machine. If port 1455
-is taken or the proxy is remote, the page accepts the pasted redirect URL
-(`http://localhost:1455/auth/callback?code=…&state=…`) instead; a **Use device code**
-button runs the headless flow (enter the code at `auth.openai.com/codex/device`, proxy
-polls for you). Tokens are refreshed in the background (and on a `401`, once,
-mid-request).
+Codex login): the page opens `auth.openai.com`, and when you authorize, the browser is
+sent to `http://localhost:1455/auth/callback?code=…&state=…`. **Nothing listens on that
+port**, so the browser shows a connection error — that is expected. Copy the whole URL
+out of the address bar and paste it into the page (`POST /api/codex/complete`), which
+works for a remote or containerized proxy and never fights the Codex CLI for 1455. A
+**Use device code** button runs the headless flow instead (enter the code at
+`auth.openai.com/codex/device`, proxy polls for you). Tokens are refreshed in the
+background (and on a `401`, once, mid-request).
 - **Responses surface only**: agents call `POST /v1/responses` with
 `openai-codex/<model>`; `/v1/chat/completions` and `/v1/messages` are rejected for these
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,

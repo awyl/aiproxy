@@ -81,12 +81,13 @@ upstreams:
 
   # ChatGPT / Codex subscription (ChatGPT Plus or Pro) — Responses surface only.
   # NO API KEY: authentication is the ChatGPT OAuth login. Start the proxy and
-  # open http://127.0.0.1:8080/setup — browser login (PKCE) by default, returning
-  # to localhost:1455; paste the redirect URL if that port is taken or the proxy
-  # is remote; "Use device code" runs the headless flow. Tokens live in
-  # `openai-codex-oauth-state.json` next to this config file (mode 0600) and are
-  # refreshed automatically. There is no model-discovery endpoint, so list the
-  # models explicitly (`discover: true` is ignored with a warning).
+  # open http://127.0.0.1:8080/setup — browser login (PKCE) by default. After you
+  # authorize, the browser is sent to localhost:1455/auth/callback and fails to
+  # load (nothing listens there); copy that URL from the address bar and paste it
+  # into the page. "Use device code" runs the headless flow instead. Tokens live
+  # in `openai-codex-oauth-state.json` next to this config file (mode 0600) and
+  # are refreshed automatically. Model discovery is on by default (`discover:` is
+  # implicit for this kind); the `models:` list is the fallback for a failed probe.
   # Agent-facing ids: openai-codex/gpt-5.6-sol → POST /v1/responses
   # - kind: openai-codex           # provider ID = "openai-codex"
   #   models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5]

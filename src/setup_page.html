@@ -90,14 +90,14 @@ function render(s) {
       '<p class="msg">Codex models are ready through this proxy.</p>';
     clearInterval(timer); timer = null;
   } else if (s.state === 'authorizing') {
-    // Browser (PKCE) login — pi's default flow.
+    // Browser (PKCE) login — pi's default flow. Nothing listens on the
+    // callback port, so the browser always ends on a dead page and the user
+    // pastes the URL back.
     body = '<p class="state wait">Waiting for the browser login</p>' +
       '<div class="row"><button onclick="window.open(\'' + s.auth_url + '\', \'_blank\')">Open ChatGPT login</button>' +
       '<button class="secondary" onclick="start(false, true)">Use device code</button></div>' +
-      (s.callback_listening
-        ? '<p class="msg">Finish the login in the opened tab — this page will update on its own.</p>'
-        : '<p class="msg">Port 1455 is busy (another Codex login is probably running), so the callback cannot land here. Authorize in the opened tab, then copy the <code>localhost:1455/auth/callback?...</code> URL from the address bar and paste it below.</p>') +
-      pasteBox('Or paste the redirect URL / authorization code here:');
+      '<p class="msg">Authorize in the opened tab. It will then try to open <code>' + s.redirect_uri + '</code> and fail with a connection error — that is expected (nothing listens there). Copy that whole URL out of the address bar and paste it below.</p>' +
+      pasteBox('Paste the redirect URL / authorization code here:');
     if (!timer) timer = setInterval(refresh, 2000);
   } else if (s.state === 'pending') {
     // Device-code fallback (headless).

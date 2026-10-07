@@ -23,15 +23,14 @@ pub enum ServerError {
     Config(#[from] crate::config::ConfigError),
 }
 
-/// Codex OAuth endpoints + loopback callback port. Defaults come from the env
-/// hooks (`AIPROXY_CODEX_AUTH_BASE_URL`, `AIPROXY_CODEX_TOKEN_URL`,
-/// `AIPROXY_CODEX_CALLBACK_PORT`) so integration tests can point a real daemon
-/// at mock servers instead of mutating process-global env mid-run.
+/// Codex OAuth endpoints. Defaults come from the env hooks
+/// (`AIPROXY_CODEX_AUTH_BASE_URL`, `AIPROXY_CODEX_TOKEN_URL`) so integration
+/// tests can point a real daemon at mock servers instead of mutating
+/// process-global env mid-run.
 #[derive(Debug, Clone)]
 pub struct CodexOptions {
     pub auth_base_url: String,
     pub token_url: String,
-    pub callback_port: u16,
 }
 
 impl CodexOptions {
@@ -39,7 +38,6 @@ impl CodexOptions {
         Self {
             auth_base_url: crate::codex_oauth::auth_base_url(),
             token_url: crate::codex_oauth::token_url(),
-            callback_port: crate::codex_oauth::browser_callback_port(),
         }
     }
 }
@@ -141,8 +139,6 @@ pub async fn build_with_options(
         codex_managers: codex_managers.clone(),
         codex_auth_base: codex.auth_base_url.clone(),
         codex_flows: Default::default(),
-        codex_callback_port: codex.callback_port,
-        codex_listeners: Default::default(),
     };
 
     // Background usage fetcher for upstreams with billing endpoints.

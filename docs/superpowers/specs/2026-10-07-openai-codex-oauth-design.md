@@ -22,9 +22,10 @@ Reference implementation (read byte-for-byte, replicated exactly — no guessing
    (pi's own Codex login offers the same two, with browser as the default —
    `openaiCodexOAuth.login` in the reference).
    - Browser: PKCE S256, `redirect_uri=http://localhost:1455/auth/callback` (the client
-     registration expects that exact loopback URL), proxy runs the callback listener.
-     If port 1455 is busy (the Codex CLI uses it too) or the proxy is remote, the page
-     accepts the pasted redirect URL — `POST /api/codex/complete`.
+     registration expects that exact loopback URL). **Nothing listens on that port**: the
+     browser lands on a connection error and the user pastes the redirect URL back —
+     `POST /api/codex/complete`. Works for a remote/containerized proxy and never contends
+     with the Codex CLI for 1455 (revision, see below).
    - Device: proxy-side poll loop, so the page can be closed mid-flow; headless/remote
      with no port requirements.
    - `fresh=true` starts a new flow without waiting out an old one; each flow carries a
@@ -77,11 +78,21 @@ upstreams:
 (reference `createAuthorizationFlow("pi")`). PKCE: verifier = base64url(32 random bytes),
 challenge = base64url(SHA-256(verifier)) — asserted against the RFC 7636 vector.
 
-The proxy binds `127.0.0.1:1455` (port 0 in tests → the OS picks, and the redirect URI
-uses the real port) and serves `GET /auth/callback`: validate `state`, exchange the code,
-persist tokens, mark the flow logged in, then answer a plain HTML confirmation and shut
-the listener down. Paste-back (`POST /api/codex/complete`) accepts a full redirect URL,
-`code#state`, `code=..&state=..`, or a bare code; a supplied `state` must match.
+No listener is bound. Paste-back (`POST /api/codex/complete`) accepts a full redirect
+URL, `code#state`, `code=..&state=..`, or a bare code; a supplied `state` must match; then
+the code is exchanged, tokens are persisted, and the flow is marked logged in.
+
+**Revision (post-implementation): the loopback callback listener was removed.** It was
+built first (bind `127.0.0.1:1455`, `GET /auth/callback`, graceful shutdown), and it
+bought one-click login only when the browser ran on the proxy's machine with 1455 free.
+It cost a listener lifecycle with three real defects, all found by tests: a second start
+reported "Port 1455 is busy" because the proxy's *own* previous flow still held the port;
+a successful paste-back kept the port bound until the 15-minute timeout (blocking the
+Codex CLI's own login); and a `notify_waiters` shutdown landing before the listener's
+first poll was lost. Paste-back alone covers every deployment, so the listener and its
+state (`codex_callback_port`, `codex_listeners`, `CodexOptions.callback_port`,
+`AIPROXY_CODEX_CALLBACK_PORT`, `callback_listening`) were deleted. `redirect_uri` is
+always the fixed `http://localhost:1455/auth/callback`.
 
 ### Device code (fallback)
 
@@ -218,13 +229,14 @@ chat→responses translation, browser-callback login, multi-account.
 
 ## Verification status
 
-- Unit + integration: `cargo test` (222 lib tests + `tests/codex_e2e.rs` browser and
+- Unit + integration: `cargo test` (231 lib tests + `tests/codex_e2e.rs` browser and
   device end-to-end runs against a real daemon with mock auth/Codex servers), clippy
-  clean, `cargo fmt` clean, extension vitest suite green.
+  clean, `cargo fmt` clean, extension vitest suite green — including jsdom tests that
+  drive the real `/setup` page (`agent/pi/extensions/aiproxy/tests/setup_page.test.ts`).
 - **Live smoke against the real ChatGPT backend was NOT run** (user chose to skip it).
-  The real authorize URL and a real loopback listener on 1455 were produced and
-  observed, and the device endpoint returned a real user code (so device login is
-  enabled for the account), but no real token exchange or upstream `/codex/responses`
+  The real authorize URL was produced and observed (and at the time a real loopback
+  listener on 1455), and the device endpoint returned a real user code (so device login
+  is enabled for the account), but no real token exchange or upstream `/codex/responses`
   call has been exercised. Treat live routing as unverified.
 
 ## Open items
@@ -232,9 +244,9 @@ chat→responses translation, browser-callback login, multi-account.
 - Whether the Codex backend tolerates any other field pi's Responses client sends
   (`max_output_tokens` is the only suspect today, and the transform drops it) — **still
   open**, since the live smoke was skipped.
-- Whether OpenAI's client registration accepts the dynamic loopback port used in tests
-  (`http://localhost:<ephemeral>/auth/callback`) — production always uses 1455, so this
-  only affects test fidelity, not real logins.
+- Whether OpenAI's client registration accepts a redirect URI other than the fixed 1455
+  loopback callback — moot now: the proxy always sends `http://localhost:1455/auth/callback`
+  (matching pi's login), whether or not anything listens there.
 - **Model discovery — implemented, live behaviour unconfirmed.** The Codex backend exposes
   `GET {codex_base}/models?client_version=X.Y.Z` (codex_base =
   `https://chatgpt.com/backend-api/codex`, `codex-rs/model-provider-info/src/lib.rs:80`):

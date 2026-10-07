@@ -185,12 +185,11 @@ async fn spawn_stack() -> Stack {
     )
     .unwrap();
     let cfg = Config::load(&config_path).unwrap();
-    // Mock auth server + an OS-assigned loopback callback port, supplied
-    // explicitly rather than through process-global env hooks.
+    // Mock auth server, supplied explicitly rather than through
+    // process-global env hooks.
     let options = server::CodexOptions {
         auth_base_url: auth.clone(),
         token_url: format!("{auth}/oauth/token"),
-        callback_port: 0,
     };
     let (listener, router) = server::build_with_options(cfg, config_path.clone(), None, options)
         .await
@@ -289,7 +288,7 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
     );
     assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
 
-    // browser login: the loopback callback finishes it
+    // browser login: the pasted redirect URL finishes it
     let start: Value = reqwest::Client::new()
         .post(format!("{base}/api/codex/start"))
         .json(&json!({}))
@@ -301,7 +300,6 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
         .unwrap();
     assert_eq!(start["state"], "authorizing", "got {start}");
     assert_eq!(start["method"], "browser");
-    assert_eq!(start["callback_listening"], true);
     let auth_url = start["auth_url"].as_str().unwrap();
     // authorize URL follows the (mocked) auth base and carries the reference
     // parameters
@@ -318,23 +316,23 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
             "missing {expected}: {auth_url}"
         );
     }
+    // No loopback listener: the redirect URI is the fixed 1455 callback the
+    // user pastes back after the browser fails to load it.
     let redirect_uri = start["redirect_uri"].as_str().unwrap().to_string();
+    assert_eq!(redirect_uri, "http://localhost:1455/auth/callback");
     let state = auth_url
         .split("state=")
         .nth(1)
         .and_then(|s| s.split('&').next())
         .unwrap();
 
-    let callback = reqwest::Client::new()
-        .get(format!("{redirect_uri}?code=ac_e2e_browser&state={state}"))
+    let complete = reqwest::Client::new()
+        .post(format!("{base}/api/codex/complete"))
+        .json(&json!({"input": format!("{redirect_uri}?code=ac_e2e_browser&state={state}")}))
         .send()
         .await
-        .expect("loopback callback");
-    assert_eq!(callback.status(), 200);
-    assert!(
-        callback.text().await.unwrap().contains("Login complete"),
-        "callback must confirm the login"
-    );
+        .expect("paste-back");
+    assert_eq!(complete.status(), 200, "got {complete:?}");
 
     let status: Value = reqwest::get(format!("{base}/api/codex/status"))
         .await

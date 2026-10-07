@@ -103,15 +103,18 @@ pub struct BrowserFlow {
     pub state: String,
 }
 
-/// Build the browser login flow for a callback listener on `port`.
-/// Mirrors the reference's `createAuthorizationFlow("pi")`.
-pub fn build_browser_flow(port: u16) -> Result<BrowserFlow, CodexError> {
+/// Build the browser login flow. The redirect URI is the fixed loopback
+/// callback (`http://localhost:1455/auth/callback`) that OpenAI has registered
+/// for this client — pi's own login uses the same one. Nothing listens there:
+/// the user pastes the URL the browser lands on. Mirrors the reference's
+/// `createAuthorizationFlow("pi")`.
+pub fn build_browser_flow() -> Result<BrowserFlow, CodexError> {
     let (verifier, challenge) = generate_pkce()?;
     let mut state_bytes = [0u8; 16];
     getrandom::fill(&mut state_bytes)
         .map_err(|e| CodexError::Transport(format!("random bytes: {e}")))?;
     let state = hex(&state_bytes);
-    let redirect_uri = format!("http://localhost:{port}{BROWSER_CALLBACK_PATH}");
+    let redirect_uri = format!("http://localhost:{BROWSER_CALLBACK_PORT}{BROWSER_CALLBACK_PATH}");
     let mut url = format!(
         "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}",
         auth_base_url(),
@@ -808,15 +811,6 @@ pub fn token_url() -> String {
     env_or("AIPROXY_CODEX_TOKEN_URL", TOKEN_URL)
 }
 
-/// Loopback callback port for browser login; `AIPROXY_CODEX_CALLBACK_PORT`
-/// overrides (test hook — 0 asks the OS for a free port).
-pub fn browser_callback_port() -> u16 {
-    std::env::var("AIPROXY_CODEX_CALLBACK_PORT")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(BROWSER_CALLBACK_PORT)
-}
-
 /// Device-flow + token endpoints for one auth base URL.
 #[derive(Debug, Clone)]
 pub struct CodexEndpoints {
@@ -1243,7 +1237,7 @@ mod tests {
 
     #[test]
     fn browser_flow_url_carries_the_reference_parameters() {
-        let flow = build_browser_flow(BROWSER_CALLBACK_PORT).unwrap();
+        let flow = build_browser_flow().unwrap();
         assert_eq!(flow.redirect_uri, "http://localhost:1455/auth/callback");
         assert!(
             flow.auth_url
@@ -1273,12 +1267,6 @@ mod tests {
         );
         assert!(flow.auth_url.contains(&format!("state={}", flow.state)));
         assert_eq!(flow.state.len(), 32, "16 random bytes as hex");
-    }
-
-    #[test]
-    fn browser_flow_redirect_uri_follows_the_bound_port() {
-        let flow = build_browser_flow(0).unwrap();
-        assert_eq!(flow.redirect_uri, "http://localhost:0/auth/callback");
     }
 
     #[test]

@@ -15,15 +15,14 @@ const PAGE = readFileSync(resolve(here, "../../../../../src/setup_page.html"), "
 
 const REDIRECT = "http://localhost:1455/auth/callback?code=ac_1&state=st_1";
 
-/** Waiting-for-paste status: the loopback port was busy, so the page asks the
- * user for the redirect URL. */
+/** Waiting-for-paste status: nothing listens on the callback port, so the page
+ * always asks the user for the redirect URL. */
 const AUTHORIZING = {
   provider: "openai-codex",
   state: "authorizing",
   method: "browser",
   auth_url: "https://auth.openai.com/oauth/authorize?x=1",
   redirect_uri: "http://localhost:1455/auth/callback",
-  callback_listening: false,
   expires_in: 900,
 };
 
@@ -90,9 +89,10 @@ async function tick(dom: JSDOM) {
 }
 
 describe("setup page", () => {
-  it("offers the paste box when the callback port is busy", async () => {
+  it("asks for the pasted redirect URL", async () => {
     const { dom } = await page(AUTHORIZING);
-    expect(cardText(dom)).toContain("Port 1455 is busy");
+    expect(cardText(dom)).toContain("http://localhost:1455/auth/callback");
+    expect(cardText(dom)).toContain("connection error");
     expect(pasteBox(dom).value).toBe("");
   });
 

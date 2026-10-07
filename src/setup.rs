@@ -31,15 +31,12 @@ pub enum CodexFlowState {
         /// stale poll loop can never overwrite a newer flow's state.
         flow_id: u64,
     },
-    /// Browser (PKCE) flow: waiting for the loopback callback or a pasted code.
+    /// Browser (PKCE) flow: waiting for the user to paste the redirect URL.
     Authorizing {
         auth_url: String,
         redirect_uri: String,
         verifier: String,
         state: String,
-        /// Whether the loopback callback listener bound (port 1455 is shared
-        /// with the Codex CLI; when it is taken, paste-back still works).
-        callback_listening: bool,
         started_at_ms: u64,
         flow_id: u64,
     },
@@ -76,11 +73,6 @@ impl CodexFlowState {
 }
 
 pub type CodexFlows = Arc<tokio::sync::Mutex<HashMap<String, CodexFlowState>>>;
-
-/// Loopback callback listeners by provider id, with the flow that owns them.
-/// The callback port is shared (1455 by default), so a listener has to be
-/// released before another flow — or the Codex CLI itself — can bind it.
-pub type CodexListeners = Arc<tokio::sync::Mutex<HashMap<String, (u64, Arc<tokio::sync::Notify>)>>>;
 
 /// Monotonic flow ids; see `CodexFlowState::Pending::flow_id`.
 static FLOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -205,7 +197,6 @@ fn flow_json(provider: &str, flow: Option<&CodexFlowState>) -> Value {
         Some(CodexFlowState::Authorizing {
             auth_url,
             redirect_uri,
-            callback_listening,
             ..
         }) => json!({
             "provider": provider,
@@ -213,7 +204,6 @@ fn flow_json(provider: &str, flow: Option<&CodexFlowState>) -> Value {
             "method": "browser",
             "auth_url": auth_url,
             "redirect_uri": redirect_uri,
-            "callback_listening": callback_listening,
             "expires_in": DEVICE_CODE_TIMEOUT_SECS,
         }),
         Some(CodexFlowState::LoggedIn) => json!({"provider": provider, "state": "logged_in"}),
@@ -265,23 +255,16 @@ pub async fn codex_start(
     }
 }
 
-/// Browser (PKCE) login: bind the loopback callback (best effort — paste-back
-/// covers a busy port), then hand the authorize URL to the page.
+/// Browser (PKCE) login: hand the authorize URL to the page. There is no
+/// loopback listener — the browser lands on a dead 1455 callback page and the
+/// user pastes that URL back (`POST /api/codex/complete`), which also works for
+/// a remote proxy and never fights the Codex CLI for the port.
 async fn start_browser_flow(
     state: &AppState,
     id: &str,
     manager: Arc<CodexTokenManager>,
 ) -> Result<Json<Value>, ApiError> {
-    let requested_port = state.codex_callback_port;
-    // This process may already be holding the callback port for a previous
-    // flow: reclaim it instead of reporting it busy (it is our own listener).
-    release_callback_listener(&state.codex_listeners, id).await;
-    let listener = bind_callback(requested_port).await;
-    let bound_port = match &listener {
-        Some(l) => l.local_addr().map(|a| a.port()).unwrap_or(requested_port),
-        None => requested_port,
-    };
-    let flow = codex_oauth::build_browser_flow(bound_port)
+    let flow = codex_oauth::build_browser_flow()
         .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let flow_id = next_flow_id();
     let state_entry = CodexFlowState::Authorizing {
@@ -289,7 +272,6 @@ async fn start_browser_flow(
         redirect_uri: flow.redirect_uri.clone(),
         verifier: flow.verifier.clone(),
         state: flow.state.clone(),
-        callback_listening: listener.is_some(),
         started_at_ms: codex_oauth::now_ms(),
         flow_id,
     };
@@ -300,26 +282,8 @@ async fn start_browser_flow(
         .await
         .insert(id.to_string(), state_entry);
 
-    let shutdown = Arc::new(tokio::sync::Notify::new());
-    if let Some(listener) = listener {
-        state
-            .codex_listeners
-            .lock()
-            .await
-            .insert(id.to_string(), (flow_id, shutdown.clone()));
-        spawn_callback_listener(
-            listener,
-            state.codex_flows.clone(),
-            id.to_string(),
-            flow_id,
-            manager,
-            flow.verifier.clone(),
-            flow.state.clone(),
-            flow.redirect_uri.clone(),
-            shutdown.clone(),
-        );
-    }
-    spawn_browser_timeout(state.codex_flows.clone(), id.to_string(), flow_id, shutdown);
+    let _ = manager;
+    spawn_browser_timeout(state.codex_flows.clone(), id.to_string(), flow_id);
     Ok(Json(response))
 }
 
@@ -413,10 +377,6 @@ pub async fn codex_complete(
     };
 
     finish_browser_login(&state, &id, &manager, &code, &verifier, &redirect_uri).await?;
-    // The pasted code finished the login, so the loopback listener has nothing
-    // left to do — and holding 1455 would block the Codex CLI's own login and
-    // the next /setup flow (which would then wrongly report "port busy").
-    release_callback_listener(&state.codex_listeners, &id).await;
     Ok(Json(json!({"provider": id, "state": "logged_in"})))
 }
 
@@ -452,143 +412,9 @@ async fn current_flow_id(flows: &CodexFlows, id: &str) -> Option<u64> {
     flows.lock().await.get(id).and_then(CodexFlowState::flow_id)
 }
 
-/// Stop a flow's loopback listener and forget it. Idempotent: a listener that
-/// already exited (callback handled, state mismatch, timeout) is a no-op.
-async fn release_callback_listener(listeners: &CodexListeners, id: &str) {
-    if let Some((_, shutdown)) = listeners.lock().await.remove(id) {
-        // `notify_one` (not `notify_waiters`): the listener task may not have
-        // polled its shutdown future yet, and a lost wake-up would leave the
-        // port held. A stored permit is consumed on the first poll.
-        shutdown.notify_one();
-    }
-}
-
-/// Bind the loopback callback, retrying briefly: a listener released a moment
-/// ago (a fresh start, or a paste-back that just completed) can still hold the
-/// port for a few milliseconds.
-async fn bind_callback(port: u16) -> Option<tokio::net::TcpListener> {
-    const ATTEMPTS: u32 = 30;
-    for attempt in 1..=ATTEMPTS {
-        if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-            return Some(listener);
-        }
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        }
-    }
-    None
-}
-
-/// Loopback callback server for the browser flow (`GET /auth/callback`).
-#[allow(clippy::too_many_arguments)]
-fn spawn_callback_listener(
-    listener: tokio::net::TcpListener,
-    flows: CodexFlows,
-    id: String,
-    flow_id: u64,
-    manager: Arc<CodexTokenManager>,
-    verifier: String,
-    expected_state: String,
-    redirect_uri: String,
-    shutdown: Arc<tokio::sync::Notify>,
-) {
-    #[derive(Clone)]
-    struct CallbackState {
-        flows: CodexFlows,
-        id: String,
-        flow_id: u64,
-        manager: Arc<CodexTokenManager>,
-        verifier: String,
-        expected_state: String,
-        redirect_uri: String,
-        shutdown: Arc<tokio::sync::Notify>,
-    }
-
-    async fn callback(
-        State(cb): State<CallbackState>,
-        Query(params): Query<HashMap<String, String>>,
-    ) -> axum::response::Response {
-        use axum::response::IntoResponse;
-        let code = params.get("code").filter(|c| !c.is_empty());
-        let state_param = params.get("state");
-        if state_param.is_some_and(|s| s != &cb.expected_state) {
-            cb.shutdown.notify_waiters();
-            return (
-                StatusCode::BAD_REQUEST,
-                "State mismatch — start the login again from /setup.",
-            )
-                .into_response();
-        }
-        let Some(code) = code else {
-            return (
-                StatusCode::BAD_REQUEST,
-                "Missing authorization code — start the login again from /setup.",
-            )
-                .into_response();
-        };
-        let client = crate::providers::default_http_client();
-        let result = match codex_oauth::exchange_code(
-            &client,
-            cb.manager.token_url(),
-            code,
-            &cb.verifier,
-            &cb.redirect_uri,
-        )
-        .await
-        {
-            Ok(tokens) => cb.manager.store_tokens(tokens).await,
-            Err(e) => Err(e),
-        };
-        let response = match result {
-            Ok(()) => {
-                set_flow_state(&cb.flows, &cb.id, cb.flow_id, CodexFlowState::LoggedIn).await;
-                (StatusCode::OK, "Login complete — you can close this tab.").into_response()
-            }
-            Err(e) => {
-                set_flow_state(
-                    &cb.flows,
-                    &cb.id,
-                    cb.flow_id,
-                    CodexFlowState::Failed(e.to_string()),
-                )
-                .await;
-                (StatusCode::BAD_GATEWAY, format!("Login failed: {e}")).into_response()
-            }
-        };
-        cb.shutdown.notify_waiters();
-        response
-    }
-
-    let app = axum::Router::new()
-        .route(
-            codex_oauth::BROWSER_CALLBACK_PATH,
-            axum::routing::get(callback),
-        )
-        .with_state(CallbackState {
-            flows,
-            id,
-            flow_id,
-            manager,
-            verifier,
-            expected_state,
-            redirect_uri,
-            shutdown: shutdown.clone(),
-        });
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown.notified().await })
-            .await;
-    });
-}
-
 /// Browser flows expire like device flows; a stale timeout cannot clobber a
 /// newer flow.
-fn spawn_browser_timeout(
-    flows: CodexFlows,
-    id: String,
-    flow_id: u64,
-    shutdown: Arc<tokio::sync::Notify>,
-) {
+fn spawn_browser_timeout(flows: CodexFlows, id: String, flow_id: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(DEVICE_CODE_TIMEOUT_SECS)).await;
         set_flow_state(
@@ -598,7 +424,6 @@ fn spawn_browser_timeout(
             CodexFlowState::Failed("Login timed out".into()),
         )
         .await;
-        shutdown.notify_waiters();
     });
 }
 
@@ -839,12 +664,6 @@ mod tests {
     }
 
     async fn env(auth_base: &str, provider_id: &str) -> Env {
-        env_with_port(auth_base, provider_id, 0).await
-    }
-
-    /// `callback_port` 0 → the OS assigns a free port (tests); a busy port
-    /// exercises the paste-back fallback.
-    async fn env_with_port(auth_base: &str, provider_id: &str, callback_port: u16) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join(format!("{provider_id}-oauth-state.json"));
         let manager = Arc::new(CodexTokenManager::new(
@@ -872,8 +691,6 @@ mod tests {
             codex_managers: Arc::new(managers),
             codex_auth_base: auth_base.to_string(),
             codex_flows: flows.clone(),
-            codex_callback_port: callback_port,
-            codex_listeners: Default::default(),
         };
         Env {
             _dir: dir,
@@ -1156,18 +973,6 @@ mod tests {
         .await
     }
 
-    async fn get_uri(app: Router, uri: &str) -> (StatusCode, String) {
-        let resp = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (status, String::from_utf8_lossy(&bytes).to_string())
-    }
-
     /// Start a browser login and return the flow's authorize URL + state.
     async fn start_browser(e: &Env) -> Value {
         let (status, body) = post_json(router(&e.state), "/api/codex/start", "{}").await;
@@ -1188,171 +993,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_start_returns_authorize_url_and_binds_loopback() {
+    async fn browser_start_is_paste_back_only() {
         let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
         let e = env(&auth, "openai-codex").await;
         let body = start_browser(&e).await;
-        assert_eq!(body["callback_listening"], true);
-        let redirect_uri = body["redirect_uri"].as_str().unwrap();
-        assert!(
-            redirect_uri.starts_with("http://localhost:")
-                && redirect_uri.ends_with("/auth/callback"),
-            "got {redirect_uri}"
+        // No loopback listener: the redirect URI is always the fixed 1455
+        // callback, the browser lands on a dead page, and the user pastes the
+        // URL back. Nothing reports a listener state any more.
+        assert_eq!(
+            body["redirect_uri"], "http://localhost:1455/auth/callback",
+            "got {body}"
         );
-        // port 0 → the real bound port, and the auth URL advertises it
-        assert!(!redirect_uri.contains(":0/"), "bound port must be real");
         assert!(
             body["auth_url"]
                 .as_str()
                 .unwrap()
-                .contains("https://auth.openai.com/oauth/authorize?")
+                .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"),
+            "got {body}"
         );
-    }
-
-    #[tokio::test]
-    async fn browser_callback_completes_login() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        let e = env(&auth, "openai-codex").await;
-        let body = start_browser(&e).await;
-        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
-        let state = state_of(&body);
-
-        // what the browser would hit when the callback port is reachable — a
-        // real request to the loopback listener the flow bound
-        let resp = reqwest::Client::new()
-            .get(format!("{redirect_uri}?code=ac_browser&state={state}"))
-            .send()
-            .await
-            .expect("callback request");
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        assert_eq!(status, 200, "got {text}");
-        assert!(text.contains("Login complete"), "got {text}");
-
-        assert!(matches!(
-            e.manager.status().await,
-            codex_oauth::CodexStatus::LoggedIn { .. }
-        ));
-        assert_eq!(e.manager.account_id().await.unwrap(), "acct_1");
-        assert_eq!(
-            e.flow.lock().await.get("openai-codex").cloned(),
-            Some(CodexFlowState::LoggedIn)
-        );
-        let (_, status_body) = get_uri(router(&e.state), "/api/codex/status").await;
-        assert!(
-            status_body.contains("logged_in"),
-            "status must report the login: {status_body}"
-        );
-    }
-
-    #[tokio::test]
-    async fn browser_callback_rejects_state_mismatch() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        let e = env(&auth, "openai-codex").await;
-        let body = start_browser(&e).await;
-        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
-        let resp = reqwest::Client::new()
-            .get(format!("{redirect_uri}?code=ac_browser&state=wrong"))
-            .send()
-            .await
-            .expect("callback request");
-        assert_eq!(resp.status().as_u16(), 400);
-        assert!(matches!(
-            e.manager.status().await,
-            codex_oauth::CodexStatus::LoggedOut
-        ));
-    }
-
-    /// Does the flow's loopback listener still accept connections?
-    ///
-    /// Probes without a `code`/`state`: a live listener answers 400
-    /// "missing authorization code" and stays up, whereas probing with a
-    /// wrong `state` would shut the listener down and make this a lie.
-    async fn callback_answers(redirect_uri: &str) -> bool {
-        let client = reqwest::Client::new();
-        for _ in 0..20 {
-            if client.get(redirect_uri).send().await.is_ok() {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        false
-    }
-
-    #[tokio::test]
-    async fn fresh_browser_start_reclaims_the_port_it_was_holding() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        // A port we pick, so both flows target the same one — with port 0 the OS
-        // would hand the second flow a different port and hide the problem.
-        let port = {
-            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            probe.local_addr().unwrap().port()
-        };
-        let e = env_with_port(&auth, "openai-codex", port).await;
-
-        let first = start_browser(&e).await;
-        assert_eq!(first["callback_listening"], true);
-        let first_uri = first["redirect_uri"].as_str().unwrap().to_string();
-        assert!(first_uri.contains(&format!(":{port}/")), "got {first_uri}");
-
-        // Clicking "start" again must not report the port as busy: the previous
-        // listener is this process's own, and it is done once a new flow starts.
-        let (status, second) =
-            post_json(router(&e.state), "/api/codex/start?fresh=true", "{}").await;
-        assert_eq!(status, StatusCode::OK, "got {second}");
-        assert_eq!(
-            second["callback_listening"], true,
-            "stale flow's listener still held port {port}: {second}"
-        );
-        let second_uri = second["redirect_uri"].as_str().unwrap().to_string();
-        assert_eq!(second_uri, first_uri, "the new flow reuses the freed port");
-        assert!(
-            callback_answers(&second_uri).await,
-            "the new listener must be up"
-        );
-    }
-
-    #[tokio::test]
-    async fn browser_paste_back_releases_the_loopback_listener() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        let e = env(&auth, "openai-codex").await;
-        let body = start_browser(&e).await;
-        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
-        let state = state_of(&body);
-        assert!(callback_answers(&redirect_uri).await, "listener must be up");
-
-        let (status, body) = post_json(
-            router(&e.state),
-            "/api/codex/complete",
-            &json!({"input": format!("{redirect_uri}?code=ac_pasted&state={state}")}).to_string(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "got {body}");
-
-        // The pasted code finished the login: the callback listener has nothing
-        // left to do, and holding 1455 would block the Codex CLI's own login and
-        // the next /setup flow (which would then wrongly report "port busy").
-        assert!(
-            !callback_answers(&redirect_uri).await,
-            "loopback listener is still serving after a pasted code completed the login"
-        );
-    }
-
-    #[tokio::test]
-    async fn browser_callback_releases_the_loopback_listener() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        let e = env(&auth, "openai-codex").await;
-        let body = start_browser(&e).await;
-        let redirect_uri = body["redirect_uri"].as_str().unwrap().to_string();
-        let state = state_of(&body);
-
-        let resp = reqwest::Client::new()
-            .get(format!("{redirect_uri}?code=ac_browser&state={state}"))
-            .send()
-            .await
-            .expect("callback request");
-        assert_eq!(resp.status().as_u16(), 200);
-        assert!(!callback_answers(&redirect_uri).await);
+        assert_eq!(body.get("callback_listening"), None);
     }
 
     #[tokio::test]
@@ -1428,33 +1087,6 @@ mod tests {
                 .contains("no browser login"),
             "got {body}"
         );
-    }
-
-    #[tokio::test]
-    async fn browser_start_falls_back_to_paste_back_when_the_port_is_busy() {
-        let auth = spawn_auth_server(Arc::new(AtomicUsize::new(0))).await;
-        // Occupy a port, then ask the flow to bind it (port 1455 is shared with
-        // the Codex CLI, so this happens in practice).
-        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let taken_port = taken.local_addr().unwrap().port();
-        let e = env_with_port(&auth, "openai-codex", taken_port).await;
-
-        let body = start_browser(&e).await;
-        assert_eq!(body["callback_listening"], false);
-        assert_eq!(
-            body["redirect_uri"],
-            format!("http://localhost:{taken_port}/auth/callback")
-        );
-
-        // …and paste-back still finishes the login.
-        let state = state_of(&body);
-        let (status, body) = post_json(
-            router(&e.state),
-            "/api/codex/complete",
-            &json!({"input": format!("ac_fallback#{state}")}).to_string(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "got {body}");
     }
 
     #[tokio::test]

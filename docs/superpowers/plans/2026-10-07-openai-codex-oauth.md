@@ -106,3 +106,22 @@ made; live routing stays unverified.
 
 `cargo test` green, clippy clean, fmt clean, extension tests green, docs synced, live
 smoke recorded, one commit per task on `feat/openai-codex`.
+
+## Revision — loopback callback listener removed
+
+Task 6 shipped the browser flow with a loopback callback listener on 1455. It was removed
+after three defects surfaced in testing (all real, all in the listener lifecycle): a second
+`start` reported "Port 1455 is busy" while the port was held by the proxy's *own* previous
+flow; a successful paste-back held the port until the 15-minute timeout, blocking the Codex
+CLI's own login; and a shutdown notified before the listener's first poll was lost
+(`notify_waiters` has no permit). Fixing all three left the machinery buying one-click
+login only for a browser on the proxy's machine with 1455 free — the paste-back path covers
+every deployment, including remote and containerized ones.
+
+Deleted: `spawn_callback_listener` + the `GET /auth/callback` handler, `bind_callback`,
+`release_callback_listener`, `CodexListeners`, `AppState.codex_callback_port`,
+`CodexOptions.callback_port`, `AIPROXY_CODEX_CALLBACK_PORT`, the `callback_listening` flow
+field, and the tests that exercised them. `build_browser_flow()` now takes no port and
+always builds `http://localhost:1455/auth/callback`. `/setup` always shows the paste box and
+says the browser will fail to load the callback page. `tests/codex_e2e.rs` finishes the
+browser login through `POST /api/codex/complete` instead of a real callback request.
