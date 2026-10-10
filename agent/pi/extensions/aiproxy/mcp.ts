@@ -34,7 +34,7 @@ export const defaultClientFactory: McpClientFactory = async (url, headers) => {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
   const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } });
-  const client = new Client({ name: "pi-aiproxy", version: "0.2.6" });
+  const client = new Client({ name: "pi-aiproxy", version: "0.4.1" });
   await client.connect(transport);
   return client as unknown as McpClientLike;
 };
