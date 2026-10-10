@@ -10,7 +10,13 @@ struct EchoServer;
 
 impl ServerHandler for EchoServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        info.instructions = Some(
+            std::env::var("ECHO_MCP_INSTRUCTIONS")
+                .unwrap_or_else(|_| "Echo backend instructions.".into()),
+        )
+        .filter(|text| !text.is_empty());
+        info
     }
 
     async fn list_tools(

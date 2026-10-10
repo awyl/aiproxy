@@ -3,12 +3,13 @@ import { registerMcpTools, mcpHeader } from "../mcp.ts";
 import type { McpClientLike } from "../mcp.ts";
 
 function stubPi() {
-  return { registerTool: vi.fn(), registerProvider: vi.fn() };
+  return { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
 }
 
-function stubClient(tools: Array<Record<string, unknown>>, callResult?: Record<string, unknown>): McpClientLike {
+function stubClient(tools: Array<Record<string, unknown>>, callResult?: Record<string, unknown>, instructions?: string): McpClientLike {
   return {
     listTools: async () => ({ tools }) as never,
+    getInstructions: () => instructions,
     callTool: async () => callResult ?? { content: [{ type: "text", text: "ok" }] },
     close: async () => {},
   };
@@ -50,11 +51,32 @@ describe("registerMcpTools", () => {
     expect(t2.description).toBe("Doc lookup");
   });
 
+  it("appends backend instructions without replacing the existing system prompt", async () => {
+    const pi = stubPi();
+    await registerMcpTools(pi as never, baseDeps, async () => stubClient([], undefined, "## search\nUse search for current information."));
+    const handler = pi.on.mock.calls.find(([name]) => name === "before_agent_start")?.[1];
+    expect(handler).toBeTypeOf("function");
+    const event = { systemPrompt: "Keep this." };
+    expect(await handler(event)).toEqual({
+      systemPrompt: "Keep this.\n\n## search\nUse search for current information.",
+    });
+    expect(await handler({ systemPrompt: "Next turn." })).toEqual({
+      systemPrompt: "Next turn.\n\n## search\nUse search for current information.",
+    });
+  });
+
+  it.each([undefined, "", "  \n"])("does not add a prompt hook for empty instructions: %j", async (instructions) => {
+    const pi = stubPi();
+    await registerMcpTools(pi as never, baseDeps, async () => stubClient([], undefined, instructions));
+    expect(pi.on).not.toHaveBeenCalled();
+  });
+
   it("execute forwards arguments to callTool and maps text content", async () => {
     const pi = stubPi();
     const callTool = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result text" }] });
     const client: McpClientLike = {
       listTools: async () => ({ tools: [{ name: "t__x", description: "d", inputSchema: { type: "object" } }] }) as never,
+      getInstructions: () => undefined,
       callTool: callTool,
       close: async () => {},
     };

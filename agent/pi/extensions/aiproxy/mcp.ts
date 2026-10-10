@@ -15,6 +15,7 @@ interface McpToolResult {
 
 export interface McpClientLike {
   listTools(): Promise<{ tools: McpToolDef[] }>;
+  getInstructions(): string | undefined;
   callTool(params: { name: string; arguments?: Record<string, unknown> }, discriminator?: undefined, options?: { signal?: AbortSignal }): Promise<McpToolResult>;
   close(): Promise<void>;
 }
@@ -70,6 +71,12 @@ export async function registerMcpTools(
   try {
     client = await factory(url, headers);
     const { tools } = await client.listTools();
+    const instructions = client.getInstructions();
+    if (instructions?.trim()) {
+      pi.on("before_agent_start", (event) => ({
+        systemPrompt: event.systemPrompt + "\n\n" + instructions,
+      }));
+    }
     for (const t of tools) {
       const def = {
         name: t.name,

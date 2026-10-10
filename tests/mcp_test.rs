@@ -46,7 +46,14 @@ async fn stdio_backend_serves_tools_through_http() {
         .await
         .expect("mcp client connect");
 
-    let _server_info = client.peer_info().expect("peer info");
+    assert_eq!(
+        client
+            .peer_info()
+            .expect("peer info")
+            .instructions
+            .as_deref(),
+        Some("Echo backend instructions.")
+    );
 
     let tools = client.list_tools(None).await.expect("list_tools");
     let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
@@ -91,6 +98,21 @@ async fn multiplexer_lists_and_calls_through_shared_backend() {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{}/mcp", addr.port());
 
+    let initialize: serde_json::Value = client
+        .post(&url)
+        .header("authorization", "Bearer mcp-tok")
+        .json(&json!({"jsonrpc": "2.0", "id": 0, "method": "initialize"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        initialize["result"]["instructions"],
+        "## echo\nEcho backend instructions."
+    );
+
     // tools/list → prefixed tool names
     let list: serde_json::Value = client
         .post(&url)
@@ -127,5 +149,71 @@ async fn multiplexer_lists_and_calls_through_shared_backend() {
     let text = call.to_string();
     assert!(text.contains("via-multiplexer"), "echoed text: {text}");
 
+    handle.abort();
+}
+
+#[tokio::test]
+async fn initialize_groups_only_selected_authorized_backend_instructions() {
+    let mut cfg = echo_cfg(env!("CARGO_BIN_EXE_echo_mcp_server"));
+    let mut second = cfg.mcp.servers[0].clone();
+    second.name = "second".into();
+    second.token = Some("second-tok".into());
+    second.env.insert(
+        "ECHO_MCP_INSTRUCTIONS".into(),
+        "Second instructions.".into(),
+    );
+    let mut silent = second.clone();
+    silent.name = "silent".into();
+    silent
+        .env
+        .insert("ECHO_MCP_INSTRUCTIONS".into(), String::new());
+    cfg.mcp.servers.extend([second, silent]);
+    let (listener, router) = server::build(cfg, std::env::temp_dir().join("aiproxy-mcp-test.yaml"))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+    for (selection, expected) in [
+        (
+            "echo,second:second-tok",
+            Some("## echo\nEcho backend instructions.\n\n## second\nSecond instructions."),
+        ),
+        ("second:second-tok", Some("## second\nSecond instructions.")),
+        ("second:wrong", None),
+        ("silent:second-tok", None),
+    ] {
+        let body: serde_json::Value = client
+            .post(&url)
+            .header("authorization", "Bearer mcp-tok")
+            .header("x-mcp-servers", selection)
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["result"]["instructions"].as_str(), expected, "{body}");
+        if expected.is_none() {
+            assert!(body["result"].get("instructions").is_none(), "{body}");
+        }
+    }
+    // A per-server cold initialize with no instructions must omit the field too.
+    let mut peer = rmcp::serve_client(
+        ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("test", "0"),
+        ),
+        StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp/silent"))
+                .auth_header("second-tok"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(peer.peer_info().unwrap().instructions.is_none());
+    peer.close().await.ok();
     handle.abort();
 }

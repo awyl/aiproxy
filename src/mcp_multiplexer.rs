@@ -77,7 +77,7 @@ async fn mcp_multiplex_handler(
 
     match method {
         "initialize" => {
-            let result = json!({
+            let mut result = json!({
                 "protocolVersion": "2025-03-26",
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": {
@@ -85,6 +85,27 @@ async fn mcp_multiplex_handler(
                     "version": env!("CARGO_PKG_VERSION")
                 }
             });
+            let mut instructions = Vec::new();
+            for server in &matched {
+                let slot = match state.cache.ensure(server).await {
+                    Ok(slot) => slot,
+                    Err(e) => {
+                        tracing::warn!(server = %server.name, "connect failed: {e}");
+                        continue;
+                    }
+                };
+                let guard = slot.lock().await;
+                if let Some(text) = guard
+                    .as_ref()
+                    .and_then(|b| b.instructions.as_deref())
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    instructions.push(format!("## {}\n{text}", server.name));
+                }
+            }
+            if !instructions.is_empty() {
+                result["instructions"] = json!(instructions.join("\n\n"));
+            }
             jsonrpc_response(id, &result)
         }
         "tools/list" => {
@@ -102,7 +123,7 @@ async fn mcp_multiplex_handler(
                 let Some(b) = guard.as_mut() else {
                     continue;
                 };
-                match b.list_tools(None).await {
+                match b.client.list_tools(None).await {
                     Ok(result) => {
                         for tool in result.tools {
                             let prefixed = format!("{}__{}", server.name, tool.name);
@@ -166,7 +187,7 @@ async fn mcp_multiplex_handler(
             if let Some(args) = arguments {
                 call_params = call_params.with_arguments(args);
             }
-            match b.call_tool(call_params).await {
+            match b.client.call_tool(call_params).await {
                 Ok(call_result) => {
                     let val = serde_json::to_value(&call_result).unwrap_or(json!({}));
                     jsonrpc_response(id, &val)

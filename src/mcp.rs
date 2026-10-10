@@ -1,6 +1,6 @@
 //! MCP hosting: one streamable-HTTP endpoint per configured server at
 //! `/mcp/<name>`, each backed by a `ProxyHandler` that forwards `tools/list`
-//! and `tools/call` to a lazily-connected backend (stdio child or remote
+//! and `tools/call` to a backend connected on initialize or first tool request (stdio child or remote
 //! streamable-HTTP server). Reconnect on failure: a failed backend call
 //! drops the cached handle; the next request reconnects.
 
@@ -21,7 +21,11 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-pub type Backend = RunningService<rmcp::RoleClient, ClientInfo>;
+#[derive(Debug)]
+pub struct Backend {
+    pub client: RunningService<rmcp::RoleClient, ClientInfo>,
+    pub instructions: Option<String>,
+}
 
 /// One lazily-connected backend handle, shared by every route serving a server.
 /// Dropped (→ reconnect on next use) only on failure; never on idle.
@@ -69,7 +73,7 @@ pub(crate) async fn connect_backend(cfg: &McpServerConfig) -> Result<Backend, Er
         ClientCapabilities::default(),
         Implementation::new("aiproxy", env!("CARGO_PKG_VERSION")),
     );
-    if let Some(cmd) = &cfg.command {
+    let client = if let Some(cmd) = &cfg.command {
         let mut command = Command::new(cmd);
         command.args(&cfg.args).envs(&cfg.env);
         // stderr -> null: children must not inherit the daemon's stderr
@@ -97,7 +101,14 @@ pub(crate) async fn connect_backend(cfg: &McpServerConfig) -> Result<Backend, Er
             "server has neither command nor url",
             None,
         ))
-    }
+    }?;
+    let instructions = client
+        .peer_info()
+        .and_then(|info| info.instructions.clone());
+    Ok(Backend {
+        client,
+        instructions,
+    })
 }
 
 pub fn mcp_router(
@@ -148,12 +159,17 @@ pub fn mcp_router(
 pub struct ProxyHandler {
     cfg: McpServerConfig,
     backend: BackendSlot,
+    instructions: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl ProxyHandler {
     pub fn new(cfg: McpServerConfig, cache: &BackendCache) -> Self {
         let backend = cache.slot(&cfg.name);
-        Self { cfg, backend }
+        Self {
+            cfg,
+            backend,
+            instructions: Arc::default(),
+        }
     }
 
     async fn backend(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Backend>>, ErrorData> {
@@ -161,13 +177,42 @@ impl ProxyHandler {
         if guard.is_none() {
             *guard = Some(connect_backend(&self.cfg).await?);
         }
+        *self
+            .instructions
+            .write()
+            .expect("instructions lock poisoned") =
+            guard.as_ref().and_then(|b| b.instructions.clone());
         Ok(guard)
     }
 }
 
 impl ServerHandler for ProxyHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        info.instructions = self
+            .instructions
+            .read()
+            .expect("instructions lock poisoned")
+            .clone();
+        info
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        drop(self.backend().await?);
+        // Mirror rmcp's default initialize, preserving protocol negotiation.
+        context.peer.set_peer_info(request.clone());
+        let mut info = self.get_info();
+        if self
+            .supported_protocol_versions()
+            .contains(&request.protocol_version)
+        {
+            info.protocol_version = request.protocol_version;
+        }
+        Ok(info)
     }
 
     async fn list_tools(
@@ -178,7 +223,7 @@ impl ServerHandler for ProxyHandler {
         {
             let mut guard = self.backend().await?;
             let backend = guard.as_mut().expect("backend just connected");
-            match backend.list_tools(None).await {
+            match backend.client.list_tools(None).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     tracing::warn!(server = %self.cfg.name, "backend list_tools failed: {e}; reconnecting");
@@ -190,6 +235,7 @@ impl ServerHandler for ProxyHandler {
         let mut guard = self.backend().await?;
         let backend = guard.as_mut().expect("backend just connected");
         backend
+            .client
             .list_tools(None)
             .await
             .map_err(|e| ErrorData::internal_error(format!("backend list_tools: {e}"), None))
@@ -203,7 +249,7 @@ impl ServerHandler for ProxyHandler {
         {
             let mut guard = self.backend().await?;
             let backend = guard.as_mut().expect("backend just connected");
-            match backend.call_tool(request.clone()).await {
+            match backend.client.call_tool(request.clone()).await {
                 Ok(result) => return Ok(CallToolResponse::from(result)),
                 Err(e) => {
                     tracing::warn!(server = %self.cfg.name, "backend call_tool failed: {e}; reconnecting");
@@ -214,6 +260,7 @@ impl ServerHandler for ProxyHandler {
         let mut guard = self.backend().await?;
         let backend = guard.as_mut().expect("backend just connected");
         backend
+            .client
             .call_tool(request)
             .await
             .map(CallToolResponse::from)
