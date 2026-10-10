@@ -247,14 +247,8 @@ mod tests {
 
     fn test_server_with_token(name: &str, token: &str) -> McpServerConfig {
         McpServerConfig {
-            name: name.to_string(),
-            command: Some("echo".to_string()),
-            args: vec![],
-            env: Default::default(),
-            url: None,
-            api_key_env: None,
             token: Some(token.to_string()),
-            token_env: None,
+            ..test_server(name)
         }
     }
 
@@ -269,14 +263,7 @@ mod tests {
     }
 
     fn mcp_request(method: &str) -> Request<Body> {
-        Request::builder()
-            .uri("/mcp")
-            .method("POST")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string(),
-            ))
-            .unwrap()
+        mcp_request_with_headers(method, &[])
     }
 
     fn mcp_request_with_headers(method: &str, headers: &[(&str, &str)]) -> Request<Body> {

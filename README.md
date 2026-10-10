@@ -226,7 +226,7 @@ Model ids become `opencode-go=go-alice/grok-4.6` and `opencode-go=go-bob/grok-4.
 
 ## MCP hosting
 
-aiproxy hosts MCP servers via the [pi-mcp-extension](https://www.npmjs.com/package/pi-mcp-extension) or any MCP client. Two transport types:
+aiproxy hosts MCP servers for its pi extension or any MCP client. Two backend transport types:
 
 - **stdio**: proxy spawns a child process (`command` + `args` + `env`) and exposes it at `/mcp/<name>`
 - **streamable-http**: proxy connects to a remote MCP server (`url`) and relays
@@ -249,7 +249,7 @@ mcp:
       # no token → uses global proxy token
 ```
 
-Clients connect at `http://<host>:8080/mcp/<name>` with the appropriate bearer token.
+Clients connect at `http://<host>:8080/mcp/<name>` with the appropriate bearer token. The backend connects during initialize; its instructions are included in the initialize result.
 
 ### MCP multiplexer
 
@@ -275,7 +275,7 @@ Body: {"jsonrpc":"2.0","method":"tools/list","id":1}
 
 No `X-MCP-Servers` header → include all servers (auth via `Authorization` header).
 
-Individual `/mcp/<name>` endpoints remain available for backward compatibility.
+Individual `/mcp/<name>` endpoints remain available for single-server access. `/mcp` groups instructions from selected, authorized backends under `## <server name>`; the pi extension appends them to its system prompt.
 
 ## Local embeddings
 

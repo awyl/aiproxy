@@ -1,7 +1,7 @@
 //! MCP hosting: one streamable-HTTP endpoint per configured server at
 //! `/mcp/<name>`, each backed by a `ProxyHandler` that forwards `tools/list`
-//! and `tools/call` to a backend connected on initialize or first tool request (stdio child or remote
-//! streamable-HTTP server). Reconnect on failure: a failed backend call
+//! and `tools/call` to a backend (stdio child or remote streamable-HTTP server).
+//! Connect on initialize or first tool request. Reconnect on failure: a failed backend call
 //! drops the cached handle; the next request reconnects.
 
 use crate::api::AppState;
@@ -177,11 +177,6 @@ impl ProxyHandler {
         if guard.is_none() {
             *guard = Some(connect_backend(&self.cfg).await?);
         }
-        *self
-            .instructions
-            .write()
-            .expect("instructions lock poisoned") =
-            guard.as_ref().and_then(|b| b.instructions.clone());
         Ok(guard)
     }
 }
@@ -202,7 +197,14 @@ impl ServerHandler for ProxyHandler {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
-        drop(self.backend().await?);
+        {
+            let backend = self.backend().await?;
+            *self
+                .instructions
+                .write()
+                .expect("instructions lock poisoned") =
+                backend.as_ref().and_then(|b| b.instructions.clone());
+        }
         // Mirror rmcp's default initialize, preserving protocol negotiation.
         context.peer.set_peer_info(request.clone());
         let mut info = self.get_info();
