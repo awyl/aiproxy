@@ -4,6 +4,14 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.2]
+
+### Fixed
+- `/usage` hides providers without quota windows.
+
+### Added
+- Shared navigation frame and page links on `/usage`, `/models`, and `/setup`.
+
 ## [0.4.1]
 
 ### Fixed
