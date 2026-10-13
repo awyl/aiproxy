@@ -101,8 +101,9 @@ async function load() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     const el = document.getElementById('data');
-    if (!data.length) { el.innerHTML = '<div class="empty">No usage data yet. Make a request first.</div>'; return; }
-    el.innerHTML = data.map(p => {
+    const providers = data.filter(p => (p.windows || []).length > 0);
+    if (!providers.length) { el.innerHTML = '<div class="empty">No usage data yet. Make a request first.</div>'; return; }
+    el.innerHTML = providers.map(p => {
       const wins = (p.windows || []).map(w => {
         const pct = w.used_percent != null ? w.used_percent.toFixed(1) : '?';
         const cls = pct > 80 ? 'pct-high' : pct > 50 ? 'pct-med' : 'pct-low';
@@ -287,6 +288,15 @@ mod tests {
         assert!(body["reloaded_at_ms"].as_u64().unwrap_or(0) > 0);
         assert_eq!(body["providers"][0]["models"][0]["id"], "gpt-4o");
         assert_eq!(body["providers"][0]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn usage_page_hides_providers_without_windows() {
+        let html = usage_page().await.0;
+        assert!(
+            html.contains("data.filter(p => (p.windows || []).length > 0)"),
+            "providers with no quota windows must not render"
+        );
     }
 
     #[tokio::test]
