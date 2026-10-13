@@ -636,8 +636,8 @@ fn spawn_poll_loop(
 }
 
 /// `GET /setup` — ChatGPT (Codex) login page.
-pub async fn setup_page() -> Html<&'static str> {
-    Html(include_str!("setup_page.html"))
+pub async fn setup_page() -> Html<String> {
+    crate::pages::with_page_frame(include_str!("setup_page.html"), "/setup")
 }
 
 #[cfg(test)]

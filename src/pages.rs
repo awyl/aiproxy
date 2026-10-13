@@ -59,8 +59,8 @@ pub async fn reload_models(State(state): State<AppState>) -> Json<serde_json::Va
 
 // ── Usage page handler ──────────────────────────────────────────────
 
-pub async fn usage_page() -> Html<&'static str> {
-    Html(
+pub async fn usage_page() -> Html<String> {
+    with_page_frame(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -127,6 +127,7 @@ load();
 </script>
 </body>
 </html>"#,
+        "/usage",
     )
 }
 
@@ -137,8 +138,8 @@ load();
 /// (`model_refresh_secs: 0`), so a provider that was unreachable then (an
 /// unauthenticated Codex upstream, an upstream down at boot) keeps an empty
 /// catalog until the button is pressed.
-pub async fn models_page() -> Html<&'static str> {
-    Html(include_str!("models_page.html"))
+pub async fn models_page() -> Html<String> {
+    with_page_frame(include_str!("models_page.html"), "/models")
 }
 
 #[cfg(test)]
@@ -300,6 +301,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_pages_share_navigation_frame_and_links() {
+        let pages = [
+            ("usage", usage_page().await.0),
+            ("models", models_page().await.0),
+            ("setup", crate::setup::setup_page().await.0),
+        ];
+        for (name, html) in pages {
+            assert!(html.contains("app-frame"), "{name} missing frame");
+            assert!(html.contains("nav-toggle"), "{name} missing menu toggle");
+            let nav = html
+                .split(r#"<nav aria-label="Pages">"#)
+                .nth(1)
+                .unwrap_or_default()
+                .split("</nav>")
+                .next()
+                .unwrap_or_default();
+            for href in ["/usage", "/models", "/setup"] {
+                assert!(nav.contains(href), "{name} navigation missing {href} link");
+            }
+            assert!(
+                nav.contains("aria-current"),
+                "{name} missing active page state"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn models_page_toggles_providers_and_keeps_the_reload_button() {
         let html = models_page().await.0;
         assert!(html.contains("/api/models"), "the page reads the catalog");
@@ -310,4 +338,71 @@ mod tests {
             "a provider expands and collapses natively, without JS state"
         );
     }
+}
+
+const PAGE_FRAME_STYLE: &str = r#"<style>
+  body { max-width: none !important; margin: 0 !important; padding: 0 !important; min-height: 100vh; }
+  .app-frame { display: flex; min-height: 100vh; }
+  .sidebar { flex: 0 0 240px; padding: 1.25rem 1rem; background: #f8fafc; border-right: 1px solid #e5e7eb; }
+  .brand { display: block; margin-bottom: 1.5rem; color: #111827; font-size: 1.1rem; font-weight: 700; text-decoration: none; }
+  .sidebar nav { display: grid; gap: 0.35rem; }
+  .sidebar nav a { padding: 0.65rem 0.75rem; border-radius: 6px; color: #374151; text-decoration: none; }
+  .sidebar nav a:hover { background: #eef2f7; }
+  .sidebar nav a[aria-current="page"] { background: #e5e7eb; color: #111827; font-weight: 600; }
+  .page-main { flex: 1; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 0.75rem; height: 3.5rem; padding: 0 1rem; border-bottom: 1px solid #e5e7eb; }
+  .nav-toggle { width: 2.5rem; height: 2.5rem; padding: 0; border: 1px solid #d1d5db; border-radius: 6px; background: white; color: #111827; cursor: pointer; font-size: 1.2rem; }
+  .page-content { max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem 2rem; }
+  body.nav-collapsed .sidebar { display: none; }
+  @media (max-width: 700px) {
+    .sidebar { position: fixed; z-index: 2; inset: 0 auto 0 0; width: min(80vw, 260px); overflow-y: auto; visibility: hidden; transform: translateX(-100%); transition: transform 160ms ease; box-shadow: 0 0 1rem #0002; }
+    body.nav-open .sidebar { visibility: visible; transform: translateX(0); }
+  }
+</style>"#;
+
+const PAGE_FRAME_SCRIPT: &str = r#"<script>
+  const navButton = document.getElementById('nav-toggle');
+  const isMobileNav = () => window.matchMedia('(max-width: 700px)').matches;
+  function setNavOpen(open) {
+    document.body.classList.toggle('nav-open', isMobileNav() && open);
+    document.body.classList.toggle('nav-collapsed', !isMobileNav() && !open);
+    navButton.setAttribute('aria-expanded', String(open));
+  }
+  setNavOpen(!isMobileNav());
+  navButton.addEventListener('click', () => {
+    const isOpen = isMobileNav()
+      ? document.body.classList.contains('nav-open')
+      : !document.body.classList.contains('nav-collapsed');
+    setNavOpen(!isOpen);
+  });
+  window.addEventListener('resize', () => setNavOpen(!isMobileNav()));
+</script>"#;
+
+pub(crate) fn with_page_frame(html: &'static str, active_path: &str) -> Html<String> {
+    let nav_links = [
+        ("/usage", "Usage"),
+        ("/models", "Models"),
+        ("/setup", "Setup"),
+    ]
+    .iter()
+    .map(|(path, label)| {
+        let current = if *path == active_path {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        format!("<a href=\"{path}\"{current}>{label}</a>")
+    })
+    .collect::<String>();
+    let html = html.replace("</head>", &format!("{PAGE_FRAME_STYLE}</head>"));
+    let html = html.replace(
+        "<body>",
+        &format!(
+            r#"<body><div class="app-frame"><aside class="sidebar" id="site-nav"><a class="brand" href="/usage">aiproxy</a><nav aria-label="Pages">{nav_links}</nav></aside><div class="page-main"><header class="topbar"><button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="site-nav" aria-expanded="true">☰</button><span>aiproxy</span></header><main class="page-content">"#
+        ),
+    );
+    Html(html.replace(
+        "</body>",
+        &format!("</main></div></div>{PAGE_FRAME_SCRIPT}</body>"),
+    ))
 }
