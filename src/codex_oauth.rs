@@ -774,6 +774,37 @@ pub fn transform_codex_body(body: Bytes) -> Result<CodexRequest, CodexError> {
     obj.insert("stream".into(), json!(true));
     obj.insert("store".into(), json!(false));
 
+    // Codex accepts the system prompt only in top-level instructions.
+    let mut system_text = Vec::new();
+    if let Some(input) = obj.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| {
+            if item.get("role").and_then(Value::as_str) != Some("system") {
+                return true;
+            }
+            match item.get("content") {
+                Some(Value::String(text)) => system_text.push(text.clone()),
+                Some(Value::Array(parts)) => system_text.extend(
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .map(str::to_owned),
+                ),
+                _ => {}
+            }
+            false
+        });
+    }
+    if !system_text.is_empty() {
+        if let Some(instructions) = obj
+            .get("instructions")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            system_text.insert(0, instructions.to_owned());
+        }
+        obj.insert("instructions".into(), json!(system_text.join("\n\n")));
+    }
+
     let has_instructions = obj
         .get("instructions")
         .and_then(|v| v.as_str())
@@ -1851,6 +1882,118 @@ mod tests {
         );
         assert_eq!(v["text"], json!({"verbosity": "high"}));
         assert_eq!(out.session_id, None);
+    }
+
+    #[test]
+    fn transform_moves_system_array_content_into_instructions() {
+        let out = transform_codex_body(body(json!({
+            "model": "gpt-6.1-terra",
+            "input": [
+                {"type": "message", "role": "system", "content": [
+                    {"type": "input_text", "text": "Be terse."}
+                ]},
+                {"role": "user", "content": "say ok"}
+            ]
+        })))
+        .unwrap();
+        let v = parse(&out.body);
+        assert_eq!(v["instructions"], "Be terse.");
+        assert_eq!(v["input"], json!([{"role": "user", "content": "say ok"}]));
+    }
+
+    #[test]
+    fn transform_moves_system_string_content_into_instructions() {
+        let out = transform_codex_body(body(json!({
+            "input": [
+                {"role": "system", "content": "Be terse."},
+                {"role": "user", "content": "say ok"}
+            ]
+        })))
+        .unwrap();
+        let v = parse(&out.body);
+        assert_eq!(v["instructions"], "Be terse.");
+        assert_eq!(v["input"], json!([{"role": "user", "content": "say ok"}]));
+    }
+
+    #[test]
+    fn transform_appends_system_text_after_existing_instructions() {
+        let out = transform_codex_body(body(json!({
+            "instructions": "Keep the pi instructions.",
+            "input": [{"role": "system", "content": "Be terse."}]
+        })))
+        .unwrap();
+        let v = parse(&out.body);
+        assert_eq!(v["instructions"], "Keep the pi instructions.\n\nBe terse.");
+        assert_eq!(v["input"], json!([]));
+    }
+
+    #[test]
+    fn transform_without_system_messages_preserves_input_and_instruction_behavior() {
+        let input = json!([
+            {"role": "developer", "content": "Developer guidance."},
+            {"role": "user", "content": "say ok"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+            {"type": "function_call_output", "call_id": "call-1", "output": "done"}
+        ]);
+        for (instructions, expected) in [
+            (None, "You are a helpful assistant."),
+            (Some(" \n"), "You are a helpful assistant."),
+            (
+                Some("  Existing pi instructions.  "),
+                "  Existing pi instructions.  ",
+            ),
+        ] {
+            let mut request = json!({"input": input});
+            if let Some(instructions) = instructions {
+                request["instructions"] = json!(instructions);
+            }
+            let v = parse(&transform_codex_body(body(request)).unwrap().body);
+            assert_eq!(v["input"], input);
+            assert_eq!(v["instructions"], expected);
+        }
+    }
+
+    #[test]
+    fn transform_collects_all_system_text_and_keeps_other_items_in_order() {
+        let out = transform_codex_body(body(json!({
+            "instructions": " \n",
+            "input": [
+                {"role": "system", "content": [
+                    {"text": "First."}, {"type": "input_image", "image_url": "ignored"},
+                    {"text": 42}, {"text": "Second."}
+                ]},
+                {"role": "developer", "content": "Leave me alone."},
+                {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+                {"role": "system", "content": "Third."},
+                {"role": "user", "content": "say ok"}
+            ]
+        })))
+        .unwrap();
+        let v = parse(&out.body);
+        assert_eq!(v["instructions"], "First.\n\nSecond.\n\nThird.");
+        assert_eq!(
+            v["input"],
+            json!([
+                {"role": "developer", "content": "Leave me alone."},
+                {"type": "function_call", "call_id": "call-1", "name": "tool", "arguments": "{}"},
+                {"role": "user", "content": "say ok"}
+            ])
+        );
+    }
+
+    #[test]
+    fn transform_removes_system_items_without_text_and_keeps_default_instructions() {
+        let out = transform_codex_body(body(json!({
+            "input": [
+                {"role": "system"},
+                {"role": "system", "content": [{"type": "input_image", "image_url": "ignored"}]},
+                {"role": "user", "content": "say ok"}
+            ]
+        })))
+        .unwrap();
+        let v = parse(&out.body);
+        assert_eq!(v["instructions"], "You are a helpful assistant.");
+        assert_eq!(v["input"], json!([{"role": "user", "content": "say ok"}]));
     }
 
     #[test]

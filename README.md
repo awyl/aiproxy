@@ -125,6 +125,50 @@ OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discov
 
 Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface}], error}`. A login to `openai-codex` triggers discovery automatically.
 
+### Model aliases
+
+Open **/aliases** to create stable names such as `default/fast`, `default/free`,
+and `default/planner`. Choose real models from the catalog, then **Save aliases**.
+In pi they appear as `aiproxy/default/fast`, etc. No example mappings are installed
+automatically; targets must actually exist in your discovered catalog.
+
+The editor uses your **global proxy token** when configured. Subscription tokens
+cannot manage global aliases. With subscription-only authentication, configure a
+global token first. Fully unauthenticated configurations remain unauthenticated;
+restrict network access or configure a token before exposing the proxy.
+
+- `GET /api/aliases` returns `{aliases: [{id, target, surface, available}], state_path}`.
+- `PUT /api/aliases` accepts a full replacement map:
+  `{"aliases":{"default/fast":"opencode-go/<real-model>"}}`.
+  Send `Content-Type: application/json` and `Authorization: Bearer <global-token>`
+  when configured. An empty map deletes all aliases.
+- Names use `default/<name>`, with ASCII letters, digits, dot, underscore, or
+  hyphen; no empty, `.`, or `..` names. Targets must be actual cataloged inference
+  models with a known surface. Alias chains and embedding targets are rejected.
+- Saves take effect on new proxy requests immediately. Mappings persist in
+  **aiproxy-aliases.json**: `AIPROXY_RUNTIME_DIR` → existing `/runtime` → the config
+  file's directory. Mount that directory durably in containers. The editor/API
+  reports the exact path. The Codex-specific state override does not affect aliases.
+- Missing state means no aliases; unreadable/corrupt state fails startup rather
+  than silently discarding mappings. If a target disappears, its mapping remains
+  visible as unavailable but is omitted from `/v1/models` and cannot route.
+
+Aliases only change model resolution. Existing provider auth, subscription gates,
+wire checks, request handling and response handling remain in place.
+`/v1/models` advertises each available alias's `target` and inherited `surface`.
+Clients must still use that surface; aliases do not translate protocols.
+
+**Pi refreshes the catalog automatically every 60 seconds.** Changed aliases and
+model capabilities apply while idle; changes found during an agent run wait until
+it settles. The selected alias is preserved, including its updated wire driver.
+A failed or malformed refresh keeps the last working catalog; requests time out
+after 10 seconds and never overlap. Deleting the selected model warns instead of
+silently selecting a fallback. `/reload` while idle forces immediate discovery.
+
+Proxy catalog refresh (`model_refresh_secs` or **Reload models** on /models) is
+separate: pi polls what the proxy currently advertises, without triggering vendor
+discovery or re-fetching pi.dev metadata every minute.
+
 ### ChatGPT / Codex subscription (`openai-codex`)
 
 Runs Codex models on a ChatGPT Plus/Pro subscription instead of an API key:
@@ -151,6 +195,9 @@ background (and on a `401`, once, mid-request).
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
 default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
 drops `max_output_tokens`) and sends `originator: pi` plus your account id.
+System-role `input` messages (for example from Goose) move into top-level
+`instructions`, after any existing nonblank instructions. Developer messages and
+all other input items stay unchanged.
 - **Model discovery** — probes the Codex catalog
 (`GET {base}/codex/models?client_version=X.Y.Z`, same OAuth headers as requests) on every
 model-refresh tick. Offered entries are the ones the picker itself shows:

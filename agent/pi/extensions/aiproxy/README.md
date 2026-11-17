@@ -1,7 +1,7 @@
 # pi-extension-aiproxy
 
 Pi provider that fronts an [aiproxy](../..) gateway. One provider entry; models
-are auto-discovered from the gateway at startup, split across the three wire
+are discovered at startup and refreshed every 60 seconds, across the three wire
 surfaces the proxy speaks.
 
 Model ids stay prefixed (`opencode-go/grok-4.6`); the proxy routes by prefix
@@ -54,6 +54,29 @@ pi's mcp.json) — e.g. set just `apiKey` per project and inherit `baseUrl`.
 `aiproxy.yaml` remains the **proxy server's own config** — the extension never
 touches it. With no `aiproxy.json` the extension falls back to localhost + no
 key.
+
+## Model aliases
+
+Create mappings on the proxy's **/aliases** page. Pi discovers changes within
+**60 seconds** and applies them while idle (or as soon as the current run settles).
+Select an alias such as `aiproxy/default/planner` from the model picker.
+
+The extension keeps `default/planner` as the selected and sent model ID, but uses
+the proxy's optional `target` field to look up the real model's reasoning support,
+limits, cost, compatibility settings and provider headers. The proxy's `surface`
+still chooses the wire driver. Target metadata absent from pi's catalog uses the
+existing fallback defaults; aliases cannot invent capabilities.
+
+Saving a mapping updates proxy routing immediately; pi's metadata follows on the
+next poll. Updates replace both picker entries and the selected model's wire driver
+and capabilities without changing the selected alias. No update is applied mid-run.
+Use `/reload` while idle for immediate discovery instead of waiting for the poll.
+
+Failed or malformed responses retain the last working catalog and warn once per
+outage. Requests have a 10-second timeout and never overlap. Removing the selected
+model warns without choosing a fallback; select another model yourself. Polling and
+in-flight fetches stop on extension shutdown/reload. Only the proxy catalog is
+polled: this does not refresh unrelated providers or re-fetch pi.dev every minute.
 
 ## MCP tools
 

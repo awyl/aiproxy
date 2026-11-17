@@ -70,7 +70,15 @@ pub async fn build_with_options(
         &codex.token_url,
     ));
     let providers = build_providers(&config, &codex_managers);
-    let registry = Arc::new(ModelRegistry::new(providers));
+    let aliases_path = crate::aliases::alias_state_path(&config_path);
+    let aliases = crate::aliases::AliasStore::load(aliases_path.clone()).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("alias state {}: {e}", aliases_path.display()),
+        )
+    })?;
+    tracing::info!(path = %aliases_path.display(), "model alias state");
+    let registry = Arc::new(ModelRegistry::with_aliases(providers, aliases)?);
     registry.refresh().await;
 
     // Codex background refresh: wake up every ~10 min (plus jitter), refresh
@@ -237,6 +245,11 @@ pub async fn build_with_options(
         .route("/healthz", get(|| async { "ok" }))
         .route("/usage", get(crate::pages::usage_page))
         .route("/models", get(crate::pages::models_page))
+        .route("/aliases", get(crate::aliases::aliases_page))
+        .route(
+            "/api/aliases",
+            get(crate::aliases::aliases_api).put(crate::aliases::save_aliases),
+        )
         .route("/api/models", get(crate::pages::models_api))
         .route("/api/reload", post(crate::pages::reload_models))
         .route("/setup", get(crate::setup::setup_page))

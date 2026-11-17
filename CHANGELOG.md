@@ -4,6 +4,21 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.4] - 2026-11-17
+
+### Fixed
+- **Goose system prompts on Codex models** — move system-role Responses input text into top-level `instructions` (existing instructions first), avoiding ChatGPT's `System messages are not allowed` rejection. String and text-part-array content are supported; developer messages and clients already using `instructions` remain unchanged.
+
+## [0.4.3] - 2026-11-17
+
+### Added
+- **Durable model aliases** — manage `default/<name>` mappings on `/aliases` or `GET/PUT /api/aliases`. Mappings persist in `aiproxy-aliases.json` and resolve before existing routing, preserving request bytes except the model field. Management requires the global proxy token when auth is enabled; subscription tokens cannot edit aliases.
+- **Target-aware pi models** — aliases inherit their target's capabilities, wire surface, provider attribution headers and thinking-stream cleanup while retaining the selectable alias ID.
+- **Automatic pi catalog refresh every 60 seconds** — updates both the picker and selected model while idle; changes found during a run wait until it settles. Failed or malformed responses retain the last working catalog, requests time out after 10 seconds, and shutdown cancels polling. Removing the selected model warns instead of silently selecting a fallback.
+
+### Fixed
+- Rust test-module placement in `pages.rs` so all-target clippy checks pass.
+
 ## [0.4.2]
 
 ### Fixed

@@ -244,3 +244,100 @@ describe("loadCatalog — fetches from pi.dev and caches", () => {
     expect(model.api).toBe("openai-responses");
   });
 });
+
+
+describe("model aliases", () => {
+  it("keeps alias identity while inheriting target metadata and generic Responses wire", async () => {
+    const meta = { name:"Real planner", api:"openai-codex-responses", reasoning:true,
+      input:["text","image"], contextWindow:272_000, maxTokens:32_000,
+      thinkingLevelMap:{high:"high"}, cost:{input:1,output:2,cacheRead:0.1,cacheWrite:0},
+      headers:{"x-test":"target"}, compat:{supportsStore:false} };
+    const { pi } = await registerWith({ok:true,json:async()=>({data:[
+      {id:"default/planner",target:"openai-codex=alice/gpt-sol",surface:"responses",display_name:"default/planner"}
+    ]})}, new Map([["openai-codex/gpt-sol",meta]]));
+    const model = pi.registerProvider.mock.calls[0][1].models[0];
+    expect(model).toMatchObject({...meta, id:"default/planner",name:"default/planner",api:"openai-responses"});
+    expect(model.baseUrl).toBeUndefined();
+  });
+
+  it("preserves nested target paths and the messages wire base", async () => {
+    const { pi } = await registerWith({ok:true,json:async()=>({data:[
+      {id:"default/writer",target:"openrouter/anthropic/claude",surface:"messages"}
+    ]})}, new Map([["openrouter/anthropic/claude",{reasoning:true,contextWindow:200_000}]]));
+    expect(pi.registerProvider.mock.calls[0][1].models[0]).toMatchObject({
+      id:"default/writer", name:"default/writer", reasoning:true,contextWindow:200_000,
+      api:"anthropic-messages",baseUrl:"http://p:9999"
+    });
+  });
+
+  it("uses existing fallback metadata when a target is not in pi's catalog", async () => {
+    const { pi } = await registerWith({ok:true,json:async()=>({data:[
+      {id:"default/unknown",target:"openai-codex/new-model",surface:"responses"}
+    ]})});
+    expect(pi.registerProvider.mock.calls[0][1].models[0]).toMatchObject({
+      id:"default/unknown", name:"default/unknown",api:"openai-responses",reasoning:false,contextWindow:128_000
+    });
+  });
+
+  it("attaches target provider session headers while preserving explicit headers", async () => {
+    const { pi } = await registerWith({ok:true,json:async()=>({data:[
+      {id:"default/fast",target:"opencode-go=alice/deepseek",surface:"chat"}
+    ]})});
+    const hook = pi.on.mock.calls.find(([name]) => name === "before_provider_headers")![1];
+    const headers = {"x-opencode-client":"explicit"} as Record<string,string>;
+    hook({headers},{model:{provider:"aiproxy",id:"default/fast"},sessionManager:{getSessionId:()=>"session-123"}});
+    expect(headers).toEqual({"x-opencode-session":"session-123","x-opencode-client":"explicit"});
+    const unrelated: Record<string,string> = {};
+    hook({headers:unrelated},{model:{provider:"another",id:"default/fast"}});
+    expect(unrelated).toEqual({});
+  });
+});
+
+describe("automatic provider refresh", () => {
+  it("updates target capabilities, wire driver and header attribution without duplicate hooks", async () => {
+    vi.useFakeTimers();
+    const pi = stubPi();
+    const initial = [{id:"default/fast",target:"opencode-go/old",surface:"chat"}];
+    const changed = [{id:"default/fast",target:"openai-codex/new",surface:"responses"}];
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ok:true,json:async()=>({data:initial})})
+      .mockResolvedValue({ok:true,json:async()=>({data:changed})});
+    try {
+      await registerProxyProvider(pi as never,{base:"http://p/v1",apiKey:"k",token:"k"},{
+        fetchImpl:fetchImpl as never,
+        catalog:new Map([["openai-codex/new",{reasoning:true,contextWindow:272_000,maxTokens:32_000}]]),
+      });
+      const ctx = {isIdle:()=>true,model:{provider:"aiproxy",id:"default/fast"},hasUI:true,ui:{notify:vi.fn()},sessionManager:{getSessionId:()=>"s"}};
+      const headerHook = pi.on.mock.calls.find(([name])=>name==="before_provider_headers")![1];
+      const before: Record<string,string> = {};
+      headerHook({headers:before},ctx);
+      expect(before["x-opencode-session"]).toBe("s");
+      await pi.on.mock.calls.find(([name])=>name==="session_start")?.[1]({},ctx);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(pi.registerProvider).toHaveBeenCalledTimes(2);
+      const model = pi.registerProvider.mock.calls[1][1].models[0];
+      expect(model).toMatchObject({id:"default/fast",api:"openai-responses",reasoning:true,contextWindow:272_000,maxTokens:32_000});
+      const after: Record<string,string> = {};
+      headerHook({headers:after},ctx);
+      expect(after).toEqual({});
+      expect(pi.on.mock.calls.filter(([name])=>name==="before_provider_headers")).toHaveLength(1);
+      expect(fetchImpl.mock.calls[1][1]).toMatchObject({headers:{Authorization:"Bearer k"},signal:expect.any(AbortSignal)});
+      await pi.on.mock.calls.find(([name])=>name==="session_shutdown")?.[1]({},ctx);
+    } finally { vi.clearAllTimers();vi.useRealTimers(); }
+  });
+
+  it("retains working provider models on a malformed refresh response",async()=>{
+    vi.useFakeTimers();
+    const pi=stubPi();
+    const fetchImpl=vi.fn().mockResolvedValueOnce(modelsResponse).mockResolvedValue({ok:true,json:async()=>({data:[{}]})});
+    const ctx={isIdle:()=>true,hasUI:true,ui:{notify:vi.fn()}};
+    try {
+      await registerProxyProvider(pi as never,{base:"http://p/v1",apiKey:""},{fetchImpl:fetchImpl as never,catalog:new Map()});
+      await pi.on.mock.calls.find(([name])=>name==="session_start")?.[1]({},ctx);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(pi.registerProvider).toHaveBeenCalledTimes(1);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("keeping the last catalog"),"warning");
+      await pi.on.mock.calls.find(([name])=>name==="session_shutdown")?.[1]({},ctx);
+    } finally {vi.clearAllTimers();vi.useRealTimers();}
+  });
+});

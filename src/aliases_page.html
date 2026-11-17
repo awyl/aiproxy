@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiproxy — Aliases</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; color: #1a1a1a; }
+h1 { font-size: 1.5rem; }
+p, small { line-height: 1.5; }
+.controls { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; margin: 1rem 0; }
+label { display: grid; gap: .3rem; }
+input, select, button { font: inherit; padding: .5rem; border: 1px solid #cbd5e1; border-radius: 5px; }
+button { background: #f8fafc; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: .5rem; text-align: left; vertical-align: top; }
+td input { width: 10rem; }
+td select { width: 100%; min-width: 15rem; }
+#status { white-space: pre-wrap; }
+#status.error { color: #b91c1c; }
+#path { overflow-wrap: anywhere; color: #64748b; }
+</style>
+</head>
+<body>
+<h1>Model aliases</h1>
+<p>Stable names such as <code>aiproxy/default/fast</code>, mapped to real provider models. Only the model ID changes; the agent must use the target's wire protocol.</p>
+<div class="controls">
+<label>Global proxy token (if configured)
+<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+<button id="load" type="button">Load aliases</button>
+</div>
+<p><small>The token is kept only on this page, never saved in browser storage. Subscription tokens cannot manage aliases.</small></p>
+<div class="table-scroll">
+<table><thead><tr><th>Alias: default/</th><th>Target model / wire surface</th><th>Action</th></tr></thead><tbody id="rows"></tbody></table>
+</div>
+<div class="controls">
+<button id="add" type="button" disabled>Add alias</button>
+<button id="save" type="button" disabled>Save aliases</button>
+</div>
+<p id="status" role="status" aria-live="polite">Loading...</p>
+<p id="path"></p>
+<p><small>Save applies to new proxy requests immediately and survives restarts. Pi refreshes aliases every 60 seconds and applies changes while idle. Run <code>/reload</code> while idle for an immediate update.</small></p>
+<script>
+(() => {
+  const rows = document.getElementById('rows');
+  const status = document.getElementById('status');
+  const token = document.getElementById('token');
+  const save = document.getElementById('save');
+  const add = document.getElementById('add');
+  const load = document.getElementById('load');
+  let targets = [];
+  let loaded = false;
+  function report(message, error = false) {
+    status.textContent = message;
+    status.className = error ? 'error' : '';
+  }
+  function busy(value) {
+    save.disabled = value || !loaded;
+    add.disabled = value || !loaded;
+    load.disabled = value;
+    rows.querySelectorAll('input,select,button').forEach(el => { el.disabled = value; });
+  }
+  async function request(url, init = {}) {
+    const headers = { ...(init.headers || {}) };
+    if (token.value) headers.Authorization = 'Bearer ' + token.value;
+    const response = await fetch(url, { ...init, headers, cache: 'no-store' });
+    const raw = await response.text();
+    let body;
+    try { body = JSON.parse(raw); } catch { throw new Error('HTTP ' + response.status); }
+    if (!response.ok) throw new Error(body.error?.message || 'HTTP ' + response.status);
+    return body;
+  }
+  function row(alias = {}) {
+    const tr = document.createElement('tr');
+    tr.dataset.alias = '';
+    const nameCell = document.createElement('td');
+    const name = document.createElement('input');
+    name.setAttribute('aria-label', 'Alias name');
+    name.placeholder = 'fast';
+    name.value = (alias.id || '').replace(/^default\//, '');
+    nameCell.append(name);
+    const targetCell = document.createElement('td');
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', 'Target model');
+    const options = targets.slice();
+    if (alias.target && !options.some(t => t.id === alias.target)) {
+      options.unshift({ id: alias.target, surface: 'unavailable' });
+    }
+    for (const target of options) {
+      const option = document.createElement('option');
+      option.value = target.id;
+      option.textContent = target.id + ' — ' + target.surface;
+      select.append(option);
+    }
+    if (alias.target) select.value = alias.target;
+    targetCell.append(select);
+    const actionCell = document.createElement('td');
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.dataset.delete = '';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', () => tr.remove());
+    actionCell.append(remove);
+    tr.append(nameCell, targetCell, actionCell);
+    rows.append(tr);
+  }
+  function render(data) {
+    rows.replaceChildren();
+    for (const alias of data.aliases) row(alias);
+    document.getElementById('path').textContent = data.state_path ? 'Saved in: ' + data.state_path : '';
+  }
+  async function refresh() {
+    busy(true);
+    try {
+      const [data, catalog] = await Promise.all([request('/api/aliases'), request('/api/models')]);
+      targets = catalog.providers.flatMap(p => p.models.filter(m => ['chat','messages','responses'].includes(m.surface))
+        .map(m => ({ id: p.id + '/' + m.id, surface: m.surface })));
+      render(data);
+      loaded = true;
+      report('Aliases loaded. Edit mappings, then Save aliases.');
+    } catch (e) { report(e.message, true); }
+    finally { busy(false); }
+  }
+  load.addEventListener('click', refresh);
+  add.addEventListener('click', () => row());
+  save.addEventListener('click', async () => {
+    busy(true);
+    try {
+      const aliases = Object.create(null);
+      for (const tr of rows.children) {
+        const name = tr.querySelector('input').value.trim();
+        if (!/^[A-Za-z0-9._-]+$/.test(name) || name === '.' || name === '..') throw new Error('Enter an alias name using letters, digits, dot, underscore or hyphen.');
+        const id = 'default/' + name;
+        if (Object.hasOwn(aliases, id)) throw new Error('Duplicate alias: ' + id);
+        const target = tr.querySelector('select').value;
+        if (!target) throw new Error('Choose a target model for ' + id);
+        aliases[id] = target;
+      }
+      const data = await request('/api/aliases', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aliases }) });
+      render(data);
+      report('Aliases saved. Pi updates automatically within 60 seconds while idle; /reload refreshes immediately.');
+    } catch (e) { report(e.message, true); }
+    finally { busy(false); }
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

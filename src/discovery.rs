@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 pub struct ModelRegistry {
+    aliases: crate::aliases::AliasStore,
     providers: Vec<Arc<dyn Provider>>,
     catalog: RwLock<BTreeMap<String, Vec<Model>>>,
     /// Last probe failure per provider, kept so the `/models` page can show why
@@ -67,10 +68,61 @@ pub struct RefreshOutcome {
 impl ModelRegistry {
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         Self {
+            aliases: crate::aliases::AliasStore::memory(),
             providers,
             catalog: RwLock::new(BTreeMap::new()),
             last_errors: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    pub fn with_aliases(
+        providers: Vec<Arc<dyn Provider>>,
+        aliases: crate::aliases::AliasStore,
+    ) -> std::io::Result<Self> {
+        if providers.iter().any(|p| p.id() == "default") {
+            return Err(crate::aliases::invalid(
+                "provider prefix 'default' is reserved for aliases",
+            ));
+        }
+        let mut registry = Self::new(providers);
+        registry.aliases = aliases;
+        Ok(registry)
+    }
+
+    pub fn aliases(&self) -> &crate::aliases::AliasStore {
+        &self.aliases
+    }
+
+    pub fn replace_aliases(&self, map: BTreeMap<String, String>) -> std::io::Result<()> {
+        let models = self.models();
+        self.aliases.replace_checked(map, |old, next| {
+            for (id, target) in next {
+                let available = models.iter().any(|m| &m.id == target && m.surface != crate::provider::ModelSurface::Unknown);
+                if !available && old.get(id) != Some(target) {
+                    return Err(crate::aliases::invalid(format!("target '{target}' is not an available inference model with a known wire surface")));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn alias_models(&self) -> Vec<(Model, String)> {
+        let models = self.models();
+        self.aliases
+            .snapshot()
+            .into_iter()
+            .filter_map(|(id, target)| {
+                let mut model = models
+                    .iter()
+                    .find(|m| {
+                        m.id == target && m.surface != crate::provider::ModelSurface::Unknown
+                    })?
+                    .clone();
+                model.id = id.clone();
+                model.display_name = Some(id);
+                Some((model, target))
+            })
+            .collect()
     }
 
     /// Fetch every provider's model list in parallel, per-provider 10s
@@ -212,7 +264,23 @@ impl ModelRegistry {
 
     /// Split "{prefix}/{model}" if the prefix names a known provider.
     pub fn resolve(&self, prefixed: &str) -> Option<(String, String)> {
-        let (pid, model) = prefixed.split_once('/')?;
+        let alias_target = if prefixed.starts_with("default/") {
+            let target = self.aliases.snapshot().get(prefixed)?.clone();
+            if !self
+                .models()
+                .iter()
+                .any(|m| m.id == target && m.surface != crate::provider::ModelSurface::Unknown)
+            {
+                return None;
+            }
+            Some(target)
+        } else {
+            None
+        };
+        let (pid, model) = alias_target
+            .as_deref()
+            .unwrap_or(prefixed)
+            .split_once('/')?;
         if self.provider(pid).is_some() {
             Some((pid.to_string(), model.to_string()))
         } else {
