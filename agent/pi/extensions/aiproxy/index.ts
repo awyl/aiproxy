@@ -65,7 +65,7 @@ export default async function (pi: ExtensionAPI) {
     process.env.AIPROXY_TOKEN = cfg.token;
   }
 
-  await registerProxyProvider(pi, cfg);
+  const targetOf = await registerProxyProvider(pi, cfg);
   await registerMcpTools(pi, cfg);
-  registerUsage(pi, cfg);
+  registerUsage(pi, cfg, targetOf);
 }

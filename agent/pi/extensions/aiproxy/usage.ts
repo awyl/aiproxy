@@ -52,7 +52,7 @@ function formatUsage(usage: ProviderUsage[]): string {
 
 /**
  * Register usage tracking with pi. Handles:
- * - Tracking current provider from model id
+ * - Resolving the selected model to its target provider
  * - Fetching usage on first agent turn
  * - Refreshing every 60s
  * - Displaying in a widget below the editor
@@ -60,22 +60,10 @@ function formatUsage(usage: ProviderUsage[]): string {
 export function registerUsage(
   pi: ExtensionAPI,
   cfg: UsageConfig,
+  targetOf: (id: string) => string = (id) => id,
 ): void {
   let timer: ReturnType<typeof setInterval> | null = null;
   let lastSummary = "";
-  let currentProvider = "";
-
-  // Track current provider from model id (e.g. "opencode-go/mimo-v2.5" → "opencode-go")
-  pi.on("before_provider_headers", (_event, ctx) => {
-    const model = ctx.model;
-    if (!model || model.provider !== "aiproxy") return;
-    const id = model.id || "";
-    const slash = id.indexOf("/");
-    if (slash > 0) {
-      const prefix = id.substring(0, slash);
-      currentProvider = prefix;
-    }
-  });
 
   async function refreshWidget(ctx: ExtensionContext): Promise<void> {
     try {
@@ -84,7 +72,11 @@ export function registerUsage(
       });
       if (!res.ok) return;
       const allUsage: ProviderUsage[] = await res.json();
-      // Filter to current provider once known; show all until first request
+      // Resolve on every refresh so alias retargeting keeps usage in sync.
+      const model = ctx.model;
+      const target = model?.provider === "aiproxy" ? targetOf(model.id) : "";
+      const slash = target.indexOf("/");
+      const currentProvider = slash > 0 ? target.slice(0, slash) : "";
       const usage = currentProvider
         ? allUsage.filter((u) => u.provider === currentProvider)
         : allUsage;

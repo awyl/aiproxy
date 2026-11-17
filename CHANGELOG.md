@@ -4,6 +4,11 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.5] - 2026-11-17
+
+### Fixed
+- **Alias provider usage in pi** — resolve the selected alias through the live model catalog before filtering usage, preserving named subscription IDs. The first turn shows the correct provider, and usage follows alias retargeting on refresh without another model request.
+
 ## [0.4.4] - 2026-11-17
 
 ### Fixed

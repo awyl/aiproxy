@@ -50,6 +50,39 @@ describe("index (glue)", () => {
     }
   });
 
+  it("wires alias target routing into the usage widget", async () => {
+    const before = process.env.AIPROXY_TOKEN;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const body = String(url).endsWith("/usage") ? [
+        { provider: "openai-codex=bob", windows: [{ label: "5h", used_percent: 84 }] },
+        { provider: "openai-codex=alice", windows: [{ label: "5h", used_percent: 42 }] },
+      ] : { data: [{ id: "default/planner", target: "openai-codex=alice/gpt-6.1-sol", surface: "responses" }] };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const { default: factory } = await import("../index.ts");
+      const pi = { registerTool: vi.fn(), registerProvider: vi.fn(), on: vi.fn() };
+      await factory(pi as never);
+      const setWidget = vi.fn();
+      const ctx = {
+        model: { provider: "aiproxy", id: "default/planner" },
+        ui: { setWidget },
+      };
+      for (const [event, handler] of pi.on.mock.calls) {
+        if (event === "before_provider_headers") await handler({ headers: {} }, ctx);
+      }
+      for (const [event, handler] of pi.on.mock.calls) {
+        if (event === "agent_start") await handler({}, ctx);
+      }
+      expect(setWidget).toHaveBeenCalledWith("aiproxy-usage", ["[aiproxy] 5h 42%"], { placement: "belowEditor" });
+    } finally {
+      globalThis.fetch = realFetch;
+      if (before === undefined) delete process.env.AIPROXY_TOKEN;
+      else process.env.AIPROXY_TOKEN = before;
+    }
+  });
+
   it("does not touch the env when no config exists", async () => {
     h.home = join(home, "does-not-exist");
     try {
