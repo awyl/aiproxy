@@ -299,7 +299,7 @@ export async function registerProxyProvider(
   pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
   cfg: ProxyProviderConfig,
   opts: ProxyProviderOptions = {},
-): Promise<void> {
+): Promise<(id: string) => string> {
   const { base, apiKey, token } = cfg;
 
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -400,4 +400,5 @@ export async function registerProxyProvider(
   if (models.length > 0) {
     console.log(`[aiproxy] registered ${models.length} model(s) from ${base}`);
   }
+  return targetOf;
 }
