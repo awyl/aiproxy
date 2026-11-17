@@ -9,9 +9,11 @@ import { join } from "node:path";
 import type { Model, Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { cleanStream } from "./thinking.ts";
+import { parseProxyModels, registerModelRefresh } from "./model-refresh.ts";
 
 export interface ProxyModel {
   id: string;
+  target?: string;
   display_name?: string | null;
   surface?: string;
 }
@@ -307,14 +309,20 @@ export async function registerProxyProvider(
     console.log(`[aiproxy] loaded ${catalog.size} model(s) from pi model store`);
   }
 
-  // Discover models from the proxy
-  let models: ProxyModel[] = [];
-  try {
+  async function fetchModels(signal: AbortSignal): Promise<ProxyModel[]> {
     const res = await fetchImpl(`${base}/models`, {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      signal,
+      cache: "no-store",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    models = ((await res.json()) as { data: ProxyModel[] }).data ?? [];
+    return parseProxyModels(await res.json());
+  }
+
+  // Discover models once before startup selection, then refresh while running.
+  let models: ProxyModel[] = [];
+  try {
+    models = await fetchModels(AbortSignal.timeout(10_000));
   } catch (err) {
     console.warn(
       `[aiproxy] could not fetch ${base}/models: ${err instanceof Error ? err.message : String(err)}\n` +
@@ -322,42 +330,56 @@ export async function registerProxyProvider(
     );
   }
 
-  pi.registerProvider("aiproxy", {
-    name: "aiproxy",
-    baseUrl: base,
-    apiKey,
-    authHeader: true,
-    api: "openai-completions",
-    streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
-      const driver = getApiProvider("openai-completions");
-      if (!driver) throw new Error("openai-completions api provider not registered");
-      const baseStream = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
-      // MiniMax M3 emits thinking twice (reasoning fields + inline <think>); clean it
-      if (THINK_CLEAN_MODELS.has(model.id)) return cleanStream(baseStream);
-      return baseStream;
-    },
-    models: models.map((m) => {
-      // Strip subscription suffix (e.g. "opencode-go=alice" → "opencode-go")
-      // then look up in catalog by provider/modelId
-      const provider = stripSubSuffix(m.id.split('/')[0] ?? '');
-      const modelId = m.id.split('/').slice(1).join('/');
-      const meta = catalog.get(`${provider}/${modelId}`);
-      if (meta) return fromCatalog(m.id, meta, m.surface, base);
-      const api = SURFACE_API[m.surface ?? ""] ?? "openai-completions";
-      const msgBase = wireBaseUrl(api, base);
-      return {
-        id: m.id,
-        name: m.display_name ?? m.id,
-        api,
-        ...(msgBase ? { baseUrl: msgBase } : {}),
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 16_384,
-      };
-    }),
-  });
+  let targets = new Map(models.map(m => [m.id, m.target ?? m.id]));
+  const targetOf = (id: string) => targets.get(id) ?? id;
+
+  function applyModels(nextModels: ProxyModel[]): void {
+    pi.registerProvider("aiproxy", {
+      name: "aiproxy",
+      baseUrl: base,
+      apiKey,
+      authHeader: true,
+      api: "openai-completions",
+      streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
+        const driver = getApiProvider("openai-completions");
+        if (!driver) throw new Error("openai-completions api provider not registered");
+        const baseStream = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
+        // MiniMax M3 emits thinking twice (reasoning fields + inline <think>); clean it
+        if (THINK_CLEAN_MODELS.has(targetOf(model.id))) return cleanStream(baseStream);
+        return baseStream;
+      },
+      models: nextModels.map((m) => {
+        // Strip subscription suffix (e.g. "opencode-go=alice" → "opencode-go")
+        // then look up in catalog by provider/modelId
+        const target = m.target ?? m.id;
+        const provider = stripSubSuffix(target.split('/')[0] ?? '');
+        const modelId = target.split('/').slice(1).join('/');
+        const meta = catalog.get(`${provider}/${modelId}`);
+        if (meta) {
+          const model = fromCatalog(m.id, meta, m.surface, base);
+          if (m.target) model.name = m.display_name ?? m.id;
+          return model;
+        }
+        const api = SURFACE_API[m.surface ?? ""] ?? "openai-completions";
+        const msgBase = wireBaseUrl(api, base);
+        return {
+          id: m.id,
+          name: m.display_name ?? m.id,
+          api,
+          ...(msgBase ? { baseUrl: msgBase } : {}),
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128_000,
+          maxTokens: 16_384,
+        };
+      }),
+    });
+    targets = new Map(nextModels.map(m => [m.id, m.target ?? m.id]));
+  }
+
+  applyModels(models);
+  registerModelRefresh(pi, models, fetchModels, applyModels);
 
   // Fire pi's attribution for aiproxy models — see attributionHeaders above.
   // The hook runs inside pi's transformHeaders for EVERY provider request;
@@ -366,7 +388,7 @@ export async function registerProxyProvider(
   pi.on("before_provider_headers", (event, ctx) => {
     const model = ctx.model;
     if (!model || model.provider !== "aiproxy") return;
-    const kind = stripSubSuffix(model.id.split("/")[0] ?? "");
+    const kind = stripSubSuffix(targetOf(model.id).split("/")[0] ?? "");
     const sessionId = ctx.sessionManager?.getSessionId?.();
     const extra = attributionHeaders(kind, sessionId);
     if (!extra) return;

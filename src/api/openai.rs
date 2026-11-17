@@ -52,6 +52,17 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
             })
         })
         .collect();
+    for (model, target) in state.registry.alias_models() {
+        data.push(json!({
+            "id": model.id,
+            "target": target,
+            "object": "model",
+            "created": model.created_at,
+            "owned_by": "",
+            "display_name": model.display_name,
+            "surface": model.surface.as_str(),
+        }));
+    }
     // Fake local-embeddings provider: config-driven, never discovered.
     for id in state.embeddings.model_ids() {
         data.push(json!({

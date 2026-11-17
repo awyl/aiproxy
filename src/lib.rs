@@ -1,3 +1,4 @@
+pub mod aliases;
 pub mod api;
 pub mod auth;
 pub mod codex_oauth;
