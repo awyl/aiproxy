@@ -195,6 +195,9 @@ background (and on a `401`, once, mid-request).
 models. The proxy applies the Codex request shape (forces `store: false`, `stream: true`,
 default `instructions`, `include: ["reasoning.encrypted_content"]`, `text.verbosity: "low"`,
 drops `max_output_tokens`) and sends `originator: pi` plus your account id.
+System-role `input` messages (for example from Goose) move into top-level
+`instructions`, after any existing nonblank instructions. Developer messages and
+all other input items stay unchanged.
 - **Model discovery** — probes the Codex catalog
 (`GET {base}/codex/models?client_version=X.Y.Z`, same OAuth headers as requests) on every
 model-refresh tick. Offered entries are the ones the picker itself shows:

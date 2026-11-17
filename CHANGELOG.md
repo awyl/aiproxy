@@ -4,6 +4,11 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.4] - 2026-11-17
+
+### Fixed
+- **Goose system prompts on Codex models** — move system-role Responses input text into top-level `instructions` (existing instructions first), avoiding ChatGPT's `System messages are not allowed` rejection. String and text-part-array content are supported; developer messages and clients already using `instructions` remain unchanged.
+
 ## [0.4.3] - 2026-11-17
 
 ### Added
