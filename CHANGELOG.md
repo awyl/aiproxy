@@ -4,6 +4,18 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.6] - 2026-11-17
+
+### Added
+- **Free model discovery** — OpenRouter and NVIDIA default to listing only confirmed free models. Set `free_models_only: false` in YAML or use the persisted **Free only** toggle on `/models`. OpenCode Go models get price-based **Free** badges without filtering the subscription catalog.
+
+### Changed
+- Model discovery no longer runs twice at startup, and `/v1/models` uses one catalog snapshot for models and aliases.
+- Pi uses cached model metadata and fetches the proxy catalog alongside metadata. Local CPU embeddings no longer block async workers.
+
+### Fixed
+- Usage polling uses the upstream inference key rather than the proxy subscription token.
+
 ## [0.4.5] - 2026-11-17
 
 ### Fixed
