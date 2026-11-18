@@ -145,6 +145,10 @@ effect immediately and is saved in `aiproxy-model-visibility.json`
 directory durably. The saved setting overrides YAML on restart; YAML is not
 rewritten.
 
+OpenCode Go's **Free** badge uses the advertised prices from Go's models
+endpoint, not the model name or included subscription allowance. The toggle
+does not hide any OpenCode Go models.
+
 ### Model aliases
 
 Open **/aliases** to create stable names such as `default/fast`, `default/free`,

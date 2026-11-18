@@ -194,10 +194,9 @@ impl ModelRegistry {
             for (id, models) in cat.iter() {
                 updated.entry(id.clone()).or_insert_with(|| {
                     let mut models = models.clone();
-                    if restricts_free_models(id) {
-                        for model in &mut models {
-                            model.free = false;
-                        }
+                    // Availability can be retained, but a free offer may have expired.
+                    for model in &mut models {
+                        model.free = false;
                     }
                     models
                 });

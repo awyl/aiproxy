@@ -15,6 +15,18 @@ use std::sync::{
 };
 
 async fn spawn_catalog() -> (String, Arc<AtomicBool>) {
+    spawn_catalog_with(json!([
+        {"id":"free","pricing":{"prompt":"0","completion":"0.000","request":"0"}},
+        {"id":"paid","pricing":{"prompt":"0","completion":"0","request":"0.01"}},
+        {"id":"unknown:free"},
+        {"id":"dynamic","pricing":{"prompt":"-1","completion":"-1"}},
+        {"id":"tiny","pricing":{"prompt":"1e-999","completion":"0"}},
+        {"id":"bad","pricing":{"prompt":"0","completion":"0","image":"unknown"}}
+    ]))
+    .await
+}
+
+async fn spawn_catalog_with(models: Value) -> (String, Arc<AtomicBool>) {
     // Never let an integration test read or write the runtime state of a live proxy.
     assert!(
         std::env::var_os("AIPROXY_RUNTIME_DIR").is_none_or(|path| path.is_empty())
@@ -28,24 +40,22 @@ async fn spawn_catalog() -> (String, Arc<AtomicBool>) {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, Router::new().route("/models", get(move || {
-            let fail = fail.clone();
-            async move {
-            let status = if fail.load(Ordering::SeqCst) {
-                axum::http::StatusCode::BAD_GATEWAY
-            } else {
-                axum::http::StatusCode::OK
-            };
-            (status, Json(json!({"data": [
-                {"id":"free","pricing":{"prompt":"0","completion":"0.000","request":"0"}},
-                {"id":"paid","pricing":{"prompt":"0","completion":"0","request":"0.01"}},
-                {"id":"unknown:free"},
-                {"id":"dynamic","pricing":{"prompt":"-1","completion":"-1"}},
-                {"id":"tiny","pricing":{"prompt":"1e-999","completion":"0"}},
-                {"id":"bad","pricing":{"prompt":"0","completion":"0","image":"unknown"}}
-            ]})))
-            }
-        }))).await.unwrap();
+        let app = Router::new().route(
+            "/models",
+            get(move || {
+                let fail = fail.clone();
+                let models = models.clone();
+                async move {
+                    let status = if fail.load(Ordering::SeqCst) {
+                        axum::http::StatusCode::BAD_GATEWAY
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (status, Json(json!({"data": models})))
+                }
+            }),
+        );
+        axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), down)
 }
@@ -233,4 +243,63 @@ async fn failed_save_leaves_the_live_policy_unchanged() {
     .await;
     assert_eq!(code, 500);
     assert_eq!(listed(&app).await.len(), 2);
+}
+
+#[tokio::test]
+async fn opencode_go_badges_zero_prices_without_hiding_subscription_models() {
+    let (url, down) = spawn_catalog_with(json!([
+        {"id":"promo","cost":{"text":{"input":{"price":0,"cache":{"read":0.0}},"output":{"price":0}}}},
+        {"id":"included","go":{"monthly_usage":{"go":15}},"cost":{
+            "text":{"input":{"price":3,"cache":{"read":0.3,"write":3}},"output":{"price":15}}
+        }},
+        {"id":"unknown-free","go":{"monthly_usage":null}},
+        {"id":"missing-output","cost":{"text":{"input":{"price":0}}}},
+        {"id":"billable-cache","cost":{"text":{"input":{"price":0,"cache":{"read":0,"write":0.01}},"output":{"price":0}}}},
+        {"id":"billable-image","cost":{
+            "text":{"input":{"price":0},"output":{"price":0}},"image":{"input":{"price":0.001}}
+        }}
+    ])).await;
+    let dir = tempdir().unwrap();
+    let cfg = Config::from_yaml(&format!(
+        r#"
+bind: 127.0.0.1:0
+token: global
+upstreams:
+  - kind: opencode-go
+    discover: true
+    base_url: {url}
+    surface_map_url: {url}/surfaces
+"#
+    ))
+    .unwrap();
+    let (_, app) = server::build_with_port(cfg, dir.path().join("aiproxy.yaml"), None)
+        .await
+        .unwrap();
+
+    let (status, listed) = request(&app, "GET", "/v1/models", "global", None).await;
+    assert_eq!(status, 200);
+    let rows = listed["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 6, "free-only policy must not hide Go models");
+    let flagged: Vec<_> = rows
+        .iter()
+        .filter(|m| m["free"] == true)
+        .map(|m| &m["id"])
+        .collect();
+    assert_eq!(flagged, [&json!("opencode-go/promo")]);
+
+    let (_, catalog) = request(&app, "GET", "/api/models", "", None).await;
+    let rows = catalog["providers"][0]["models"].as_array().unwrap();
+    assert!(rows.iter().all(|m| m["listed"] == true));
+    assert_eq!(rows[0]["id"], "promo");
+    assert_eq!(rows[0]["free"], true);
+
+    down.store(true, Ordering::SeqCst);
+    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    let (_, stale) = request(&app, "GET", "/v1/models", "global", None).await;
+    let rows = stale["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 6, "retain the catalog if discovery fails");
+    assert!(
+        rows.iter().all(|m| m["free"].is_null()),
+        "do not publish an unverified free badge"
+    );
 }

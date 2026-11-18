@@ -239,6 +239,21 @@ impl OpencodeGoProvider {
     }
 }
 
+/// A free offer has explicit zero text rates and no other advertised charges.
+fn zero_catalog_cost(cost: &Value) -> bool {
+    fn all_zero(value: &Value) -> bool {
+        match value {
+            Value::Number(n) => n.as_f64() == Some(0.0),
+            Value::Object(fields) => !fields.is_empty() && fields.values().all(all_zero),
+            _ => false,
+        }
+    }
+
+    cost["text"]["input"]["price"].as_f64() == Some(0.0)
+        && cost["text"]["output"]["price"].as_f64() == Some(0.0)
+        && all_zero(cost)
+}
+
 #[async_trait::async_trait]
 impl Provider for OpencodeGoProvider {
     fn id(&self) -> &str {
@@ -281,7 +296,7 @@ impl Provider for OpencodeGoProvider {
                             id,
                             display_name: None,
                             created_at: m["created"].as_u64().map(|c| c.to_string()),
-                            free: false,
+                            free: zero_catalog_cost(&m["cost"]),
                         }
                     })
                     .collect()
