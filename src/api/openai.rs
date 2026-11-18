@@ -151,6 +151,7 @@ async fn route_one(
             "authentication_error",
         )));
     }
+    crate::api::check_model_policy(&state.registry, &pid, &mid, surface).map_err(Box::new)?;
     let provider = state.registry.provider(&pid).unwrap();
     check_surface(provider.as_ref(), &mid, required, surface).map_err(Box::new)?;
     // Byte-faithful relay: patch only the model id in the raw body so the

@@ -129,15 +129,19 @@ Discovery runs once at startup and then every `model_refresh_secs` (default `0` 
 ### Free OpenRouter and NVIDIA models
 
 `free_models_only: true` (the default) filters only OpenRouter and NVIDIA on
-`/v1/models`. Aliases follow their targets. Other upstreams and requests made
-directly by model ID are unaffected. This is **not** a spending limit.
+`/v1/models` and refuses requests to filtered-out models with HTTP 403 before
+forwarding. This applies to direct model IDs and aliases on chat, Responses, and
+Messages routes. Other upstreams, including OpenCode Go, are unaffected.
+Turning the toggle off restores access to those models; requests already in
+flight are not cancelled. This is **not** a billing guarantee: classifications
+reflect the last discovery, and upstream prices or terms can change.
 
 Enable `discover: true` on those upstreams. OpenRouter's badge requires zero
 advertised prices. NVIDIA's **Free Endpoint** badge requires an exact match in
 the public [Build catalog](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview).
 If a model cannot be verified (including a static list or an unavailable catalog
-source), it stays hidden in free-only mode. For rotating offers, set
-`model_refresh_secs: 300` or use **Reload models**.
+source), it stays hidden and requests to it are refused in free-only mode.
+For rotating offers, set `model_refresh_secs: 300` or use **Reload models**.
 
 Change **Free only** on `/models` with the global proxy token. The setting takes
 effect immediately and is saved in `aiproxy-model-visibility.json`

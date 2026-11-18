@@ -18,7 +18,7 @@ model_refresh_secs: 0              # discovery interval; 0 = fetch once at start
                                # Reload button (POST /api/reload), which shows each result,
                                # which is how you see why an upstream has no models.
 
-# Only confirmed free OpenRouter and NVIDIA models are listed to clients.
+# Only confirmed free OpenRouter and NVIDIA models are listed and allowed.
 # The durable /models toggle overrides this YAML default.
 free_models_only: true
 

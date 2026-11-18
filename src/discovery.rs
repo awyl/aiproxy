@@ -283,6 +283,20 @@ impl ModelRegistry {
         out
     }
 
+    /// Apply the listing policy to a resolved inference target, failing closed
+    /// for restricted models whose free status is absent or unverified.
+    pub(crate) fn model_is_allowed(&self, provider_id: &str, model_id: &str) -> bool {
+        if model_is_listed(self.visibility.get(), provider_id, false) {
+            return true;
+        }
+        self.catalog
+            .read()
+            .unwrap()
+            .get(provider_id)
+            .and_then(|models| models.iter().find(|model| model.id == model_id))
+            .is_some_and(|model| model.free)
+    }
+
     pub fn provider(&self, id: &str) -> Option<Arc<dyn Provider>> {
         self.providers.iter().find(|p| p.id() == id).cloned()
     }
@@ -325,6 +339,39 @@ mod tests {
     use crate::provider::Provider;
     use crate::provider::testutil::MockProvider;
     use std::sync::Arc;
+
+    #[test]
+    fn request_policy_uses_confirmed_free_status_and_exact_provider_scope() {
+        let registry = ModelRegistry::new(vec![]);
+        for provider in ["openrouter", "openrouter=one", "nvidia", "nvidia=gpu"] {
+            registry.catalog.write().unwrap().insert(
+                provider.into(),
+                vec![Model {
+                    id: "vendor/free".into(),
+                    display_name: None,
+                    created_at: None,
+                    surface: ModelSurface::ChatCompletions,
+                    free: true,
+                }],
+            );
+            assert!(registry.model_is_allowed(provider, "vendor/free"));
+            assert!(!registry.model_is_allowed(provider, "vendor/unknown"));
+            registry.catalog.write().unwrap().get_mut(provider).unwrap()[0].free = false;
+            assert!(!registry.model_is_allowed(provider, "vendor/free"));
+        }
+        for provider in ["openai", "opencode-go", "opencode-go=one", "nvidia-other"] {
+            assert!(registry.model_is_allowed(provider, "uncataloged"));
+        }
+        registry
+            .visibility
+            .set(crate::model_visibility::VisibilitySetting {
+                free_models_only: false,
+            })
+            .unwrap();
+        for provider in ["openrouter", "openrouter=one", "nvidia", "nvidia=gpu"] {
+            assert!(registry.model_is_allowed(provider, "uncataloged"));
+        }
+    }
 
     fn providers() -> Vec<Arc<dyn Provider>> {
         vec![

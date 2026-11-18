@@ -34,7 +34,7 @@ models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
   <label><input id="free-only" type="checkbox" disabled> Free only (OpenRouter and NVIDIA)</label>
   <label>Global proxy token <input id="global-token" type="password" autocomplete="off"></label>
 </div>
-<p class="sub">This changes the catalog for all clients and survives restart. It does not block paid inference.</p>
+<p class="sub">This changes the catalog for all clients and survives restart. While enabled, requests to filtered-out OpenRouter and NVIDIA models are refused (HTTP 403), including aliases.</p>
 <div id="visibility-error" class="error" role="status"></div>
 <div id="data">Loading...</div>
 <div class="updated" id="updated"></div>
