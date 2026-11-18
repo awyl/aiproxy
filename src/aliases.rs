@@ -34,6 +34,10 @@ impl AliasStore {
         self.path.as_deref()
     }
 
+    pub(crate) fn target(&self, alias: &str) -> Option<String> {
+        self.mappings.lock().unwrap().get(alias).cloned()
+    }
+
     pub fn snapshot(&self) -> BTreeMap<String, String> {
         self.mappings.lock().unwrap().clone()
     }

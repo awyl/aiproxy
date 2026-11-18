@@ -80,12 +80,12 @@ Config lives in a single YAML file. Keys are **never** stored in the config — 
 bind: 127.0.0.1:8080                # or 0.0.0.0:8080 for all interfaces
 token_env: AIPROXY_TOKEN             # bearer auth; omit both token_env/token = no auth
 model_refresh_secs: 0                # 0 = fetch once at startup; >0 = periodic refresh
-free_models_only: true               # filter OpenRouter and NVIDIA only
 
 upstreams:
   - kind: opencode-go              # name optional — provider ID = "opencode-go"
     api_key_env: OPENCODE_GO_API_KEY
     discover: true                   # public catalog, safe to enable
+    free_models_only: false          # optional; leave the full Go catalog available
 
   - kind: minimax                   # provider ID = "minimax"
     api_key_env: MINIMAX_API_KEY
@@ -115,7 +115,7 @@ embeddings:
 - `models: [...]` — static list, never probed (recommended for keyed upstreams)
 - `discover: true` — probe `GET <base_url>/models` at startup/refresh (for
   `openai-codex`: `GET <base_url>/codex/models`, authenticated with the subscription)
-- Neither — empty catalog; requests still route, agents see nothing in `/v1/models`
+- Neither — empty catalog; requests still route unless **Free only** is enabled for the upstream
 - `surface: chat | messages | responses` — for a static list, which wire format those
   models are served on (this is what `/v1/models` reports and what clients route by).
   Without it a static entry is catalog-only: listed, but not streamable. On
@@ -124,34 +124,36 @@ embeddings:
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
-Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface, free, listed}], error}`. A login to `openai-codex` triggers discovery automatically.
+Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface, free, listed}], error, free_models_only}`. A login to `openai-codex` triggers discovery automatically.
 
-### Free OpenRouter and NVIDIA models
+### Free-only models per upstream
 
-`free_models_only: true` (the default) filters only OpenRouter and NVIDIA on
-`/v1/models` and refuses requests to filtered-out models with HTTP 403 before
-forwarding. This applies to direct model IDs and aliases on chat, Responses, and
-Messages routes. Other upstreams, including OpenCode Go, are unaffected.
-Turning the toggle off restores access to those models; requests already in
-flight are not cancelled. This is **not** a billing guarantee: classifications
-reflect the last discovery, and upstream prices or terms can change.
+Set `free_models_only: true` or `false` on an entry under `upstreams:`. The default
+is **on** for OpenRouter and NVIDIA, **off** for OpenCode Go. Named accounts
+have independent settings. When on, `/v1/models` lists only verified free models
+for that upstream, and chat, Responses, and Messages requests to filtered
+models return HTTP 403 before forwarding, including aliases. Switching it off
+restores ordinary routing. In-flight requests are not cancelled.
 
-Enable `discover: true` on those upstreams. OpenRouter's badge requires zero
-advertised prices. NVIDIA's **Free Endpoint** badge requires an exact match in
-the public [Build catalog](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview).
-If a model cannot be verified (including a static list or an unavailable catalog
-source), it stays hidden and requests to it are refused in free-only mode.
-For rotating offers, set `model_refresh_secs: 300` or use **Reload models**.
+Enable `discover: true` to verify free models. OpenRouter and OpenCode Go
+use zero advertised prices, not Go's included subscription allowance. NVIDIA
+uses exact matches from the public [Build catalog](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview)
+**Free Endpoint** results. Static and otherwise unverified entries are blocked
+while free-only is on. This is **not** a billing guarantee: offers can change
+between discoveries. Set `model_refresh_secs: 300` or use **Reload models**.
 
-Change **Free only** on `/models` with the global proxy token. The setting takes
-effect immediately and is saved in `aiproxy-model-visibility.json`
+On `/models`, expand the upstream and change **Free only** with the global proxy
+token. The change takes effect after saving and survives restart in
+`aiproxy-model-visibility.json`
 (`AIPROXY_RUNTIME_DIR` → existing `/runtime` → config directory). Mount that
-directory durably. The saved setting overrides YAML on restart; YAML is not
-rewritten.
+directory durably. Saved overrides take precedence over YAML; YAML is not
+rewritten. A legacy saved global value applies only to configured OpenRouter
+and NVIDIA upstreams, unless individually overridden. Legacy top-level YAML
+is a fallback for those two kinds only.
 
-OpenCode Go's **Free** badge uses the advertised prices from Go's models
-endpoint, not the model name or included subscription allowance. The toggle
-does not hide any OpenCode Go models.
+The management API exposes `free_models_only` per upstream (null if unsupported).
+`PUT /api/models` accepts `{"provider":"openrouter=work","free_models_only":true}`,
+using the current upstream ID. The old global write body is no longer accepted.
 
 ### Model aliases
 

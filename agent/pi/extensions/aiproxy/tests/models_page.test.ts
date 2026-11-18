@@ -157,6 +157,7 @@ describe("models page", () => {
 it("sends the token and new model policy, then renders the server's catalog", async () => {
   const updates: RequestInit[] = [];
   let freeOnly = true;
+  let allowUpdate = true;
   const dom = new JSDOM(PAGE, {
     url: "http://localhost/models",
     runScripts: "dangerously",
@@ -164,18 +165,21 @@ it("sends the token and new model policy, then renders the server's catalog", as
       window.fetch = async (_url, init) => {
         if (init?.method === "PUT") {
           updates.push(init);
+          if (!allowUpdate) {
+            return Response.json({error: {message: "could not save"}}, {status: 500});
+          }
           freeOnly = JSON.parse(String(init.body)).free_models_only;
         }
         return new Response(JSON.stringify({
-          free_models_only: freeOnly,
           total: freeOnly ? 1 : 2,
           providers: [{
             id: "nvidia",
+            free_models_only: freeOnly,
             models: [
               {id: "verified", surface: "chat", free: true, listed: true},
               {id: "unverified", surface: "chat", free: false, listed: !freeOnly},
             ],
-          }],
+          }, {id: "openrouter=two", free_models_only: true, models: []}, {id: "openai", models: []}],
         }));
       };
     },
@@ -183,7 +187,7 @@ it("sends the token and new model policy, then renders the server's catalog", as
   try {
     await settle(dom);
     const doc = dom.window.document;
-    const toggle = doc.querySelector<HTMLInputElement>("#free-only");
+    const toggle = section(dom, "nvidia").querySelector<HTMLInputElement>(".free-only");
     expect(toggle?.checked).toBe(true);
     expect(doc.querySelector("#data")?.textContent).toContain("Free Endpoint");
     expect(doc.querySelector("#data")?.textContent).not.toContain("unverified");
@@ -192,9 +196,20 @@ it("sends the token and new model policy, then renders the server's catalog", as
     await settle(dom);
     expect(updates).toHaveLength(1);
     expect(new Headers(updates[0].headers).get("Authorization")).toBe("Bearer admin");
-    expect(JSON.parse(String(updates[0].body))).toEqual({free_models_only: false});
-    expect(toggle!.checked).toBe(false);
+    expect(JSON.parse(String(updates[0].body))).toEqual({provider: "nvidia", free_models_only: false});
+    expect(section(dom, "nvidia").querySelector<HTMLInputElement>(".free-only")?.checked).toBe(false);
+    expect(section(dom, "openrouter=two").querySelector<HTMLInputElement>(".free-only")?.checked).toBe(true);
+    expect(section(dom, "openai").querySelector(".free-only")).toBeNull();
     expect(doc.querySelector("#data")?.textContent).toContain("unverified");
+
+    allowUpdate = false;
+    const current = section(dom, "nvidia").querySelector<HTMLInputElement>(".free-only")!;
+    current.click();
+    await settle(dom);
+    expect(current.checked).toBe(false);
+    expect(current.disabled).toBe(false);
+    expect(doc.querySelector("#visibility-error")?.textContent).toBe("could not save");
+    expect(section(dom, "openrouter=two").querySelector<HTMLInputElement>(".free-only")?.checked).toBe(true);
   } finally {
     dom.window.close();
   }

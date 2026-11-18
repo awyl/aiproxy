@@ -18,10 +18,6 @@ model_refresh_secs: 0              # discovery interval; 0 = fetch once at start
                                # Reload button (POST /api/reload), which shows each result,
                                # which is how you see why an upstream has no models.
 
-# Only confirmed free OpenRouter and NVIDIA models are listed and allowed.
-# The durable /models toggle overrides this YAML default.
-free_models_only: true
-
 # Multi-subscription: give each upstream its own bearer token. The token both
 # authenticates the request AND locks it to that subscription's models; requests
 # for a prefix you don't own are rejected (401). Owner token example:
@@ -35,6 +31,7 @@ upstreams:
   - kind: opencode-go             # name optional — provider ID = "opencode-go"
     api_key_env: OPENCODE_GO_API_KEY
     discover: true
+    # free_models_only: true       # optional; OpenCode Go defaults to false
     # endpoint_by_model:            # overrides for new models (chat | messages | responses)
     #   qwen3.9-x: messages
     # surface_map_url: https://opencode.ai/docs/go   # runtime surface source (default)
@@ -78,6 +75,7 @@ upstreams:
   # Self-hosted NIM = same kind, custom base_url.
   - kind: nvidia                   # provider ID = "nvidia"
     api_key_env: NVIDIA_API_KEY
+    # free_models_only: false      # optional; NVIDIA defaults to true
     discover: true          # safe: GET /v1/models is keyless (83 models)
 
   # OpenRouter — OpenAI-compatible aggregator (openrouter.ai/api/v1).
@@ -85,6 +83,7 @@ upstreams:
   # calls need OPENROUTER_API_KEY.
   - kind: openrouter               # provider ID = "openrouter"
     api_key_env: OPENROUTER_API_KEY
+    # free_models_only: false      # optional; OpenRouter defaults to true
     discover: true          # safe: GET /v1/models is keyless (396 models)
 
   # ChatGPT / Codex subscription (ChatGPT Plus or Pro) — Responses surface only.

@@ -70,6 +70,35 @@ pub async fn build_with_options(
         &codex.token_url,
     ));
     let providers = build_providers(&config, &codex_managers);
+    let mut visibility_defaults = std::collections::BTreeMap::new();
+    for (upstream, provider) in config.upstreams.iter().zip(&providers) {
+        let Some(default) = provider.free_only_default() else {
+            if upstream.free_models_only.is_some() {
+                return Err(crate::config::ConfigError::Invalid(format!(
+                    "upstream '{}': free_models_only is not supported",
+                    provider.id()
+                ))
+                .into());
+            }
+            continue;
+        };
+        // Only these two kinds were covered by the old global setting.
+        let inherits_legacy = matches!(
+            upstream.kind,
+            crate::config::UpstreamKind::Openrouter | crate::config::UpstreamKind::Nvidia
+        );
+        visibility_defaults.insert(
+            provider.id().to_owned(),
+            crate::model_visibility::VisibilityDefault {
+                state_key: format!("{}={}", upstream.kind.as_str(), upstream.effective_name()),
+                free_only: upstream
+                    .free_models_only
+                    .or(config.free_models_only.filter(|_| inherits_legacy))
+                    .unwrap_or(default),
+                inherits_legacy,
+            },
+        );
+    }
     let aliases_path = crate::aliases::alias_state_path(&config_path);
     let aliases = crate::aliases::AliasStore::load(aliases_path.clone()).map_err(|e| {
         std::io::Error::new(
@@ -83,7 +112,7 @@ pub async fn build_with_options(
         crate::aliases::runtime_state_path(&config_path, "aiproxy-model-visibility.json");
     registry.visibility = crate::model_visibility::ModelVisibility::load(
         visibility_path.clone(),
-        config.free_models_only,
+        visibility_defaults,
     )
     .map_err(|error| {
         std::io::Error::new(
@@ -94,7 +123,7 @@ pub async fn build_with_options(
             ),
         )
     })?;
-    tracing::info!(path = %visibility_path.display(), free_only = registry.visibility.get(), "model visibility state");
+    tracing::info!(path = %visibility_path.display(), "model visibility state");
     let registry = Arc::new(registry);
     registry.refresh().await;
 

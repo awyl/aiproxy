@@ -39,9 +39,12 @@ pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router
 }
 
 pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
-    let free_only = state.registry.visibility.get();
+    let policy = state.registry.visibility.snapshot();
     let listed = |id: &str, free| {
-        crate::discovery::model_is_listed(free_only, id.split('/').next().unwrap_or_default(), free)
+        free || !policy
+            .get(id.split('/').next().unwrap_or_default())
+            .copied()
+            .unwrap_or(false)
     };
     let models = state.registry.models();
     let aliases = state.registry.alias_models_from(&models);

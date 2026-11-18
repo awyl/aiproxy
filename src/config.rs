@@ -97,6 +97,9 @@ pub struct UpstreamConfig {
     pub models: Vec<String>,
     #[serde(default)]
     pub discover: bool,
+    /// Override the provider's free-only default for this upstream.
+    #[serde(default)]
+    pub free_models_only: Option<bool>,
     /// `openai-codex` only: the `client_version` sent to the Codex model
     /// catalog. The backend hides models newer than the client version, so a
     /// stale value silently yields an empty catalog. Defaults to a recent Codex
@@ -273,8 +276,9 @@ pub struct Config {
     pub token_env: Option<String>,
     #[serde(default = "default_refresh")]
     pub model_refresh_secs: u64,
-    #[serde(default = "default_free_models_only")]
-    pub free_models_only: bool,
+    /// Legacy default for OpenRouter and NVIDIA.
+    #[serde(default)]
+    pub free_models_only: Option<bool>,
     pub upstreams: Vec<UpstreamConfig>,
     #[serde(default)]
     pub mcp: McpConfig,
@@ -288,10 +292,6 @@ impl Config {
         parse_bind(&self.bind)
     }
 }
-fn default_free_models_only() -> bool {
-    true
-}
-
 fn default_refresh() -> u64 {
     0 // fetch once at startup; set > 0 for periodic refresh
 }

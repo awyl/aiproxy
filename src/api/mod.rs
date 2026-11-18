@@ -37,7 +37,8 @@ mod tests {
                 "openrouter=one",
                 vec!["paid".into()],
                 ModelSurface::ChatCompletions,
-            ),
+            )
+            .with_free_only(true),
         )]);
         registry.refresh().await;
         registry
@@ -242,7 +243,7 @@ pub(crate) fn check_model_policy(
         return Ok(());
     }
     let message = format!(
-        "model '{provider_id}/{model_id}' is blocked by free_models_only; only confirmed free OpenRouter and NVIDIA models are allowed"
+        "model '{provider_id}/{model_id}' is blocked by free_models_only for this upstream; only confirmed free models are allowed"
     );
     Err(match surface {
         Surface::Openai => openai_error(StatusCode::FORBIDDEN, message, "permission_error"),
