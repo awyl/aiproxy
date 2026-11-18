@@ -4,6 +4,13 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.7] - 2026-11-18
+
+### Changed
+- **Free only per upstream** — configure OpenRouter, NVIDIA, and OpenCode Go separately, including named accounts. The `/models` switches save independently; existing global settings carry forward for OpenRouter and NVIDIA. The management API now expects an upstream ID when updating a switch.
+- **Enforce Free only** — filtered models and aliases return HTTP 403 before reaching the upstream.
+- Alias routing looks up the target in its provider's catalog without cloning and sorting the full model list.
+
 ## [0.4.6] - 2026-11-17
 
 ### Added

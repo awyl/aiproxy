@@ -39,9 +39,12 @@ pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router
 }
 
 pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
-    let free_only = state.registry.visibility.get();
+    let policy = state.registry.visibility.snapshot();
     let listed = |id: &str, free| {
-        crate::discovery::model_is_listed(free_only, id.split('/').next().unwrap_or_default(), free)
+        free || !policy
+            .get(id.split('/').next().unwrap_or_default())
+            .copied()
+            .unwrap_or(false)
     };
     let models = state.registry.models();
     let aliases = state.registry.alias_models_from(&models);
@@ -151,6 +154,7 @@ async fn route_one(
             "authentication_error",
         )));
     }
+    crate::api::check_model_policy(&state.registry, &pid, &mid, surface).map_err(Box::new)?;
     let provider = state.registry.provider(&pid).unwrap();
     check_surface(provider.as_ref(), &mid, required, surface).map_err(Box::new)?;
     // Byte-faithful relay: patch only the model id in the raw body so the

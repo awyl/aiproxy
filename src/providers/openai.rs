@@ -102,6 +102,14 @@ impl Provider for OpenAiProvider {
         &self.id
     }
 
+    fn free_only_default(&self) -> Option<bool> {
+        matches!(
+            self.kind,
+            crate::config::UpstreamKind::Openrouter | crate::config::UpstreamKind::Nvidia
+        )
+        .then_some(true)
+    }
+
     fn surface_of(&self, _model: &str) -> ModelSurface {
         ModelSurface::ChatCompletions
     }
@@ -246,6 +254,7 @@ mod tests {
     fn provider(base: &str, key: Option<&str>) -> OpenAiProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            free_models_only: None,
             client_version: None,
             token_env: None,
             surface: None,

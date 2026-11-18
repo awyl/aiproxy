@@ -67,6 +67,11 @@ pub async fn messages(
             "authentication_error",
         );
     }
+    if let Err(resp) =
+        crate::api::check_model_policy(&state.registry, &pid, &mid, Surface::Anthropic)
+    {
+        return resp;
+    }
     let provider = state.registry.provider(&pid).unwrap();
     if let Err(resp) = check_surface(
         provider.as_ref(),

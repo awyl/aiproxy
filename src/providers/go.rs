@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+pub(super) const FREE_ONLY_DEFAULT: bool = false;
+
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Fallback snapshot of opencode.ai/docs/go endpoints table (2026-08-30).
@@ -260,6 +262,10 @@ impl Provider for OpencodeGoProvider {
         &self.id
     }
 
+    fn free_only_default(&self) -> Option<bool> {
+        Some(FREE_ONLY_DEFAULT)
+    }
+
     fn surface_of(&self, model: &str) -> ModelSurface {
         self.surface(model)
     }
@@ -464,6 +470,7 @@ mod tests {
     ) -> OpencodeGoProvider {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            free_models_only: None,
             client_version: None,
             token_env: None,
             surface: None,
@@ -541,6 +548,7 @@ mod tests {
     fn config_override_beats_runtime_and_builtin() {
         let cfg = crate::config::UpstreamConfig {
             discover: false,
+            free_models_only: None,
             client_version: None,
             token_env: None,
             surface: None,

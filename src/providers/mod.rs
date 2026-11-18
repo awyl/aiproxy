@@ -27,6 +27,7 @@ pub struct StaticProvider {
     id: String,
     models: Vec<String>,
     surface: Option<ModelSurface>,
+    free_only: Option<bool>,
 }
 
 impl StaticProvider {
@@ -43,6 +44,7 @@ impl StaticProvider {
             id: id.to_string(),
             models: cfg.models.clone(),
             surface,
+            free_only: (cfg.kind == UpstreamKind::OpencodeGo).then_some(go::FREE_ONLY_DEFAULT),
         }))
     }
 }
@@ -51,6 +53,9 @@ impl StaticProvider {
 impl Provider for StaticProvider {
     fn id(&self) -> &str {
         &self.id
+    }
+    fn free_only_default(&self) -> Option<bool> {
+        self.free_only
     }
     fn surface_of(&self, _model: &str) -> ModelSurface {
         self.surface.unwrap_or(ModelSurface::Unknown)
@@ -131,6 +136,9 @@ impl NoDiscoveryProvider {
 impl Provider for NoDiscoveryProvider {
     fn id(&self) -> &str {
         self.inner.id()
+    }
+    fn free_only_default(&self) -> Option<bool> {
+        self.inner.free_only_default()
     }
     fn surface_of(&self, model: &str) -> ModelSurface {
         self.inner.surface_of(model)
@@ -296,6 +304,7 @@ mod tests {
             token_env: None,
             models: vec!["gpt-5.6-sol".into()],
             discover: false,
+            free_models_only: None,
             client_version: None,
             endpoint_by_model: Default::default(),
             surface_map_url: None,

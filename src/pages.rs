@@ -14,16 +14,17 @@ use serde_json::{Value, json};
 /// models (bare ids + surface) and the last probe's error, if any.
 fn catalog_json(state: &AppState) -> Value {
     let snapshot = state.registry.catalog_snapshot();
-    let free_only = state.registry.visibility.get();
+    let policy = state.registry.visibility.snapshot();
     let mut total = 0;
     let providers = snapshot
         .iter()
         .map(|p| {
+            let free_only = policy.get(p.id.as_str()).copied();
             let models = p
                 .models
                 .iter()
                 .map(|m| {
-                    let listed = crate::discovery::model_is_listed(free_only, &p.id, m.free);
+                    let listed = m.free || !free_only.unwrap_or(false);
                     total += usize::from(listed);
                     json!({
                         "id": m.id,
@@ -33,10 +34,13 @@ fn catalog_json(state: &AppState) -> Value {
                     })
                 })
                 .collect::<Vec<_>>();
-            json!({"id": p.id, "count": models.len(), "models": models, "error": p.error})
+            json!({
+                "id": p.id, "count": models.len(), "models": models, "error": p.error,
+                "free_models_only": free_only,
+            })
         })
         .collect::<Vec<_>>();
-    json!({"total": total, "free_models_only": free_only, "providers": providers})
+    json!({"total": total, "providers": providers})
 }
 
 /// Full discovery catalog for management tools. "listed" is the effective
@@ -68,6 +72,14 @@ pub(crate) async fn set_models_visibility(
         ));
     }
 
+    if !state.registry.visibility.supports(&setting.provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": {"message": "unknown upstream or free-only mode is unsupported"}}),
+            ),
+        ));
+    }
     let registry = state.registry.clone();
     match tokio::task::spawn_blocking(move || registry.visibility.set(setting)).await {
         Ok(Ok(())) => Ok(Json(catalog_json(&state))),

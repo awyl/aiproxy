@@ -21,6 +21,7 @@ li { font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 0.1rem 0
 li .surface { color: #666; font-size: 0.75rem; margin-left: 0.5rem; }
 li .free { color: #15803d; font-size: 0.75rem; margin-left: 0.5rem; }
 #visibility { margin: 0.75rem 0; display: flex; align-items: center; gap: 0.5rem 1rem; flex-wrap: wrap; }
+.provider-policy { display: block; padding: 0.5rem 1rem; }
 .body-error { color: #dc2626; font-family: ui-monospace, monospace; font-size: 0.8rem; padding: 0.5rem 1rem; }
 .updated { color: #999; font-size: 0.8rem; margin-top: 1rem; }
 </style>
@@ -31,10 +32,9 @@ li .free { color: #15803d; font-size: 0.75rem; margin-left: 0.5rem; }
 models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
 <button id="go" onclick="reloadModels()">Reload models</button>
 <div id="visibility">
-  <label><input id="free-only" type="checkbox" disabled> Free only (OpenRouter and NVIDIA)</label>
   <label>Global proxy token <input id="global-token" type="password" autocomplete="off"></label>
 </div>
-<p class="sub">This changes the catalog for all clients and survives restart. It does not block paid inference.</p>
+<p class="sub">Free only applies to the selected upstream for all clients and survives restart. Requests to filtered models (including aliases) return HTTP 403.</p>
 <div id="visibility-error" class="error" role="status"></div>
 <div id="data">Loading...</div>
 <div class="updated" id="updated"></div>
@@ -42,15 +42,13 @@ models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
 // Which sections the reader opened. Kept outside the DOM so a re-render (after a
 // reload) does not collapse everything.
 const openIds = new Set();
-const toggle = document.getElementById('free-only');
+const catalog = document.getElementById('data');
 const token = document.getElementById('global-token');
 const visibilityError = document.getElementById('visibility-error');
-let freeOnly = true;
-let catalogLoaded = false;
 let pending = false;
 
 function lockControls() {
-  toggle.disabled = !catalogLoaded || pending;
+  catalog.querySelectorAll('.free-only').forEach(toggle => { toggle.disabled = pending; });
   document.getElementById('go').disabled = pending;
 }
 
@@ -59,10 +57,6 @@ function escapeHtml(s) {
 }
 
 function render(data) {
-  freeOnly = data.free_models_only === true;
-  toggle.checked = freeOnly;
-  catalogLoaded = true;
-  lockControls();
   const providers = data.providers || [];
   if (!providers.length) {
     document.getElementById('data').innerHTML = '<p class="sub">No upstreams.</p>';
@@ -79,17 +73,22 @@ function render(data) {
       (m.surface ? '<span class="surface">' + escapeHtml(m.surface) + '</span>' : '') +
       (m.free ? '<span class="free">' + freeLabel + '</span>' : '') +
       '</li>').join('');
+    const freeToggle = typeof p.free_models_only === 'boolean'
+      ? '<label class="provider-policy"><input class="free-only" type="checkbox"' +
+        (p.free_models_only ? ' checked' : '') + '> Free only</label>'
+      : '';
     const errorLine = p.error
       ? '<div class="body-error">' + escapeHtml(p.error) + '</div>'
       : '';
     return '<details class="provider" data-id="' + escapeHtml(p.id) + '"' +
       (openIds.has(p.id) ? ' open' : '') + '>' +
       '<summary><span class="id">' + escapeHtml(p.id) + '</span>' + count + flag + '</summary>' +
-      errorLine +
+      freeToggle + errorLine +
       (models.length ? '<ul>' + list + '</ul>' : '') +
       '</details>';
   }).join('');
-  document.querySelectorAll('details.provider').forEach(d => {
+  lockControls();
+  catalog.querySelectorAll('details.provider').forEach(d => {
     d.addEventListener('toggle', () => {
       if (d.open) { openIds.add(d.dataset.id); } else { openIds.delete(d.dataset.id); }
     });
@@ -130,7 +129,11 @@ async function reloadModels() {
   }
 }
 
-toggle.addEventListener('change', async () => {
+catalog.addEventListener('change', async event => {
+  const toggle = event.target;
+  if (!toggle.matches('input.free-only') || pending) return;
+  const provider = toggle.closest('details.provider').dataset.id;
+  const checked = toggle.checked;
   pending = true;
   lockControls();
   visibilityError.textContent = '';
@@ -140,14 +143,14 @@ toggle.addEventListener('change', async () => {
     const r = await fetch('/api/models', {
       method: 'PUT',
       headers,
-      body: JSON.stringify({ free_models_only: toggle.checked }),
+      body: JSON.stringify({ provider, free_models_only: checked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error?.message || ('HTTP ' + r.status));
     render(data);
     document.getElementById('updated').textContent = 'Total ' + data.total + ' models';
   } catch (e) {
-    toggle.checked = freeOnly;
+    toggle.checked = !checked;
     visibilityError.textContent = e.message;
   } finally {
     pending = false;

@@ -126,6 +126,11 @@ pub trait Provider: Send + Sync + 'static {
     /// Stable id used in config (`name:` field) and in model IDs ("opencode-go/").
     fn id(&self) -> &str;
 
+    /// Whether this adapter classifies free models, and its free-only default.
+    fn free_only_default(&self) -> Option<bool> {
+        None
+    }
+
     /// Which wire surface this provider serves a given model id on. Lets the
     /// API layer reject mismatched routes before forwarding (400 with a hint).
     fn surface_of(&self, model: &str) -> ModelSurface;
@@ -167,6 +172,7 @@ pub mod testutil {
         models: Vec<String>,
         surface: ModelSurface,
         fail: bool,
+        free_only: Option<bool>,
     }
 
     impl MockProvider {
@@ -176,6 +182,7 @@ pub mod testutil {
                 models,
                 surface: ModelSurface::Unknown,
                 fail: false,
+                free_only: None,
             }
         }
         pub fn with_surface(id: &str, models: Vec<String>, surface: ModelSurface) -> Self {
@@ -184,7 +191,12 @@ pub mod testutil {
                 models,
                 surface,
                 fail: false,
+                free_only: None,
             }
+        }
+        pub fn with_free_only(mut self, default: bool) -> Self {
+            self.free_only = Some(default);
+            self
         }
         pub fn failing(id: &str) -> Self {
             Self {
@@ -192,6 +204,7 @@ pub mod testutil {
                 models: vec![],
                 surface: ModelSurface::Unknown,
                 fail: true,
+                free_only: None,
             }
         }
     }
@@ -206,6 +219,9 @@ pub mod testutil {
     impl Provider for MockProvider {
         fn id(&self) -> &str {
             &self.id
+        }
+        fn free_only_default(&self) -> Option<bool> {
+            self.free_only
         }
         fn surface_of(&self, _model: &str) -> ModelSurface {
             self.surface

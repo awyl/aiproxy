@@ -26,13 +26,17 @@ async fn spawn_catalog() -> (String, Arc<AtomicBool>) {
     .await
 }
 
-async fn spawn_catalog_with(models: Value) -> (String, Arc<AtomicBool>) {
+fn assert_isolated_runtime() {
     // Never let an integration test read or write the runtime state of a live proxy.
     assert!(
         std::env::var_os("AIPROXY_RUNTIME_DIR").is_none_or(|path| path.is_empty())
             && !std::path::Path::new("/runtime").is_dir(),
         "run this suite outside a proxy runtime directory"
     );
+}
+
+async fn spawn_catalog_with(models: Value) -> (String, Arc<AtomicBool>) {
+    assert_isolated_runtime();
     let down = Arc::new(AtomicBool::new(false));
     let fail = down.clone();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -189,7 +193,7 @@ async fn toggle_requires_global_token_and_survives_restart() {
     let (_, app) = server::build_with_port(cfg.clone(), config_path.clone(), None)
         .await
         .unwrap();
-    let change = Some(json!({"free_models_only": false}));
+    let change = Some(json!({"provider": "openrouter=a", "free_models_only": false}));
     assert_eq!(
         request(&app, "PUT", "/api/models", "", change.clone())
             .await
@@ -206,21 +210,22 @@ async fn toggle_requires_global_token_and_survives_restart() {
 
     let (code, catalog) = request(&app, "PUT", "/api/models", "global", change).await;
     assert_eq!(code, 200);
-    assert_eq!(catalog["free_models_only"], false);
-    assert_eq!(catalog["total"], 8);
-    assert_eq!(listed(&app).await.len(), 8);
+    assert_eq!(catalog["providers"][0]["free_models_only"], false);
+    assert_eq!(catalog["providers"][1]["free_models_only"], true);
+    assert_eq!(catalog["total"], 7);
+    assert_eq!(listed(&app).await.len(), 7);
     assert_eq!(
         serde_json::from_slice::<Value>(
             &std::fs::read(config_path.with_file_name("aiproxy-model-visibility.json")).unwrap()
         )
         .unwrap(),
-        json!({"free_models_only": false})
+        json!({"upstreams": {"openrouter=a": false}})
     );
 
     let (_, app) = server::build_with_port(cfg, config_path, None)
         .await
         .unwrap();
-    assert_eq!(listed(&app).await.len(), 8);
+    assert_eq!(listed(&app).await.len(), 7);
 }
 
 #[tokio::test]
@@ -238,7 +243,7 @@ async fn failed_save_leaves_the_live_policy_unchanged() {
         "PUT",
         "/api/models",
         "global",
-        Some(json!({"free_models_only": false})),
+        Some(json!({"provider":"openrouter=a", "free_models_only": false})),
     )
     .await;
     assert_eq!(code, 500);
@@ -301,5 +306,502 @@ upstreams:
     assert!(
         rows.iter().all(|m| m["free"].is_null()),
         "do not publish an unverified free badge"
+    );
+}
+
+async fn policy_fixture() -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicBool>) {
+    assert_isolated_runtime();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let down = Arc::new(AtomicBool::new(false));
+    let app = Router::new()
+        .route(
+            "/models",
+            get({
+                let down = down.clone();
+                move || {
+                    let down = down.clone();
+                    async move {
+                        let status = if down.load(Ordering::SeqCst) {
+                            502
+                        } else {
+                            200
+                        };
+                        (
+                            axum::http::StatusCode::from_u16(status).unwrap(),
+                            Json(json!({"data": [
+                                   {"id": "free", "pricing": {"prompt": "0", "completion": "0"},
+                            "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}},
+                                   {"id": "paid", "pricing": {"prompt": "1", "completion": "1"}},
+                                   {"id": "unknown:free"}
+                               ]})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/chat/completions",
+            axum::routing::post({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::OK,
+                            [("content-type", "text/event-stream")],
+                            "data: [DONE]\n\n",
+                        )
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, calls, down)
+}
+
+fn policy_yaml(url: &str, setting: bool) -> String {
+    format!(
+        r#"
+bind: 127.0.0.1:0
+token: global
+free_models_only: {setting}
+upstreams:
+  - kind: openrouter
+    name: a
+    base_url: {url}
+    discover: true
+  - kind: openrouter
+    name: b
+    base_url: {url}
+    models: [static-unknown]
+  - kind: nvidia
+    base_url: {url}
+    models: [static-unknown]
+  - kind: openai
+    base_url: {url}
+    discover: true
+  - kind: opencode-go
+    base_url: {url}
+    surface_map_url: {url}/surfaces
+    discover: true
+"#
+    )
+}
+
+async fn policy_aliases(app: &Router) {
+    assert_eq!(
+        request(
+            app,
+            "PUT",
+            "/api/aliases",
+            "global",
+            Some(json!({"aliases": {
+                "default/free": "openrouter=a/free",
+                "default/paid": "openrouter=a/paid",
+                "default/nvidia": "nvidia/static-unknown"
+            }}))
+        )
+        .await
+        .0,
+        200
+    );
+}
+
+#[tokio::test]
+async fn free_only_refuses_direct_and_aliased_requests_on_every_surface_without_forwarding() {
+    let (url, calls, _) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let cfg = Config::from_yaml(&policy_yaml(&url, true)).unwrap();
+    let (_, app) = server::build_with_port(cfg, dir.path().join("aiproxy.yaml"), None)
+        .await
+        .unwrap();
+    policy_aliases(&app).await;
+    for route in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        for model in [
+            "openrouter=a/paid",
+            "openrouter=a/unknown:free",
+            "openrouter=a/not-in-catalog",
+            "openrouter=b/static-unknown",
+            "nvidia/static-unknown",
+            "nvidia/not-in-catalog",
+            "default/paid",
+            "default/nvidia",
+        ] {
+            let (status, body) = request(
+                &app,
+                "POST",
+                route,
+                "global",
+                Some(json!({
+                    "model": model, "messages": [], "input": "test", "max_tokens": 1
+                })),
+            )
+            .await;
+            assert_eq!(status, 403, "{route} {model}: {body}");
+            assert_eq!(body["error"]["type"], "permission_error");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("free_models_only")
+            );
+            if route == "/v1/messages" {
+                assert_eq!(body["type"], "error");
+            }
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn request_policy_follows_toggle_and_persisted_override_without_restricting_other_providers()
+{
+    let (url, calls, _) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("aiproxy.yaml");
+    let cfg = Config::from_yaml(&policy_yaml(&url, true)).unwrap();
+    let (_, app) = server::build_with_port(cfg.clone(), path.clone(), None)
+        .await
+        .unwrap();
+    policy_aliases(&app).await;
+    for model in [
+        "openrouter=a/free",
+        "default/free",
+        "openai/paid",
+        "opencode-go/paid",
+    ] {
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": model})),
+        )
+        .await;
+        assert_eq!(status, 200, "{model}: {body}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    for free_only in [false, true] {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                "/api/models",
+                "global",
+                Some(json!({"provider":"openrouter=a", "free_models_only": free_only}))
+            )
+            .await
+            .0,
+            200
+        );
+        for model in [
+            "openrouter=a/paid",
+            "openrouter=a/not-in-catalog",
+            "default/paid",
+        ] {
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    "/v1/chat/completions",
+                    "global",
+                    Some(json!({"model": model}))
+                )
+                .await
+                .0,
+                if free_only { 403 } else { 200 }
+            );
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    // The persisted ON override wins over a contrary YAML default after restart.
+    let contrary_cfg = Config::from_yaml(&policy_yaml(&url, false)).unwrap();
+    let (_, restarted) = server::build_with_port(contrary_cfg, path.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &restarted,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": "default/paid"}))
+        )
+        .await
+        .0,
+        403
+    );
+    // The OFF override also survives restart.
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/models",
+            "global",
+            Some(json!({"provider":"openrouter=a", "free_models_only": false}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, restarted) = server::build_with_port(cfg, path, None).await.unwrap();
+    assert_eq!(
+        request(
+            &restarted,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": "default/paid"}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 8);
+}
+
+#[tokio::test]
+async fn failed_discovery_revokes_inference_permission_and_authentication_stays_first() {
+    let (url, calls, down) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let cfg = Config::from_yaml(&policy_yaml(&url, true)).unwrap();
+    let (_, app) = server::build_with_port(cfg, dir.path().join("aiproxy.yaml"), None)
+        .await
+        .unwrap();
+    policy_aliases(&app).await;
+    for model in ["openrouter=a/free", "default/free"] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/v1/chat/completions",
+                "global",
+                Some(json!({"model": model}))
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    down.store(true, Ordering::SeqCst);
+    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    for model in ["openrouter=a/free", "default/free"] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/v1/chat/completions",
+                "global",
+                Some(json!({"model": model}))
+            )
+            .await
+            .0,
+            403
+        );
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/v1/chat/completions",
+                "wrong",
+                Some(json!({"model": model}))
+            )
+            .await
+            .0,
+            401
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": "default/free"}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+async fn set_free_only(app: &Router, provider: &str, free_only: bool, token: &str) -> (u16, Value) {
+    request(
+        app,
+        "PUT",
+        "/api/models",
+        token,
+        Some(json!({"provider": provider, "free_models_only": free_only})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn independent_settings_migrate_legacy_and_keep_stable_upstream_identity() {
+    let (url, _, _) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("aiproxy.yaml");
+    let state = dir.path().join("aiproxy-model-visibility.json");
+    std::fs::write(&state, br#"{"free_models_only":false}"#).unwrap();
+    let yaml = policy_yaml(&url, true).replace("name: a", "name: a\n    free_models_only: true");
+    let cfg = Config::from_yaml(&yaml).unwrap();
+    let (_, app) = server::build_with_port(cfg, path.clone(), None)
+        .await
+        .unwrap();
+    let (_, catalog) = request(&app, "GET", "/api/models", "", None).await;
+    assert_eq!(
+        catalog["providers"][0]["free_models_only"], false,
+        "legacy saved override wins over YAML"
+    );
+    assert_eq!(catalog["providers"][3]["free_models_only"], Value::Null);
+    assert_eq!(catalog["providers"][4]["free_models_only"], false);
+    assert_eq!(
+        std::fs::read(&state).unwrap(),
+        br#"{"free_models_only":false}"#
+    );
+    assert_eq!(
+        set_free_only(&app, "openrouter=a", true, "global").await.0,
+        200
+    );
+    assert_eq!(set_free_only(&app, "openai", true, "global").await.0, 400);
+    assert_eq!(
+        set_free_only(&app, "not-configured", true, "global")
+            .await
+            .0,
+        400
+    );
+    for (model, expected) in [
+        ("openrouter=a/paid", 403),
+        ("openrouter=b/static-unknown", 200),
+        ("nvidia/static-unknown", 200),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/v1/chat/completions",
+                "global",
+                Some(json!({"model": model}))
+            )
+            .await
+            .0,
+            expected,
+            "{model}"
+        );
+    }
+    let cfg = Config::from_yaml(&policy_yaml(&url, false).replace(
+        &format!(
+            "  - kind: openrouter\n    name: b\n    base_url: {url}\n    models: [static-unknown]\n"
+        ),
+        "",
+    ))
+    .unwrap();
+    let (_, restarted) = server::build_with_port(cfg, path, None).await.unwrap();
+    assert_eq!(
+        request(
+            &restarted,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": "openrouter/paid"}))
+        )
+        .await
+        .0,
+        403
+    );
+}
+
+#[tokio::test]
+async fn go_can_opt_into_free_only_for_listing_and_inference() {
+    let (url, calls, _) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let yaml = policy_yaml(&url, false).replace(
+        "kind: opencode-go",
+        "kind: opencode-go\n    free_models_only: true",
+    );
+    let cfg = Config::from_yaml(&yaml).unwrap();
+    let (_, app) = server::build_with_port(cfg, dir.path().join("aiproxy.yaml"), None)
+        .await
+        .unwrap();
+    let models = listed(&app).await;
+    assert!(models.contains(&"opencode-go/free".into()));
+    assert!(!models.contains(&"opencode-go/paid".into()));
+    assert!(models.contains(&"openrouter=a/paid".into()));
+    for route in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                route,
+                "global",
+                Some(json!({"model": "opencode-go/paid"}))
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/chat/completions",
+            "global",
+            Some(json!({"model": "opencode-go/free"}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn per_upstream_yaml_overrides_legacy_default_and_rejects_unsupported_kinds() {
+    let (url, _, _) = policy_fixture().await;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("aiproxy.yaml");
+    let yaml = policy_yaml(&url, false).replace("name: a", "name: a\n    free_models_only: true");
+    let cfg = Config::from_yaml(&yaml).unwrap();
+    let (_, app) = server::build_with_port(cfg, path.clone(), None)
+        .await
+        .unwrap();
+    let (_, data) = request(&app, "GET", "/api/models", "", None).await;
+    let providers = data["providers"].as_array().unwrap();
+    assert_eq!(
+        providers
+            .iter()
+            .map(|p| (&p["id"], &p["free_models_only"]))
+            .collect::<Vec<_>>(),
+        [
+            (&json!("openrouter=a"), &json!(true)),
+            (&json!("openrouter=b"), &json!(false)),
+            (&json!("nvidia"), &json!(false)),
+            (&json!("openai"), &Value::Null),
+            (&json!("opencode-go"), &json!(false)),
+        ]
+    );
+
+    let invalid = Config::from_yaml(
+        &yaml.replace("kind: openai", "kind: openai\n    free_models_only: true"),
+    )
+    .unwrap();
+    let Err(error) = server::build_with_port(invalid, path, None).await else {
+        panic!("accepted unsupported policy");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("upstream 'openai': free_models_only is not supported")
     );
 }

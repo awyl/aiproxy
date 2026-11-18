@@ -24,6 +24,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscription_gate_precedes_free_only_policy_for_direct_ids_and_aliases() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let mut state = super::testutil::state_with(Arc::new(
+            crate::embeddings::EmbeddingManager::new(&Default::default()),
+        ))
+        .await;
+        let registry = crate::discovery::ModelRegistry::new(vec![Arc::new(
+            crate::provider::testutil::MockProvider::with_surface(
+                "openrouter=one",
+                vec!["paid".into()],
+                ModelSurface::ChatCompletions,
+            )
+            .with_free_only(true),
+        )]);
+        registry.refresh().await;
+        registry
+            .replace_aliases([("default/paid".into(), "openrouter=one/paid".into())].into())
+            .unwrap();
+        state.registry = Arc::new(registry);
+        state
+            .subscriptions
+            .insert("openrouter=one".into(), Some("limited".into()));
+        let app = super::openai::openai_router_with_subs(Some("tok".into()), &["limited".into()])
+            .merge(super::anthropic::anthropic_router_with_subs(
+                Some("tok".into()),
+                &["limited".into()],
+            ))
+            .with_state(state);
+        for route in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            for model in ["openrouter=one/paid", "default/paid"] {
+                for (token, expected) in [("tok", 401), ("limited", 403)] {
+                    let request = Request::builder()
+                        .method("POST")
+                        .uri(route)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({"model": model}).to_string()))
+                        .unwrap();
+                    let response = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(
+                        response.status().as_u16(),
+                        expected,
+                        "{route} {model} {token}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn openai_error_shape() {
         let resp = openai_error(
             StatusCode::BAD_REQUEST,
@@ -176,6 +228,26 @@ pub fn check_surface(
         Surface::Anthropic => {
             anthropic_error(StatusCode::BAD_REQUEST, msg, "invalid_request_error")
         }
+    })
+}
+
+/// Check the resolved target so aliases cannot bypass the free-only policy.
+#[allow(clippy::result_large_err)]
+pub(crate) fn check_model_policy(
+    registry: &crate::discovery::ModelRegistry,
+    provider_id: &str,
+    model_id: &str,
+    surface: Surface,
+) -> Result<(), Response> {
+    if registry.model_is_allowed(provider_id, model_id) {
+        return Ok(());
+    }
+    let message = format!(
+        "model '{provider_id}/{model_id}' is blocked by free_models_only for this upstream; only confirmed free models are allowed"
+    );
+    Err(match surface {
+        Surface::Openai => openai_error(StatusCode::FORBIDDEN, message, "permission_error"),
+        Surface::Anthropic => anthropic_error(StatusCode::FORBIDDEN, message, "permission_error"),
     })
 }
 

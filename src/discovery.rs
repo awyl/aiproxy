@@ -1,19 +1,11 @@
 //! Model registry + discovery: parallel per-provider model fetch, prefixed
 //! catalog, prefix resolution for the API layer.
 
-use crate::provider::{Model, Provider};
+use crate::provider::{Model, ModelSurface, Provider};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
-
-pub(crate) fn restricts_free_models(provider_id: &str) -> bool {
-    matches!(provider_id.split('=').next(), Some("openrouter" | "nvidia"))
-}
-
-pub(crate) fn model_is_listed(free_only: bool, provider_id: &str, free: bool) -> bool {
-    !free_only || !restricts_free_models(provider_id) || free
-}
 
 pub struct ModelRegistry {
     pub(crate) visibility: crate::model_visibility::ModelVisibility,
@@ -74,10 +66,37 @@ pub struct RefreshOutcome {
     pub error: Option<String>,
 }
 
+// Use the first matching entry, just as the flattened catalog does.
+fn find_model<'a>(
+    catalog: &'a BTreeMap<String, Vec<Model>>,
+    provider: &str,
+    model: &str,
+) -> Option<&'a Model> {
+    catalog
+        .get(provider)?
+        .iter()
+        .find(|entry| entry.id == model)
+}
+
 impl ModelRegistry {
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         Self {
-            visibility: crate::model_visibility::ModelVisibility::memory(true),
+            visibility: crate::model_visibility::ModelVisibility::memory(
+                providers
+                    .iter()
+                    .filter_map(|provider| {
+                        let free_only = provider.free_only_default()?;
+                        Some((
+                            provider.id().to_owned(),
+                            crate::model_visibility::VisibilityDefault {
+                                state_key: provider.id().to_owned(),
+                                free_only,
+                                inherits_legacy: false,
+                            },
+                        ))
+                    })
+                    .collect(),
+            ),
             aliases: crate::aliases::AliasStore::memory(),
             providers,
             catalog: RwLock::new(BTreeMap::new()),
@@ -104,10 +123,12 @@ impl ModelRegistry {
     }
 
     pub fn replace_aliases(&self, map: BTreeMap<String, String>) -> std::io::Result<()> {
-        let models = self.models();
         self.aliases.replace_checked(map, |old, next| {
+            let catalog = self.catalog.read().unwrap();
             for (id, target) in next {
-                let available = models.iter().any(|m| &m.id == target && m.surface != crate::provider::ModelSurface::Unknown);
+                let available = target.split_once('/')
+                    .and_then(|(provider, model)| find_model(&catalog, provider, model))
+                    .is_some_and(|entry| entry.surface != ModelSurface::Unknown);
                 if !available && old.get(id) != Some(target) {
                     return Err(crate::aliases::invalid(format!("target '{target}' is not an available inference model with a known wire surface")));
                 }
@@ -283,6 +304,16 @@ impl ModelRegistry {
         out
     }
 
+    /// Apply the listing policy to a resolved inference target, failing closed
+    /// for restricted models whose free status is absent or unverified.
+    pub(crate) fn model_is_allowed(&self, provider_id: &str, model_id: &str) -> bool {
+        if !self.visibility.free_only(provider_id) {
+            return true;
+        }
+        find_model(&self.catalog.read().unwrap(), provider_id, model_id)
+            .is_some_and(|model| model.free)
+    }
+
     pub fn provider(&self, id: &str) -> Option<Arc<dyn Provider>> {
         self.providers.iter().find(|p| p.id() == id).cloned()
     }
@@ -294,15 +325,7 @@ impl ModelRegistry {
     /// Split "{prefix}/{model}" if the prefix names a known provider.
     pub fn resolve(&self, prefixed: &str) -> Option<(String, String)> {
         let alias_target = if prefixed.starts_with("default/") {
-            let target = self.aliases.snapshot().get(prefixed)?.clone();
-            if !self
-                .models()
-                .iter()
-                .any(|m| m.id == target && m.surface != crate::provider::ModelSurface::Unknown)
-            {
-                return None;
-            }
-            Some(target)
+            Some(self.aliases.target(prefixed)?)
         } else {
             None
         };
@@ -310,7 +333,13 @@ impl ModelRegistry {
             .as_deref()
             .unwrap_or(prefixed)
             .split_once('/')?;
-        if self.provider(pid).is_some() {
+        if alias_target.is_some()
+            && !find_model(&self.catalog.read().unwrap(), pid, model)
+                .is_some_and(|entry| entry.surface != ModelSurface::Unknown)
+        {
+            return None;
+        }
+        if self.prefixes().any(|id| id == pid) {
             Some((pid.to_string(), model.to_string()))
         } else {
             None
@@ -321,10 +350,91 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ModelSurface;
     use crate::provider::Provider;
     use crate::provider::testutil::MockProvider;
     use std::sync::Arc;
+
+    #[test]
+    fn request_policy_uses_confirmed_free_status_and_exact_provider_scope() {
+        let supported = [
+            "openrouter",
+            "openrouter=one",
+            "nvidia",
+            "nvidia=gpu",
+            "future-provider",
+        ];
+        let registry = ModelRegistry::new(
+            supported
+                .iter()
+                .map(|id| {
+                    Arc::new(MockProvider::new(id, vec![]).with_free_only(true))
+                        as Arc<dyn Provider>
+                })
+                .collect(),
+        );
+        for provider in supported {
+            registry.catalog.write().unwrap().insert(
+                provider.into(),
+                vec![Model {
+                    id: "vendor/free".into(),
+                    display_name: None,
+                    created_at: None,
+                    surface: ModelSurface::ChatCompletions,
+                    free: true,
+                }],
+            );
+            assert!(registry.model_is_allowed(provider, "vendor/free"));
+            assert!(!registry.model_is_allowed(provider, "vendor/unknown"));
+            registry.catalog.write().unwrap().get_mut(provider).unwrap()[0].free = false;
+            assert!(!registry.model_is_allowed(provider, "vendor/free"));
+        }
+        for provider in ["openai", "opencode-go", "opencode-go=one", "nvidia-other"] {
+            assert!(registry.model_is_allowed(provider, "uncataloged"));
+        }
+        registry
+            .visibility
+            .set(crate::model_visibility::VisibilitySetting {
+                provider: "openrouter=one".into(),
+                free_models_only: false,
+            })
+            .unwrap();
+        assert!(registry.model_is_allowed("openrouter=one", "uncataloged"));
+        assert!(!registry.model_is_allowed("openrouter", "uncataloged"));
+    }
+
+    #[test]
+    fn alias_lookup_keeps_nested_model_ids_and_first_catalog_entry() {
+        let registry = ModelRegistry::new(vec![Arc::new(MockProvider::new("test", vec![]))]);
+        let entry = |id: &str, surface| Model {
+            id: id.into(),
+            display_name: None,
+            created_at: None,
+            surface,
+            free: false,
+        };
+        registry.catalog.write().unwrap().insert(
+            "test".into(),
+            vec![
+                entry("vendor/model", ModelSurface::ChatCompletions),
+                entry("vendor/duplicate", ModelSurface::Unknown),
+                entry("vendor/duplicate", ModelSurface::ChatCompletions),
+            ],
+        );
+        registry
+            .replace_aliases([("default/nested".into(), "test/vendor/model".into())].into())
+            .unwrap();
+        assert_eq!(
+            registry.resolve("default/nested"),
+            Some(("test".into(), "vendor/model".into()))
+        );
+        assert!(
+            registry
+                .replace_aliases(
+                    [("default/duplicate".into(), "test/vendor/duplicate".into())].into()
+                )
+                .is_err()
+        );
+    }
 
     fn providers() -> Vec<Arc<dyn Provider>> {
         vec![
