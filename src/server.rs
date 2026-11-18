@@ -129,7 +129,8 @@ pub async fn build_with_options(
     if refresh_secs > 0 {
         let reg = registry.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
+            let period = std::time::Duration::from_secs(refresh_secs);
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 tick.tick().await;
                 reg.refresh().await;
@@ -180,7 +181,8 @@ pub async fn build_with_options(
     let usage_fetchers: Vec<crate::usage::FetcherConfig> = config
         .upstreams
         .iter()
-        .filter(|u| {
+        .zip(ids)
+        .filter(|(u, _)| {
             matches!(
                 u.kind,
                 crate::config::UpstreamKind::Minimax
@@ -190,27 +192,7 @@ pub async fn build_with_options(
                     | crate::config::UpstreamKind::OpenAiCodex
             )
         })
-        .map(|u| {
-            let api_key = u
-                .token_env
-                .as_ref()
-                .and_then(|env_var| std::env::var(env_var).ok())
-                .or_else(|| {
-                    u.api_key_env
-                        .as_ref()
-                        .and_then(|env_var| std::env::var(env_var).ok())
-                });
-            let provider_name = if config
-                .upstreams
-                .iter()
-                .filter(|u2| u2.kind == u.kind)
-                .count()
-                > 1
-            {
-                format!("{}={}", u.kind.as_str(), u.name.as_deref().unwrap_or(""))
-            } else {
-                u.kind.as_str().to_string()
-            };
+        .map(|(u, provider_name)| {
             let codex_manager = if u.kind == crate::config::UpstreamKind::OpenAiCodex {
                 codex_managers.get(&provider_name).cloned()
             } else {
@@ -218,8 +200,8 @@ pub async fn build_with_options(
             };
             crate::usage::FetcherConfig {
                 kind: u.kind.as_str().to_string(),
-                provider_name: provider_name.clone(),
-                api_key,
+                provider_name,
+                api_key: u.api_key(),
                 base_url: u.base_url.clone(),
                 codex_manager,
             }

@@ -117,17 +117,21 @@ impl ModelRegistry {
     }
 
     pub fn alias_models(&self) -> Vec<(Model, String)> {
-        let models = self.models();
+        self.alias_models_from(&self.models())
+    }
+
+    /// Resolve aliases against the same sorted snapshot used for the model list.
+    pub(crate) fn alias_models_from(&self, models: &[Model]) -> Vec<(Model, String)> {
         self.aliases
             .snapshot()
             .into_iter()
             .filter_map(|(id, target)| {
-                let mut model = models
-                    .iter()
-                    .find(|m| {
-                        m.id == target && m.surface != crate::provider::ModelSurface::Unknown
-                    })?
-                    .clone();
+                let index = models.binary_search_by(|m| m.id.cmp(&target)).ok()?;
+                let target_model = &models[index];
+                if target_model.surface == crate::provider::ModelSurface::Unknown {
+                    return None;
+                }
+                let mut model = target_model.clone();
                 model.id = id.clone();
                 model.display_name = Some(id);
                 Some((model, target))

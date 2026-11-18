@@ -164,3 +164,30 @@ async fn real_unknown_model_rejected() {
         other => panic!("unexpected error variant: {other}"),
     }
 }
+
+#[test]
+fn real_embedding_does_not_run_on_the_async_worker() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _guard = CACHE_LOCK.lock().await;
+            let model = FastembedBackend.load_model("AllMiniLML6V2").await.unwrap();
+            let (release, until_released) = tokio::sync::oneshot::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let busy = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                until_released.blocking_recv().unwrap();
+            });
+            ready.await.unwrap();
+            let mut result = std::pin::pin!(model.embed(&["Hello, world!"]));
+            let first_poll = futures::poll!(&mut result);
+            release.send(()).unwrap();
+            busy.await.unwrap();
+            assert!(first_poll.is_pending(), "inference ran on the async worker");
+            let (embeddings, dimension) = result.await.unwrap();
+            assert_eq!((embeddings.len(), dimension), (1, 384));
+        });
+}

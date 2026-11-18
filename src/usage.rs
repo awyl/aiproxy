@@ -39,8 +39,6 @@ pub struct UsageData {
 /// Trait for providers that report usage.
 #[async_trait::async_trait]
 pub trait UsageProvider: Send + Sync {
-    /// Provider name (e.g. "minimax", "opencode-go").
-    fn name(&self) -> &str;
     /// Fetch usage from the provider's billing endpoint.
     async fn fetch(&self) -> Result<UsageData, String>;
 }
@@ -796,9 +794,6 @@ struct MinimaxProvider {
 
 #[async_trait::async_trait]
 impl UsageProvider for MinimaxProvider {
-    fn name(&self) -> &str {
-        "minimax"
-    }
     async fn fetch(&self) -> Result<UsageData, String> {
         fetch_minimax(&self.client, &self.api_key).await
     }
@@ -811,9 +806,6 @@ struct OpenRouterProvider {
 
 #[async_trait::async_trait]
 impl UsageProvider for OpenRouterProvider {
-    fn name(&self) -> &str {
-        "openrouter"
-    }
     async fn fetch(&self) -> Result<UsageData, String> {
         fetch_openrouter(&self.client, &self.api_key).await
     }
@@ -827,9 +819,6 @@ struct ZaiProvider {
 
 #[async_trait::async_trait]
 impl UsageProvider for ZaiProvider {
-    fn name(&self) -> &str {
-        "zai"
-    }
     async fn fetch(&self) -> Result<UsageData, String> {
         fetch_zai(&self.client, &self.api_key, self.base_url.as_deref()).await
     }
@@ -843,9 +832,6 @@ struct OpencodeGoProvider {
 
 #[async_trait::async_trait]
 impl UsageProvider for OpencodeGoProvider {
-    fn name(&self) -> &str {
-        "opencode-go"
-    }
     async fn fetch(&self) -> Result<UsageData, String> {
         fetch_opencode_go(&self.client, &self.api_key, self.base_url.as_deref()).await
     }
@@ -859,10 +845,6 @@ struct CodexProvider {
 
 #[async_trait::async_trait]
 impl UsageProvider for CodexProvider {
-    fn name(&self) -> &str {
-        "openai-codex"
-    }
-
     async fn fetch(&self) -> Result<UsageData, String> {
         let access = self
             .manager
