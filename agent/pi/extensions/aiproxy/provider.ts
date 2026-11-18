@@ -3,7 +3,7 @@
  * models discovered from the proxy at startup, metadata resolved from pi.dev
  * catalog API (same source pi's built-in providers use) with local cache.
  */
-import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -53,16 +53,6 @@ export function attributionHeaders(
   return undefined;
 }
 
-/** Map aiproxy model ID prefix → pi provider id (for provider-attribution headers). */
-function attributionProvider(id: string): string {
-  const prefix = stripSubSuffix(id.split('/')[0] ?? '');
-  // pi's attribution recognizes these provider ids for header injection
-  if (prefix === "opencode-go") return "opencode-go";
-  if (prefix === "openrouter") return "openrouter";
-  if (prefix === "nvidia") return "nvidia";
-  return "openai";
-}
-
 /** Map proxy surface name → pi api id. The proxy's surface is authoritative. */
 export const SURFACE_API: Record<string, string> = {
   chat: "openai-completions",
@@ -77,7 +67,7 @@ export const SURFACE_API: Record<string, string> = {
  * remapped to the generic wire (pi.dev's openai-codex catalog says
  * `openai-codex-responses`; going through aiproxy means `openai-responses`).
  */
-export const API_ALIASES: Record<string, string> = {
+const API_ALIASES: Record<string, string> = {
   "openai-codex-responses": "openai-responses",
 };
 
@@ -86,7 +76,7 @@ export const API_ALIASES: Record<string, string> = {
  * SDK convention), while aiproxy mounts the messages route at `/v1/messages`.
  * The provider baseUrl ends in `/v1`, so messages-wire models need the root.
  */
-export function wireBaseUrl(api: string, base: string): string | undefined {
+function wireBaseUrl(api: string, base: string): string | undefined {
   return api === "anthropic-messages" ? base.replace(/\/v1\/?$/, "") : undefined;
 }
 
@@ -158,7 +148,6 @@ function readCache(): Map<string, Record<string, unknown>> | undefined {
 /** Write catalog cache to disk. */
 function writeCache(catalog: Map<string, Record<string, unknown>>): void {
   try {
-    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
     mkdirSync(CACHE_DIR, { recursive: true });
     const obj: Record<string, Record<string, unknown>> = {};
     for (const [k, v] of catalog) obj[k] = v;
@@ -248,7 +237,7 @@ function readModelsStore(): Map<string, Record<string, unknown>> {
  * Strip subscription suffix from provider ID for catalog lookup.
  * "opencode-go=alice" → "opencode-go", "opencode-go" → "opencode-go"
  */
-export function stripSubSuffix(id: string): string {
+function stripSubSuffix(id: string): string {
   const eq = id.indexOf('=');
   return eq >= 0 ? id.slice(0, eq) : id;
 }
@@ -303,12 +292,6 @@ export async function registerProxyProvider(
   const { base, apiKey, token } = cfg;
 
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const catalogRaw = opts.catalog ?? (await loadCatalog(UPSTREAM_KINDS, fetchImpl));
-  const catalog = catalogRaw instanceof Map ? catalogRaw : new Map();
-  if (catalog.size > 0) {
-    console.log(`[aiproxy] loaded ${catalog.size} model(s) from pi model store`);
-  }
-
   async function fetchModels(signal: AbortSignal): Promise<ProxyModel[]> {
     const res = await fetchImpl(`${base}/models`, {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
@@ -320,14 +303,19 @@ export async function registerProxyProvider(
   }
 
   // Discover models once before startup selection, then refresh while running.
-  let models: ProxyModel[] = [];
-  try {
-    models = await fetchModels(AbortSignal.timeout(10_000));
-  } catch (err) {
-    console.warn(
-      `[aiproxy] could not fetch ${base}/models: ${err instanceof Error ? err.message : String(err)}\n` +
-      "           no models registered — check aiproxy.json and that the gateway is running.",
-    );
+  const [catalogRaw, models] = await Promise.all([
+    opts.catalog ?? loadCatalog(UPSTREAM_KINDS, opts.fetchImpl),
+    fetchModels(AbortSignal.timeout(10_000)).catch((err: unknown) => {
+      console.warn(
+        `[aiproxy] could not fetch ${base}/models: ${err instanceof Error ? err.message : String(err)}\n` +
+        "           no models registered — check aiproxy.json and that the gateway is running.",
+      );
+      return [];
+    }),
+  ]);
+  const catalog = catalogRaw instanceof Map ? catalogRaw : new Map();
+  if (catalog.size > 0) {
+    console.log(`[aiproxy] loaded ${catalog.size} model(s) from pi model store`);
   }
 
   let targets = new Map(models.map(m => [m.id, m.target ?? m.id]));

@@ -5,7 +5,9 @@
 use crate::api::body::replace_model_field;
 use crate::api::{AppState, Surface, check_surface, openai_error, relay_or_error};
 use crate::auth::apply_auth;
-use crate::provider::{ModelSurface, Provider, ProviderError, ProviderStream, RequestContext};
+use crate::provider::{
+    Model, ModelSurface, Provider, ProviderError, ProviderStream, RequestContext,
+};
 use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -41,44 +43,19 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
     let listed = |id: &str, free| {
         crate::discovery::model_is_listed(free_only, id.split('/').next().unwrap_or_default(), free)
     };
-    let mut data: Vec<Value> = state
-        .registry
-        .models()
+    let models = state.registry.models();
+    let aliases = state.registry.alias_models_from(&models);
+    let mut data: Vec<Value> = models
         .into_iter()
         .filter(|m| listed(&m.id, m.free))
-        .map(|m| {
-            let mut entry = json!({
-                "id": m.id,
-                "object": "model",
-                "created": m.created_at,
-                "owned_by": "",
-                "display_name": m.display_name,
-                "surface": m.surface.as_str(),
-            });
-            if m.free {
-                entry["free"] = json!(true);
-            }
-            entry
-        })
+        .map(|m| model_entry(m, None))
         .collect();
-    for (model, target) in state.registry.alias_models() {
-        if !listed(&target, model.free) {
-            continue;
-        }
-        let mut entry = json!({
-            "id": model.id,
-            "target": target,
-            "object": "model",
-            "created": model.created_at,
-            "owned_by": "",
-            "display_name": model.display_name,
-            "surface": model.surface.as_str(),
-        });
-        if model.free {
-            entry["free"] = json!(true);
-        }
-        data.push(entry);
-    }
+    data.extend(
+        aliases
+            .into_iter()
+            .filter(|(m, target)| listed(target, m.free))
+            .map(|(m, target)| model_entry(m, Some(target))),
+    );
     // Fake local-embeddings provider: config-driven, never discovered.
     for id in state.embeddings.model_ids() {
         data.push(json!({
@@ -95,6 +72,24 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
         Json(json!({"object": "list", "data": data})),
     )
         .into_response()
+}
+
+fn model_entry(model: Model, target: Option<String>) -> Value {
+    let mut entry = json!({
+        "id": model.id,
+        "object": "model",
+        "created": model.created_at,
+        "owned_by": "",
+        "display_name": model.display_name,
+        "surface": model.surface.as_str(),
+    });
+    if let Some(target) = target {
+        entry["target"] = json!(target);
+    }
+    if model.free {
+        entry["free"] = json!(true);
+    }
+    entry
 }
 
 async fn usage_handler(State(state): State<AppState>) -> axum::response::Response {

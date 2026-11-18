@@ -30,7 +30,7 @@ export function mcpHeader(mcpServers?: string | string[]): string | undefined {
 }
 
 /** Default factory: MCP SDK streamable-HTTP client. */
-export const defaultClientFactory: McpClientFactory = async (url, headers) => {
+const defaultClientFactory: McpClientFactory = async (url, headers) => {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
   const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } });

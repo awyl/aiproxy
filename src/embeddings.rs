@@ -60,21 +60,26 @@ impl EmbeddingBackend for FastembedBackend {
         .map_err(|e| EmbedError::LoadFailed(model.into(), format!("task join: {e}")))?
         .map_err(|e| EmbedError::LoadFailed(model.into(), e))?;
 
-        Ok(Arc::new(FastembedInstance(Mutex::new(instance))))
+        Ok(Arc::new(FastembedInstance(Arc::new(Mutex::new(instance)))))
     }
 }
 
-struct FastembedInstance(Mutex<fastembed::TextEmbedding>);
+struct FastembedInstance(Arc<Mutex<fastembed::TextEmbedding>>);
 
 #[async_trait::async_trait]
 impl ModelInstance for FastembedInstance {
     async fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, usize), String> {
-        let mut guard = self.0.lock().await;
-        let result = guard
-            .embed(texts, None)
-            .map_err(|e| format!("fastembed embed: {e}"))?;
-        let dim = result.first().map_or(0, |v| v.len());
-        Ok((result, dim))
+        let mut model = self.0.clone().lock_owned().await;
+        let texts: Vec<String> = texts.iter().map(|text| (*text).to_owned()).collect();
+        tokio::task::spawn_blocking(move || {
+            let result = model
+                .embed(texts, None)
+                .map_err(|e| format!("fastembed embed: {e}"))?;
+            let dim = result.first().map_or(0, |v| v.len());
+            Ok((result, dim))
+        })
+        .await
+        .map_err(|e| format!("fastembed embed task: {e}"))?
     }
 }
 
@@ -174,9 +179,8 @@ impl EmbeddingManager {
                 let inst = Arc::clone(instance);
                 drop(st); // release lock before embed call
 
-                let refs: Vec<&str> = input_texts.iter().map(|s| s.as_str()).collect();
                 let (vecs, d) = inst
-                    .embed(&refs)
+                    .embed(&input_texts)
                     .await
                     .map_err(|e| EmbedError::EmbedFailed(slot.id.clone(), e))?;
                 let dim_override = slot.dimensions.unwrap_or(d as u32);
@@ -279,17 +283,17 @@ impl EmbeddingManager {
 
 /// Extract input texts from an OpenAI-format embedding request.
 /// Supports both `"input": "single string"` and `"input": ["array", "of", "strings"]`.
-fn extract_input_texts(req: &Value) -> Result<Vec<String>, EmbedError> {
+fn extract_input_texts(req: &Value) -> Result<Vec<&str>, EmbedError> {
     let input = req
         .get("input")
         .ok_or_else(|| EmbedError::EmbedFailed("?".into(), "missing 'input' field".into()))?;
     match input {
-        Value::String(s) => Ok(vec![s.clone()]),
+        Value::String(s) => Ok(vec![s]),
         Value::Array(arr) => arr
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                v.as_str().map(String::from).ok_or_else(|| {
+                v.as_str().ok_or_else(|| {
                     EmbedError::EmbedFailed("?".into(), format!("input[{i}] is not a string"))
                 })
             })
