@@ -78,7 +78,24 @@ pub async fn build_with_options(
         )
     })?;
     tracing::info!(path = %aliases_path.display(), "model alias state");
-    let registry = Arc::new(ModelRegistry::with_aliases(providers, aliases)?);
+    let mut registry = ModelRegistry::with_aliases(providers, aliases)?;
+    let visibility_path =
+        crate::aliases::runtime_state_path(&config_path, "aiproxy-model-visibility.json");
+    registry.visibility = crate::model_visibility::ModelVisibility::load(
+        visibility_path.clone(),
+        config.free_models_only,
+    )
+    .map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "model visibility state {}: {error}",
+                visibility_path.display()
+            ),
+        )
+    })?;
+    tracing::info!(path = %visibility_path.display(), free_only = registry.visibility.get(), "model visibility state");
+    let registry = Arc::new(registry);
     registry.refresh().await;
 
     // Codex background refresh: wake up every ~10 min (plus jitter), refresh
@@ -250,7 +267,10 @@ pub async fn build_with_options(
             "/api/aliases",
             get(crate::aliases::aliases_api).put(crate::aliases::save_aliases),
         )
-        .route("/api/models", get(crate::pages::models_api))
+        .route(
+            "/api/models",
+            get(crate::pages::models_api).put(crate::pages::set_models_visibility),
+        )
         .route("/api/reload", post(crate::pages::reload_models))
         .route("/setup", get(crate::setup::setup_page))
         .route("/api/codex/start", post(crate::setup::codex_start))

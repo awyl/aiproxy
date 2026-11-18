@@ -37,23 +37,35 @@ pub fn openai_router_with_subs(token: Option<String>, subs: &[String]) -> Router
 }
 
 pub async fn list_models(State(state): State<AppState>) -> axum::response::Response {
+    let free_only = state.registry.visibility.get();
+    let listed = |id: &str, free| {
+        crate::discovery::model_is_listed(free_only, id.split('/').next().unwrap_or_default(), free)
+    };
     let mut data: Vec<Value> = state
         .registry
         .models()
         .into_iter()
+        .filter(|m| listed(&m.id, m.free))
         .map(|m| {
-            json!({
+            let mut entry = json!({
                 "id": m.id,
                 "object": "model",
                 "created": m.created_at,
                 "owned_by": "",
                 "display_name": m.display_name,
                 "surface": m.surface.as_str(),
-            })
+            });
+            if m.free {
+                entry["free"] = json!(true);
+            }
+            entry
         })
         .collect();
     for (model, target) in state.registry.alias_models() {
-        data.push(json!({
+        if !listed(&target, model.free) {
+            continue;
+        }
+        let mut entry = json!({
             "id": model.id,
             "target": target,
             "object": "model",
@@ -61,7 +73,11 @@ pub async fn list_models(State(state): State<AppState>) -> axum::response::Respo
             "owned_by": "",
             "display_name": model.display_name,
             "surface": model.surface.as_str(),
-        }));
+        });
+        if model.free {
+            entry["free"] = json!(true);
+        }
+        data.push(entry);
     }
     // Fake local-embeddings provider: config-driven, never discovered.
     for id in state.embeddings.model_ids() {

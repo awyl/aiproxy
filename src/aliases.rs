@@ -51,14 +51,14 @@ impl AliasStore {
         let mut active = self.mappings.lock().unwrap();
         validate(&active, &map)?;
         if let Some(path) = &self.path {
-            persist(path, &map)?;
+            persist_json(path, &map)?;
         }
         *active = map;
         Ok(())
     }
 }
 
-fn persist(path: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
+pub(crate) fn persist_json(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
@@ -66,7 +66,8 @@ fn persist(path: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
-        ".aiproxy-aliases-{}-{}.tmp",
+        ".{}-{}-{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -79,12 +80,12 @@ fn persist(path: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
     }
     let result = (|| {
         let mut file = options.open(&tmp)?;
-        file.write_all(&serde_json::to_vec_pretty(map)?)?;
+        file.write_all(&serde_json::to_vec_pretty(value)?)?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
         // The rename has committed; a directory-sync error cannot be rolled back.
         if let Err(e) = fs::File::open(parent).and_then(|dir| dir.sync_all()) {
-            tracing::error!(path = %path.display(), "alias directory sync failed after save: {e}");
+            tracing::error!(path = %path.display(), "state directory sync failed after save: {e}");
         }
         Ok(())
     })();
@@ -130,6 +131,10 @@ pub(crate) fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 pub fn alias_state_path(config_path: &Path) -> PathBuf {
+    runtime_state_path(config_path, "aiproxy-aliases.json")
+}
+
+pub(crate) fn runtime_state_path(config_path: &Path, filename: &str) -> PathBuf {
     let runtime = std::env::var_os("AIPROXY_RUNTIME_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
@@ -137,7 +142,7 @@ pub fn alias_state_path(config_path: &Path) -> PathBuf {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    pick_alias_dir(runtime, Path::new("/runtime").is_dir(), config).join("aiproxy-aliases.json")
+    pick_alias_dir(runtime, Path::new("/runtime").is_dir(), config).join(filename)
 }
 
 fn pick_alias_dir(runtime: Option<PathBuf>, exists: bool, config: &Path) -> PathBuf {

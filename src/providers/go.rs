@@ -281,6 +281,7 @@ impl Provider for OpencodeGoProvider {
                             id,
                             display_name: None,
                             created_at: m["created"].as_u64().map(|c| c.to_string()),
+                            free: false,
                         }
                     })
                     .collect()

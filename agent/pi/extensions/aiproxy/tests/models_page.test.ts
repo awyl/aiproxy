@@ -153,3 +153,49 @@ describe("models page", () => {
     expect(calls).toEqual(["GET /api/models"]);
   });
 });
+
+it("sends the token and new model policy, then renders the server's catalog", async () => {
+  const updates: RequestInit[] = [];
+  let freeOnly = true;
+  const dom = new JSDOM(PAGE, {
+    url: "http://localhost/models",
+    runScripts: "dangerously",
+    beforeParse(window) {
+      window.fetch = async (_url, init) => {
+        if (init?.method === "PUT") {
+          updates.push(init);
+          freeOnly = JSON.parse(String(init.body)).free_models_only;
+        }
+        return new Response(JSON.stringify({
+          free_models_only: freeOnly,
+          total: freeOnly ? 1 : 2,
+          providers: [{
+            id: "nvidia",
+            models: [
+              {id: "verified", surface: "chat", free: true, listed: true},
+              {id: "unverified", surface: "chat", free: false, listed: !freeOnly},
+            ],
+          }],
+        }));
+      };
+    },
+  });
+  try {
+    await settle(dom);
+    const doc = dom.window.document;
+    const toggle = doc.querySelector<HTMLInputElement>("#free-only");
+    expect(toggle?.checked).toBe(true);
+    expect(doc.querySelector("#data")?.textContent).toContain("Free Endpoint");
+    expect(doc.querySelector("#data")?.textContent).not.toContain("unverified");
+    doc.querySelector<HTMLInputElement>("#global-token")!.value = "admin";
+    toggle!.click();
+    await settle(dom);
+    expect(updates).toHaveLength(1);
+    expect(new Headers(updates[0].headers).get("Authorization")).toBe("Bearer admin");
+    expect(JSON.parse(String(updates[0].body))).toEqual({free_models_only: false});
+    expect(toggle!.checked).toBe(false);
+    expect(doc.querySelector("#data")?.textContent).toContain("unverified");
+  } finally {
+    dom.window.close();
+  }
+});

@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod embeddings;
 pub mod mcp;
 pub mod mcp_multiplexer;
+mod model_visibility;
 pub mod pages;
 pub mod provider;
 pub mod providers;

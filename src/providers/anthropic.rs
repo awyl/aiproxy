@@ -142,6 +142,7 @@ impl Provider for AnthropicProvider {
                         id: m["id"].as_str().unwrap_or_default().to_string(),
                         display_name: m["display_name"].as_str().map(String::from),
                         created_at: m["created_at"].as_str().map(String::from),
+                        free: false,
                         surface: ModelSurface::Messages,
                     })
                     .collect()

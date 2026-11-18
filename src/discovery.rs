@@ -7,7 +7,16 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
+pub(crate) fn restricts_free_models(provider_id: &str) -> bool {
+    matches!(provider_id.split('=').next(), Some("openrouter" | "nvidia"))
+}
+
+pub(crate) fn model_is_listed(free_only: bool, provider_id: &str, free: bool) -> bool {
+    !free_only || !restricts_free_models(provider_id) || free
+}
+
 pub struct ModelRegistry {
+    pub(crate) visibility: crate::model_visibility::ModelVisibility,
     aliases: crate::aliases::AliasStore,
     providers: Vec<Arc<dyn Provider>>,
     catalog: RwLock<BTreeMap<String, Vec<Model>>>,
@@ -68,6 +77,7 @@ pub struct RefreshOutcome {
 impl ModelRegistry {
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         Self {
+            visibility: crate::model_visibility::ModelVisibility::memory(true),
             aliases: crate::aliases::AliasStore::memory(),
             providers,
             catalog: RwLock::new(BTreeMap::new()),
@@ -125,7 +135,7 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Fetch every provider's model list in parallel, per-provider 10s
+    /// Fetch every provider's model list in parallel, with a per-provider
     /// timeout. Failing providers are logged and skipped; last-known
     /// catalog entries for them are retained.
     pub async fn refresh(&self) {
@@ -140,7 +150,14 @@ impl ModelRegistry {
         for p in &self.providers {
             let p = p.clone();
             set.spawn(async move {
-                let deadline = tokio::time::timeout(Duration::from_secs(10), p.list_models());
+                // NVIDIA also fetches a filtered web catalog and its remaining
+                // pages. Preserve the usual discovery deadline for other kinds.
+                let secs = if p.id().split('=').next() == Some("nvidia") {
+                    30
+                } else {
+                    10
+                };
+                let deadline = tokio::time::timeout(Duration::from_secs(secs), p.list_models());
                 match deadline.await {
                     Ok(Ok(models)) => (p.id().to_string(), Some(models), None),
                     Ok(Err(e)) => {
@@ -152,7 +169,7 @@ impl ModelRegistry {
                         (
                             p.id().to_string(),
                             None,
-                            Some("timed out after 10s".to_string()),
+                            Some(format!("timed out after {secs}s")),
                         )
                     }
                 }
@@ -175,7 +192,15 @@ impl ModelRegistry {
         {
             let cat = self.catalog.read().unwrap();
             for (id, models) in cat.iter() {
-                updated.entry(id.clone()).or_insert_with(|| models.clone());
+                updated.entry(id.clone()).or_insert_with(|| {
+                    let mut models = models.clone();
+                    if restricts_free_models(id) {
+                        for model in &mut models {
+                            model.free = false;
+                        }
+                    }
+                    models
+                });
             }
         }
         // counts come after the retain, so they show what a client will actually
@@ -245,6 +270,7 @@ impl ModelRegistry {
                     id: format!("{pid}/{}", m.id),
                     display_name: m.display_name.clone(),
                     created_at: m.created_at.clone(),
+                    free: m.free,
                     surface: m.surface,
                 })
             })

@@ -5,38 +5,82 @@ use axum::response::Html;
 use crate::api::AppState;
 use axum::Json;
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use serde_json::{Value, json};
 
 // ── Model discovery reload ──────────────────────────────────────────
 
 /// The one shape both model endpoints answer with: every upstream with its
 /// models (bare ids + surface) and the last probe's error, if any.
-fn providers_json(snapshot: &[crate::discovery::ProviderCatalog]) -> serde_json::Value {
-    serde_json::Value::Array(
-        snapshot
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "id": p.id,
-                    "count": p.models.len(),
-                    "models": p.models.iter().map(|m| serde_json::json!({
+fn catalog_json(state: &AppState) -> Value {
+    let snapshot = state.registry.catalog_snapshot();
+    let free_only = state.registry.visibility.get();
+    let mut total = 0;
+    let providers = snapshot
+        .iter()
+        .map(|p| {
+            let models = p
+                .models
+                .iter()
+                .map(|m| {
+                    let listed = crate::discovery::model_is_listed(free_only, &p.id, m.free);
+                    total += usize::from(listed);
+                    json!({
                         "id": m.id,
                         "surface": m.surface.as_str(),
-                    })).collect::<Vec<_>>(),
-                    "error": p.error,
+                        "free": m.free,
+                        "listed": listed,
+                    })
                 })
-            })
-            .collect(),
-    )
+                .collect::<Vec<_>>();
+            json!({"id": p.id, "count": models.len(), "models": models, "error": p.error})
+        })
+        .collect::<Vec<_>>();
+    json!({"total": total, "free_models_only": free_only, "providers": providers})
 }
 
-/// `GET /api/models` — the catalog as served, grouped by upstream, without
-/// re-probing anything. `total` is what a client sees in `/v1/models`.
-pub async fn models_api(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let snapshot = state.registry.catalog_snapshot();
-    Json(serde_json::json!({
-        "total": state.registry.models().len(),
-        "providers": providers_json(&snapshot),
-    }))
+/// Full discovery catalog for management tools. "listed" is the effective
+/// visibility on /v1/models; "total" counts listed upstream models only.
+pub async fn models_api(State(state): State<AppState>) -> Json<Value> {
+    Json(catalog_json(&state))
+}
+
+pub(crate) async fn set_models_visibility(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(setting): Json<crate::model_visibility::VisibilitySetting>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let provided = headers
+        .get("authorization")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "));
+    if !state
+        .token
+        .as_deref()
+        .zip(provided)
+        .is_some_and(|(expected, token)| crate::auth::constant_time_eq(expected, token))
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": {"message": "global proxy token required to change model visibility"}
+            })),
+        ));
+    }
+
+    let registry = state.registry.clone();
+    match tokio::task::spawn_blocking(move || registry.visibility.set(setting)).await {
+        Ok(Ok(())) => Ok(Json(catalog_json(&state))),
+        error => {
+            tracing::error!(?error, "could not save model visibility");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {"message": "could not save model visibility"}
+                })),
+            ))
+        }
+    }
 }
 
 /// `POST /api/reload` — run one discovery round now and report per upstream.
@@ -45,16 +89,13 @@ pub async fn models_api(State(state): State<AppState>) -> Json<serde_json::Value
 /// upstream down at boot — keeps an empty catalog until this is called.
 pub async fn reload_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     state.registry.refresh().await;
-    let snapshot = state.registry.catalog_snapshot();
     let reloaded_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    Json(serde_json::json!({
-        "reloaded_at_ms": reloaded_at_ms,
-        "total": state.registry.models().len(),
-        "providers": providers_json(&snapshot),
-    }))
+    let mut data = catalog_json(&state);
+    data["reloaded_at_ms"] = json!(reloaded_at_ms);
+    Json(data)
 }
 
 // ── Usage page handler ──────────────────────────────────────────────

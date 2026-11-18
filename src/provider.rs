@@ -52,6 +52,8 @@ pub struct Model {
     pub created_at: Option<String>,
     #[serde(default)]
     pub surface: ModelSurface,
+    #[serde(default)]
+    pub free: bool,
 }
 
 /// One opaque chunk of upstream response body. v1 keeps bytes pristine
@@ -219,6 +221,7 @@ pub mod testutil {
                     id: m.clone(),
                     display_name: None,
                     created_at: None,
+                    free: false,
                     surface: self.surface,
                 })
                 .collect())
@@ -263,6 +266,7 @@ mod tests {
             id: "gpt-4o".into(),
             display_name: Some("GPT-4o".into()),
             created_at: Some("1720000000".into()),
+            free: false,
             surface: ModelSurface::ChatCompletions,
         };
         let json = serde_json::to_string(&m).unwrap();

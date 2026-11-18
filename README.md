@@ -80,6 +80,7 @@ Config lives in a single YAML file. Keys are **never** stored in the config — 
 bind: 127.0.0.1:8080                # or 0.0.0.0:8080 for all interfaces
 token_env: AIPROXY_TOKEN             # bearer auth; omit both token_env/token = no auth
 model_refresh_secs: 0                # 0 = fetch once at startup; >0 = periodic refresh
+free_models_only: true               # filter OpenRouter and NVIDIA only
 
 upstreams:
   - kind: opencode-go              # name optional — provider ID = "opencode-go"
@@ -123,7 +124,26 @@ embeddings:
 
 OpenCode Go, OpenRouter, and NVIDIA have **public/keyless** catalogs — `discover: true` is safe. MiniMax, Z.AI, and others require a valid API key. `openai-codex` discovery needs the ChatGPT login (run `/setup` first); before that it serves whatever `models:` lists.
 
-Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface}], error}`. A login to `openai-codex` triggers discovery automatically.
+Discovery runs once at startup and then every `model_refresh_secs` (default `0` = startup only), so an upstream that was unreachable at boot keeps an empty catalog. Open **`/models`** to see every upstream and the models it offers — click one to expand it — and press **Reload models** to re-run discovery. `GET /api/models` returns the same data as JSON without probing anything; `POST /api/reload` probes first and returns the same shape plus `reloaded_at_ms`. One entry per upstream: `{id, count, models: [{id, surface, free, listed}], error}`. A login to `openai-codex` triggers discovery automatically.
+
+### Free OpenRouter and NVIDIA models
+
+`free_models_only: true` (the default) filters only OpenRouter and NVIDIA on
+`/v1/models`. Aliases follow their targets. Other upstreams and requests made
+directly by model ID are unaffected. This is **not** a spending limit.
+
+Enable `discover: true` on those upstreams. OpenRouter's badge requires zero
+advertised prices. NVIDIA's **Free Endpoint** badge requires an exact match in
+the public [Build catalog](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview).
+If a model cannot be verified (including a static list or an unavailable catalog
+source), it stays hidden in free-only mode. For rotating offers, set
+`model_refresh_secs: 300` or use **Reload models**.
+
+Change **Free only** on `/models` with the global proxy token. The setting takes
+effect immediately and is saved in `aiproxy-model-visibility.json`
+(`AIPROXY_RUNTIME_DIR` → existing `/runtime` → config directory). Mount that
+directory durably. The saved setting overrides YAML on restart; YAML is not
+rewritten.
 
 ### Model aliases
 

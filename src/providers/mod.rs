@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod go;
+mod nvidia_preview;
 pub mod openai;
 pub mod openai_codex;
 #[cfg(test)]
@@ -62,6 +63,7 @@ impl Provider for StaticProvider {
                 id: m.clone(),
                 display_name: None,
                 created_at: None,
+                free: false,
                 // The configured surface, not Unknown: clients read this from
                 // /v1/models to pick the wire API, so a static upstream that
                 // declared `surface: responses` must not be advertised as
@@ -260,6 +262,7 @@ fn chat_kind(u: &UpstreamConfig, id: &str) -> Arc<dyn Provider> {
                 id: m.clone(),
                 display_name: None,
                 created_at: None,
+                free: false,
                 surface: ModelSurface::ChatCompletions,
             })
             .collect();

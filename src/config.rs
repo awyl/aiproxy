@@ -273,6 +273,8 @@ pub struct Config {
     pub token_env: Option<String>,
     #[serde(default = "default_refresh")]
     pub model_refresh_secs: u64,
+    #[serde(default = "default_free_models_only")]
+    pub free_models_only: bool,
     pub upstreams: Vec<UpstreamConfig>,
     #[serde(default)]
     pub mcp: McpConfig,
@@ -286,6 +288,10 @@ impl Config {
         parse_bind(&self.bind)
     }
 }
+fn default_free_models_only() -> bool {
+    true
+}
+
 fn default_refresh() -> u64 {
     0 // fetch once at startup; set > 0 for periodic refresh
 }

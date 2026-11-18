@@ -50,12 +50,27 @@ pub fn extract_openai_limits(resp: &reqwest::Response) -> UsageData {
     }
 }
 
+// Read the provider's decimal strings without rounding a tiny price down to zero.
+fn openrouter_free(pricing: &Value) -> bool {
+    static ZERO: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[+-]?(0+(\.0*)?|\.0+)([eE][+-]?[0-9]+)?$").unwrap()
+    });
+    pricing.as_object().is_some_and(|prices| {
+        prices.contains_key("prompt")
+            && prices.contains_key("completion")
+            && prices
+                .values()
+                .all(|price| price.as_str().is_some_and(|s| ZERO.is_match(s)))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
     pub id: String,
     pub base_url: String,
     pub api_key: Option<String>,
     client: Client,
+    kind: crate::config::UpstreamKind,
 }
 
 impl OpenAiProvider {
@@ -69,6 +84,7 @@ impl OpenAiProvider {
             base_url: cfg.effective_base_url(),
             api_key,
             client: crate::providers::default_http_client(),
+            kind: cfg.kind,
         }
     }
 
@@ -107,6 +123,19 @@ impl Provider for OpenAiProvider {
                 body,
             });
         }
+        let previews = if matches!(self.kind, crate::config::UpstreamKind::Nvidia)
+            && self.base_url.trim_end_matches('/') == "https://integrate.api.nvidia.com/v1"
+        {
+            match super::nvidia_preview::free_ids(&self.client, super::nvidia_preview::URL).await {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::warn!(provider = %self.id, %error, "NVIDIA free endpoint classification failed; pricing unknown");
+                    Default::default()
+                }
+            }
+        } else {
+            Default::default()
+        };
         Ok(body["data"]
             .as_array()
             .map(|arr| {
@@ -115,6 +144,15 @@ impl Provider for OpenAiProvider {
                         id: m["id"].as_str().unwrap_or_default().to_string(),
                         display_name: None,
                         created_at: m["created"].as_u64().map(|c| c.to_string()),
+                        free: match self.kind {
+                            crate::config::UpstreamKind::Openrouter => {
+                                openrouter_free(&m["pricing"])
+                            }
+                            crate::config::UpstreamKind::Nvidia => {
+                                m["id"].as_str().is_some_and(|id| previews.contains(id))
+                            }
+                            _ => false,
+                        },
                         surface: ModelSurface::ChatCompletions,
                     })
                     .collect()

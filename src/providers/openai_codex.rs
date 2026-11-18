@@ -158,6 +158,7 @@ impl OpenAiCodexProvider {
                 id: m.clone(),
                 display_name: None,
                 created_at: None,
+                free: false,
                 surface: ModelSurface::Responses,
             })
             .collect()
@@ -221,6 +222,7 @@ impl Provider for OpenAiCodexProvider {
                     id: m.slug,
                     display_name: m.display_name,
                     created_at: None,
+                    free: false,
                     surface: ModelSurface::Responses,
                 })
                 .collect()),
