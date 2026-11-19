@@ -1,0 +1,192 @@
+use crate::{
+    skills::{Action, AdminSnapshot, SkillsError, SkillsStore},
+    skills_mcp::{Credentials, no_store},
+};
+use axum::{
+    Json, Router,
+    extract::{Extension, Path, Request, State},
+    http::{StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use serde_json::json;
+use std::sync::Arc;
+
+pub(crate) fn router(
+    store: Arc<SkillsStore>,
+    credentials: Credentials,
+    github: crate::skills_github::Github,
+) -> Router {
+    Router::new()
+        .route("/api/skills", get(snapshot))
+        .route("/api/skills/{name}/actions", post(apply))
+        .route("/api/skills/import", post(import))
+        .route("/api/skills/{name}/check-update", post(check_update))
+        .layer(Extension(github))
+        .route_layer(middleware::from_fn_with_state(
+            credentials.admin,
+            admin_only,
+        ))
+        .with_state(store)
+        .route(
+            "/skills",
+            get(|| async {
+                crate::pages::with_page_frame(include_str!("skills_page.html"), "/skills", true)
+            }),
+        )
+        .layer(middleware::from_fn(no_store))
+}
+async fn admin_only(State(admin): State<String>, req: Request, next: Next) -> Response {
+    if req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|v| crate::auth::constant_time_eq(v, &admin))
+    {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"global token required"})),
+        )
+            .into_response()
+    }
+}
+async fn snapshot(State(store): State<Arc<SkillsStore>>) -> Json<AdminSnapshot> {
+    Json(store.admin_snapshot())
+}
+async fn apply(
+    State(store): State<Arc<SkillsStore>>,
+    Path(name): Path<String>,
+    Json(action): Json<Action>,
+) -> Result<Json<AdminSnapshot>, ApiError> {
+    let result = tokio::task::spawn_blocking(move || store.apply(&name, action))
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill write failed".into(),
+            )
+        })?;
+    Ok(Json(result?))
+}
+struct ApiError(StatusCode, String);
+impl From<SkillsError> for ApiError {
+    fn from(error: SkillsError) -> Self {
+        let status = match error {
+            SkillsError::Invalid(_) => StatusCode::BAD_REQUEST,
+            SkillsError::Unavailable => StatusCode::NOT_FOUND,
+            SkillsError::Conflict => StatusCode::CONFLICT,
+            SkillsError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self(status, error.to_string())
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({"error":self.1}))).into_response()
+    }
+}
+
+use crate::skills_github::{Github, ImportError, Imported, Target};
+use serde::Deserialize;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportRequest {
+    url: String,
+    tracked_ref: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckRequest {
+    revision: u64,
+}
+impl From<ImportError> for ApiError {
+    fn from(error: ImportError) -> Self {
+        let status = match error {
+            ImportError::Skill(e) => return e.into(),
+            ImportError::Upstream => StatusCode::BAD_GATEWAY,
+            ImportError::Busy => StatusCode::CONFLICT,
+            ImportError::Invalid(_) => StatusCode::BAD_REQUEST,
+        };
+        Self(status, error.to_string())
+    }
+}
+async fn stage(
+    store: Arc<SkillsStore>,
+    imported: Imported,
+    base: Option<u64>,
+) -> Result<Json<AdminSnapshot>, ApiError> {
+    let result = tokio::task::spawn_blocking(move || {
+        store.stage_import(&imported.name, imported.files, imported.source, base)
+    })
+    .await
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "skill write failed".into(),
+        )
+    })?;
+    Ok(Json(result?))
+}
+async fn import(
+    State(store): State<Arc<SkillsStore>>,
+    Extension(github): Extension<Github>,
+    Json(req): Json<ImportRequest>,
+) -> Result<Json<AdminSnapshot>, ApiError> {
+    let target = Target::parse(&req.url, req.tracked_ref)?;
+    let imported = github.fetch(target.source, target.resolve).await?;
+    stage(store, imported, None).await
+}
+async fn check_update(
+    State(store): State<Arc<SkillsStore>>,
+    Extension(github): Extension<Github>,
+    Path(name): Path<String>,
+    Json(req): Json<CheckRequest>,
+) -> Result<Response, ApiError> {
+    let before = store.admin_snapshot();
+    let skill = before.skills.get(&name).ok_or(SkillsError::Unavailable)?;
+    let published = skill.published.as_ref().ok_or(SkillsError::Unavailable)?;
+    if published.id != req.revision || skill.draft.is_some() {
+        return Err(SkillsError::Conflict.into());
+    }
+    let source = published
+        .source
+        .clone()
+        .ok_or(ImportError::Invalid("skill has no GitHub source"))?;
+    if source.tracked_ref.is_none() && !source.tracks_default {
+        return Err(ImportError::Invalid(
+            "this import is pinned; remove and re-import with a tracked ref to update",
+        )
+        .into());
+    }
+    let imported = github
+        .fetch(source.clone(), source.tracked_ref.clone())
+        .await?;
+    if name != imported.name {
+        return Err(ImportError::Invalid("upstream changed the skill name").into());
+    }
+    if published.files.len() == imported.files.len()
+        && imported.files.iter().all(|(path, file)| {
+            published
+                .files
+                .get(path)
+                .is_some_and(|old| old.data == file.data && old.executable == file.executable)
+        })
+    {
+        let now = store.admin_snapshot();
+        if now.skills.get(&name).is_none_or(|s| {
+            s.draft.is_some() || s.published.as_ref().map(|p| p.id) != Some(req.revision)
+        }) {
+            return Err(SkillsError::Conflict.into());
+        }
+        return Ok(
+            Json(json!({"skills":now.skills,"message":"No skill changes."})).into_response(),
+        );
+    }
+    Ok(stage(store, imported, Some(req.revision))
+        .await?
+        .into_response())
+}

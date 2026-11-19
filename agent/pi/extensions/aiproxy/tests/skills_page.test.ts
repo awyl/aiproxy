@@ -1,0 +1,20 @@
+import {readFileSync} from 'node:fs';
+import {JSDOM} from 'jsdom';
+import {expect,it} from 'vitest';
+it('shows changed and removed files as text, keeps stale reviews, and confirms removal', async () => {
+ const page=readFileSync(new URL('../../../../../src/skills_page.html',import.meta.url),'utf8');
+ const file=(data:string)=>({data:btoa(data),executable:false});
+ const snapshot={skills:{example:{enabled:true,published:{id:1,files:{'SKILL.md':file('old'),'gone.md':file('old')}},draft:{id:2,base_revision:1,note:'<img src=x>',files:{'SKILL.md':file('new')}}}}};
+ let status=409; let attempts=0;
+ const dom=new JSDOM(page,{url:'https://proxy.test/skills',runScripts:'dangerously',beforeParse(w){w.confirm=()=>false;w.TextDecoder=TextDecoder;w.fetch=(async (_input:unknown,init?:RequestInit)=>{if(init?.method==='POST'){attempts++;return Response.json({error:'write failed'},{status});}return Response.json(snapshot);}) as typeof w.fetch;}});
+ const {document}=dom.window;
+ const click=(selector:string)=>(document.querySelector(selector) as HTMLButtonElement).click();
+ const settle=()=>new Promise(r=>setTimeout(r,0));
+ (document.querySelector('#token') as HTMLInputElement).value='admin'; click('#load'); await settle();
+ expect(document.body.textContent).toContain('Removed gone.md');
+ expect(document.body.textContent).toContain('<img src=x>'); expect(document.querySelector('img')).toBeNull();
+ click('[data-action=publish]'); await settle(); expect(document.querySelector('#status')?.textContent).toContain('409');
+ status=500; click('[data-action=publish]'); await settle(); expect(document.querySelector('#status')?.textContent).toContain('500');
+ click('[data-action=remove]'); expect(attempts).toBe(2);
+ dom.window.close();
+});

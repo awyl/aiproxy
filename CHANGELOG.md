@@ -4,6 +4,12 @@ All notable changes to aiproxy will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] - 2026-11-19
+
+### Added
+- **Shared skills** — import and update public GitHub skill folders or write skills in the `/skills` dashboard. Agents can propose drafts, but only a dashboard administrator can publish and enable them.
+- **On-demand skill loading** — agents browse metadata over MCP, load instructions and companion files when needed, or fetch the approved folder locally without executing it.
+
 ## [0.4.7] - 2026-11-18
 
 ### Changed

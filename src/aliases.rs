@@ -249,8 +249,10 @@ pub async fn save_aliases(
     Ok(aliases_response(&state.registry))
 }
 
-pub async fn aliases_page() -> axum::response::Html<String> {
-    crate::pages::with_page_frame(include_str!("aliases_page.html"), "/aliases")
+pub async fn aliases_page(
+    nav: Option<axum::Extension<crate::pages::SkillsNav>>,
+) -> axum::response::Html<String> {
+    crate::pages::with_page_frame(include_str!("aliases_page.html"), "/aliases", nav.is_some())
 }
 
 #[cfg(test)]

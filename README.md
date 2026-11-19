@@ -433,6 +433,52 @@ Models auto-register from the proxy's `/v1/models`. Wire format
 thinking levels, cost) is resolved from the pi.dev model catalog, with pi's local
 `models-store.json` as fallback.
 
+## Shared skills
+
+Enable the skills registry in `aiproxy.yaml` with a dashboard token and separate agent credentials:
+
+```yaml
+token_env: AIPROXY_TOKEN
+skills:
+  read_token_env: AIPROXY_SKILLS_TOKEN
+  author_token_env: AIPROXY_SKILLS_AUTHOR_TOKEN # optional
+```
+
+Set each variable to a different secret. Keep the global dashboard token out of
+agent environments: the read token can only browse enabled skills, and the author
+token can also propose text drafts. Neither agent token can publish or enable.
+
+Open `/skills` to paste a `SKILL.md` or import a public GitHub skill folder, for
+example `https://github.com/erkamyaman/rust-anything/tree/HEAD/skills/rust-anything`.
+Review the exact draft, including any **Note to agents**, then publish and enable
+it. **Check for update** stages changes from the tracked ref for review; it never
+replaces an open draft. **Disable** blocks new reads and downloads. **Remove**
+permanently deletes the registry entry, including its files and history. Neither
+deletes local copies or uninstalls any tools.
+
+Connect a stock Streamable HTTP MCP client to `/mcp/skills` with the read token.
+For example, in Pi (no aiproxy extension required):
+
+```sh
+pi mcp add aiproxy-skills --url http://127.0.0.1:8080/mcp/skills --bearer-token-env-var AIPROXY_SKILLS_TOKEN
+pi mcp list
+```
+
+Use HTTPS for a remote proxy and add its hostname to `mcp.allowed_hosts`. The MCP
+tools list metadata only, load instructions and the note when requested, and read
+individual companion files using the returned revision. If a script needs its full
+folder on disk, run this on the **agent machine**, with the revision from `load_skill`:
+
+```sh
+aiproxy skills fetch example --revision 7 --output ./example-skill --base-url http://127.0.0.1:8080
+```
+
+The output directory must not exist. Fetch preserves the folder layout and Unix
+executable bits but runs nothing. External tools, such as the `rust-anything` CLI
+or its MCP server, are configured separately on the machine that has the checkout.
+A **Note to agents** can explain how to check for or install a dependency, but it
+is not permission to install it.
+
 ## CLI
 
 ```

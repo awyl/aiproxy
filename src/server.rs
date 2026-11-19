@@ -19,6 +19,8 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("mcp setup failed: {0}")]
     Mcp(String),
+    #[error("skills state setup failed: {0}")]
+    Skills(std::io::Error),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
 }
@@ -63,6 +65,15 @@ pub async fn build_with_options(
 ) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
     let port = port_override.unwrap_or(port);
+    let skills = config
+        .skills_credentials()?
+        .map(|credentials| {
+            let path = crate::aliases::runtime_state_path(&config_path, "aiproxy-skills.json");
+            crate::skills::SkillsStore::open(path)
+                .map(|store| (Arc::new(store), credentials))
+                .map_err(ServerError::Skills)
+        })
+        .transpose()?;
 
     let codex_managers = Arc::new(crate::providers::create_codex_managers(
         &config,
@@ -269,7 +280,7 @@ pub async fn build_with_options(
     let multiplex_router =
         crate::mcp_multiplexer::mcp_multiplex_route().with_state(multiplex_state);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/usage", get(crate::pages::usage_page))
         .route("/models", get(crate::pages::models_page))
@@ -297,6 +308,17 @@ pub async fn build_with_options(
         .merge(multiplex_router)
         .with_state(state);
 
+    if let Some((store, credentials)) = skills {
+        let hosts = crate::mcp::mcp_allowed_hosts(&host, &config.mcp.allowed_hosts);
+        app = app
+            .layer(axum::Extension(crate::pages::SkillsNav))
+            .merge(crate::skills_api::router(
+                store.clone(),
+                credentials.clone(),
+                crate::skills_github::Github::new().map_err(std::io::Error::other)?,
+            ))
+            .merge(crate::skills_mcp::router(store, credentials, hosts));
+    }
     let listener = TcpListener::bind((host.as_str(), port)).await?;
     Ok((listener, app))
 }

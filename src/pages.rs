@@ -112,7 +112,7 @@ pub async fn reload_models(State(state): State<AppState>) -> Json<serde_json::Va
 
 // ── Usage page handler ──────────────────────────────────────────────
 
-pub async fn usage_page() -> Html<String> {
+pub async fn usage_page(nav: Option<axum::Extension<SkillsNav>>) -> Html<String> {
     with_page_frame(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -181,6 +181,7 @@ load();
 </body>
 </html>"#,
         "/usage",
+        nav.is_some(),
     )
 }
 
@@ -191,8 +192,8 @@ load();
 /// (`model_refresh_secs: 0`), so a provider that was unreachable then (an
 /// unauthenticated Codex upstream, an upstream down at boot) keeps an empty
 /// catalog until the button is pressed.
-pub async fn models_page() -> Html<String> {
-    with_page_frame(include_str!("models_page.html"), "/models")
+pub async fn models_page(nav: Option<axum::Extension<SkillsNav>>) -> Html<String> {
+    with_page_frame(include_str!("models_page.html"), "/models", nav.is_some())
 }
 
 const PAGE_FRAME_STYLE: &str = r#"<style>
@@ -233,14 +234,19 @@ const PAGE_FRAME_SCRIPT: &str = r#"<script>
   window.addEventListener('resize', () => setNavOpen(!isMobileNav()));
 </script>"#;
 
-pub(crate) fn with_page_frame(html: &'static str, active_path: &str) -> Html<String> {
+#[derive(Clone, Copy)]
+pub struct SkillsNav;
+
+pub(crate) fn with_page_frame(html: &'static str, active_path: &str, skills: bool) -> Html<String> {
     let nav_links = [
         ("/usage", "Usage"),
         ("/models", "Models"),
         ("/aliases", "Aliases"),
         ("/setup", "Setup"),
+        ("/skills", "Skills"),
     ]
     .iter()
+    .filter(|(path, _)| *path != "/skills" || skills)
     .map(|(path, label)| {
         let current = if *path == active_path {
             " aria-current=\"page\""
@@ -414,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_page_hides_providers_without_windows() {
-        let html = usage_page().await.0;
+        let html = usage_page(None).await.0;
         assert!(
             html.contains("data.filter(p => (p.windows || []).length > 0)"),
             "providers with no quota windows must not render"
@@ -424,9 +430,9 @@ mod tests {
     #[tokio::test]
     async fn all_pages_share_navigation_frame_and_links() {
         let pages = [
-            ("usage", usage_page().await.0),
-            ("models", models_page().await.0),
-            ("setup", crate::setup::setup_page().await.0),
+            ("usage", usage_page(None).await.0),
+            ("models", models_page(None).await.0),
+            ("setup", crate::setup::setup_page(None).await.0),
         ];
         for (name, html) in pages {
             assert!(html.contains("app-frame"), "{name} missing frame");
@@ -450,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn models_page_toggles_providers_and_keeps_the_reload_button() {
-        let html = models_page().await.0;
+        let html = models_page(None).await.0;
         assert!(html.contains("/api/models"), "the page reads the catalog");
         assert!(html.contains("/api/reload"), "and can re-run discovery");
         assert!(html.contains("Reload models"));

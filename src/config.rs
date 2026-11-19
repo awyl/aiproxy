@@ -268,6 +268,7 @@ fn default_bind() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    pub skills: Option<SkillsConfig>,
     #[serde(default = "default_bind")]
     pub bind: String,
     #[serde(default)]
@@ -338,6 +339,7 @@ impl Config {
         self.validate_upstreams()?;
         self.validate_mcp()?;
         self.validate_embeddings()?;
+        self.skills_credentials()?;
         if let Some(env) = &self.token_env
             && std_env::var(env).is_err()
         {
@@ -1150,5 +1152,61 @@ mcp:
             None,
             "no per-server token + no global = no auth"
         );
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsConfig {
+    pub read_token_env: String,
+    pub author_token_env: Option<String>,
+}
+
+impl Config {
+    pub(crate) fn skills_credentials(
+        &self,
+    ) -> Result<Option<crate::skills_mcp::Credentials>, ConfigError> {
+        let Some(skills) = &self.skills else {
+            return Ok(None);
+        };
+        let invalid = |message: &str| ConfigError::Invalid(message.into());
+        let read_env = |name: &str| {
+            std_env::var(name)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| invalid("skills token environment variable is unset or empty"))
+        };
+        let admin = self
+            .effective_token()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| invalid("skills requires a global token"))?;
+        let read = read_env(&skills.read_token_env)?;
+        let author = skills
+            .author_token_env
+            .as_deref()
+            .map(read_env)
+            .transpose()?;
+        if read == admin
+            || author.as_ref().is_some_and(|a| a == &admin || a == &read)
+            || self
+                .upstreams
+                .iter()
+                .filter_map(|u| u.subscription_token().flatten())
+                .any(|t| t == read || author.as_ref() == Some(&t) || t == admin)
+        {
+            return Err(invalid(
+                "skills role tokens must be distinct and not subscription tokens",
+            ));
+        }
+        if self.mcp.servers.iter().any(|s| s.name == "skills") {
+            return Err(invalid(
+                "MCP backend name 'skills' is reserved when skills is configured",
+            ));
+        }
+        Ok(Some(crate::skills_mcp::Credentials {
+            admin,
+            read,
+            author,
+        }))
     }
 }

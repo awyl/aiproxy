@@ -33,10 +33,11 @@ dependencies = [
 
 [[package]]
 name = "aiproxy"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",

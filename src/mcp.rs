@@ -119,14 +119,7 @@ pub fn mcp_router(
     cache: &BackendCache,
 ) -> Result<Router<AppState>, String> {
     let mut router = Router::<AppState>::new();
-    let mut allowed: Vec<String> = if allowed_hosts.is_empty() {
-        vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
-    } else {
-        allowed_hosts.to_vec()
-    };
-    if !allowed.contains(&bind_host.to_string()) {
-        allowed.push(bind_host.into());
-    }
+    let allowed = mcp_allowed_hosts(bind_host, allowed_hosts);
     for server in servers {
         // Per-server auth: token_env > literal token > global fallback.
         let effective_token = server.effective_token(global_token);
@@ -429,4 +422,16 @@ mod multiplexer_tests {
         assert!(Arc::ptr_eq(&a1, &a2), "same server must share one slot");
         assert!(!Arc::ptr_eq(&a1, &b), "different servers must not share");
     }
+}
+
+pub(crate) fn mcp_allowed_hosts(bind_host: &str, allowed_hosts: &[String]) -> Vec<String> {
+    let mut allowed = if allowed_hosts.is_empty() {
+        vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
+    } else {
+        allowed_hosts.to_vec()
+    };
+    if !allowed.iter().any(|h| h == bind_host) {
+        allowed.push(bind_host.into());
+    }
+    allowed
 }

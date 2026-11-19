@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>aiproxy — Skills</title><style>
+body{font:16px system-ui}label{display:block;margin:.75rem 0}textarea{width:100%;max-width:65rem;box-sizing:border-box}button{margin:.25rem}article,form{border:1px solid #aaa;border-radius:.5rem;padding:1rem;margin:1rem 0}pre{white-space:pre-wrap;overflow-wrap:anywhere}input{max-width:95%}
+</style></head><body>
+<h1>Skills</h1><label>Global token <input id="token" type="password" autocomplete="off"></label><button id="load">Load skills</button><p id="status" role="status"></p>
+<section id="workspace" hidden>
+<form id="editor"><h2 id="editing">New text skill</h2><label>Name <input id="name" required></label><label>SKILL.md <textarea id="content" rows="12" required></textarea></label><label>Note to agents <textarea id="note" rows="4"></textarea></label><button>Save draft</button><button type="button" id="new">New text skill</button></form>
+<form id="import"><h2>Import GitHub folder</h2><label>Folder URL <input id="folder" type="url" required></label><label>Tracked ref (optional) <input id="ref"></label><button>Stage import</button></form>
+<div id="skills"></div></section>
+<script>
+const el = id => document.getElementById(id);
+const create = (tag, text) => {const node = document.createElement(tag); node.textContent = text; return node;};
+let editing = null, busy = false, loadedToken = null;
+function reset() {editing = null; el('editor').reset(); el('name').readOnly = false; el('editing').textContent = 'New text skill';}
+function decode(file) {
+  if (!file) return null;
+  try {return new TextDecoder('utf-8', {fatal:true}).decode(Uint8Array.from(atob(file.data), c=>c.charCodeAt(0)));}
+  catch (_) {return null;}
+}
+async function request(path, body, success, onSuccess) {
+  if (busy) return;
+  busy = true;
+  el('status').textContent = 'Working…';
+  const token = el('token').value;
+  try {
+    const response = await fetch(path, {method: body ? 'POST' : 'GET', headers:{Authorization:'Bearer '+token, ...(body ? {'Content-Type':'application/json'} : {})}, body: body ? JSON.stringify(body) : undefined, cache:'no-store'});
+    if (!response.ok) {
+      const details = await response.json().catch(()=>null);
+      throw new Error('HTTP '+response.status+(details?.error ? ': '+details.error : ''));
+    }
+    const result = await response.json();
+    if (token !== el('token').value) return;
+    if (loadedToken !== token) reset();
+    loadedToken = token;
+    render(result.skills);
+    onSuccess?.();
+    el('status').textContent = result.message ?? success;
+  } catch (error) {el('status').textContent = error.message;}
+  finally {busy = false;}
+}
+el('token').addEventListener('input', () => {loadedToken=null; el('workspace').hidden=true; el('skills').replaceChildren(); reset();});
+el('load').onclick = () => request('/api/skills', null, 'Skills loaded.');
+el('new').onclick = reset;
+function endpoint(name, action='actions') {return '/api/skills/'+encodeURIComponent(name)+'/'+action;}
+function apply(name, action, fields, after) {return request(endpoint(name), {action,...fields}, 'Saved.', after);}
+el('editor').onsubmit = event => {
+  event.preventDefault();
+  apply(el('name').value, 'save_text_draft', {content:el('content').value,note:el('note').value || null,base_revision:editing?.base ?? null,expected_draft_revision:editing?.draft ?? null},reset);
+};
+el('import').onsubmit = event => {
+  event.preventDefault(); request('/api/skills/import',{url:el('folder').value,tracked_ref:el('ref').value || null},'Import staged.');
+};
+function review(panel, current, draft) {
+  const files = current?.files ?? {};
+  const line = (label, value) => panel.append(create('strong',label),create('pre',value ?? '(none)'));
+  if (draft.source) panel.append(create('p',draft.source.owner+'/'+draft.source.repo+'/'+draft.source.folder+' @ '+draft.source.commit));
+  if (draft.note !== (current?.note ?? null)) {line('Previous Note to agents',current?.note);line('Draft Note to agents',draft.note);}
+  for (const path of new Set([...Object.keys(files), ...Object.keys(draft.files)])) {
+    const before=files[path], after=draft.files[path];
+    if (before && after && before.data===after.data && before.executable===after.executable) continue;
+    const entry=create('details',''); entry.open=path==='SKILL.md';
+    entry.append(create('summary',(before ? (after ? 'Changed ' : 'Removed ') : 'Added ')+path));
+    for (const [label,file] of [['Published',before],['Draft',after]]) if (file) {
+      const size = file.data.length * 3 / 4 - (file.data.endsWith('==') ? 2 : file.data.endsWith('=') ? 1 : 0);
+      entry.append(create('strong',label+' · '+size+' bytes'+(file.executable?' · executable':'')+(file.blob?' · '+file.blob:'')),create('pre',decode(file) ?? '(binary)'));
+    }
+    panel.append(entry);
+  }
+}
+function render(skills) {
+  el('workspace').hidden=false;
+  el('skills').replaceChildren();
+  for (const [name, skill] of Object.entries(skills)) {
+    const {published:p,draft:d}=skill, revision=p?.id ?? null, draft_revision=d?.id ?? null;
+    const card=create('article',''); card.append(create('h2',name),create('p',p ? (skill.enabled ? 'Enabled' : 'Disabled')+' · revision '+revision : 'Not published'));
+    const button = (action,label,handler) => {const b=create('button',label); b.dataset.action=action; b.onclick=handler; card.append(b);};
+    button('edit','Edit draft',()=>{editing={base:d?.base_revision ?? revision,draft:draft_revision};el('name').value=name;el('name').readOnly=true;el('editing').textContent='Edit '+name;el('content').value=decode((d ?? p).files['SKILL.md']) ?? '';el('note').value=(d ?? p).note ?? '';el('content').focus();});
+    if (d) {
+      const panel=create('section','');panel.append(create('h3','Review draft '+draft_revision));review(panel,p,d);card.append(panel);
+      button('publish','Publish reviewed draft',()=>apply(name,'publish',{base_revision:d.base_revision,draft_revision}));
+      button('reject','Reject draft',()=>apply(name,'reject',{draft_revision}));
+    }
+    if (p) {
+      button('set_enabled',skill.enabled?'Disable':'Enable',()=>apply(name,'set_enabled',{revision,enabled:!skill.enabled}));
+      if (skill.previous) button('rollback','Rollback',()=>{if(confirm('Publish the previous revision of '+name+'?')) apply(name,'rollback',{revision});});
+      if (p.source && !d) button('check-update','Check for update',()=>request(endpoint(name,'check-update'),{revision},'Update staged.'));
+    }
+    button('remove','Remove permanently',()=>{if(confirm('Permanently remove '+name+' and all its revisions?')) apply(name,'remove',{revision,draft_revision},reset);});
+    el('skills').append(card);
+  }
+}
+</script></body></html>
