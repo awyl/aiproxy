@@ -456,10 +456,30 @@ block and any old skills bearer token from your MCP clients. Without a global
 token distinct from subscription tokens, skills management is unavailable.
 The MCP backend name `skills` is reserved for the built-in registry.
 
-Open `/skills` to paste a `SKILL.md` or import a public GitHub skill folder, for
-example `https://github.com/erkamyaman/rust-anything/tree/HEAD/skills/rust-anything`.
-Review the exact draft, including any **Note to agents**, then publish and enable
-it. **Check for update** stages changes from the tracked ref for review; it never
+Open `/skills` to paste a `SKILL.md`, or open **Import skill** and enter a public
+GitHub repository URL such as `https://github.com/erkamyaman/rust-anything`.
+Select **Find skills**, choose a skill (folder paths distinguish repeated names),
+and add a **Note to agents** if needed. Import stages the selected folder at the
+exact commit found by discovery. Review the draft, then publish and enable it.
+Skills that need agent hooks must be installed locally instead: sharing does not
+register hooks, MCP servers or local tools.
+
+Repository discovery/import/update uses the official `skills@1.9.0` library,
+not `npx` or terminal-output parsing. The Docker image includes Node and git.
+For a standalone deployment, install Node **22.20+** and git, copy `skills-import/`
+beside the source checkout or to `<binary-prefix>/share/aiproxy/skills-import/`,
+then run `npm ci --omit=dev --ignore-scripts` in that folder. For example, a binary
+at `/usr/local/bin/aiproxy` uses `/usr/local/share/aiproxy/skills-import/`.
+No packages are downloaded at request time. Without the helper, other proxy and
+skills operations still work; repository operations report the missing dependency.
+The helper uses temporary copies, disables telemetry and rejects symlinks.
+The full repository may be cloned before skill-size limits are checked; allow
+temporary disk space for the repositories you import. The picker shows skills whose
+names meet the registry rules: lowercase letters/digits separated by hyphens, up to
+64 characters. Other names are not offered.
+
+**Check for update** stages changes from the default branch (or a previously saved
+tracked ref) for review; it never
 replaces an open draft. **Disable** blocks new reads and downloads. **Remove**
 permanently deletes the registry entry, including its files and history. Neither
 deletes local copies or uninstalls any tools.

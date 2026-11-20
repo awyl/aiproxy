@@ -42,23 +42,57 @@ it('shows the issued draft token and clears it on revoke', async () => {
  dom.window.close();
 });
 
-it('includes the agent note when importing a GitHub folder', async () => {
+it('discovers repository skills, selects a folder and imports the pinned revision with its note', async () => {
  const page=readFileSync(new URL('../../../../../src/skills_page.html',import.meta.url),'utf8');
  const calls:{url:string,body:unknown}[]=[];
- const dom=new JSDOM(page,{url:'https://proxy.test/skills',runScripts:'dangerously',beforeParse(w){w.fetch=(async (url:string,init?:RequestInit)=>{
+ const commit='a'.repeat(40);
+ const dom=new JSDOM(page,{url:'https://proxy.test/skills',runScripts:'dangerously',beforeParse(w){w.fetch=(async(url:string,init?:RequestInit)=>{
   if(init?.method==='POST') calls.push({url,body:JSON.parse(init.body as string)});
+  if(url.endsWith('/discover')) return Response.json({commit,skills:[
+   {name:'example',description:'First skill',path:'skills/example'},
+   {name:'example',description:'Alternate folder',path:'plugin/skills/example'},
+  ]});
   return Response.json({skills:{}});
  }) as typeof w.fetch;}});
  try {
-  const document=dom.window.document;
-  await new Promise(r=>setTimeout(r,0));
-  const note=document.querySelector('#import textarea') as HTMLTextAreaElement;
-  expect(note).not.toBeNull();
-  note.value='Ask before installing rust-anything';
-  (document.getElementById('folder') as HTMLInputElement).value='https://github.com/test/repo/tree/main/skill';
-  document.getElementById('import')!.dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
-  await new Promise(r=>setTimeout(r,0));
-  expect(calls).toEqual([{url:'/api/skills/import',body:{url:'https://github.com/test/repo/tree/main/skill',note:'Ask before installing rust-anything'}}]);
+  const document=dom.window.document, settle=()=>new Promise(r=>setTimeout(r,0));
+  await settle();
+  expect(document.getElementById('hooks-reminder')?.textContent).toMatch(/hooks.*locally/i);
+  const folder=document.getElementById('folder') as HTMLInputElement;
+  folder.value='https://github.com/test/repo';
+  (document.getElementById('find-skills') as HTMLButtonElement).click(); await settle();
+  const picker=document.getElementById('skill-choice') as HTMLSelectElement;
+  expect(picker.textContent).toContain('skills/example');
+  expect(picker.textContent).toContain('plugin/skills/example');
+  picker.value='1'; picker.dispatchEvent(new dom.window.Event('change'));
+  expect(document.getElementById('skill-description')?.textContent).toBe('Alternate folder');
+  (document.getElementById('import-note') as HTMLTextAreaElement).value='Ask before installing tools';
+  document.getElementById('import')!.dispatchEvent(new dom.window.Event('submit',{cancelable:true})); await settle();
+  expect(calls).toEqual([
+   {url:'/api/skills/discover',body:{url:'https://github.com/test/repo'}},
+   {url:'/api/skills/import',body:{url:'https://github.com/test/repo',commit,path:'plugin/skills/example',name:'example',note:'Ask before installing tools'}},
+  ]);
+ } finally {dom.window.close();}
+});
+
+it('ignores discovery responses after the repository URL changes', async () => {
+ const page=readFileSync(new URL('../../../../../src/skills_page.html',import.meta.url),'utf8');
+ let finish!:(value:Response)=>void; let imports=0;
+ const dom=new JSDOM(page,{url:'https://proxy.test/skills',runScripts:'dangerously',beforeParse(w){w.fetch=(async(url:string)=>{
+  if(url.endsWith('/discover')) return new Promise<Response>(resolve=>{finish=resolve;});
+  if(url.endsWith('/import')) imports++;
+  return Response.json({skills:{}});
+ }) as typeof w.fetch;}});
+ try {
+  const {document}=dom.window, settle=()=>new Promise(r=>setTimeout(r,0)); await settle();
+  const folder=document.getElementById('folder') as HTMLInputElement;
+  folder.value='https://github.com/test/old';
+  (document.getElementById('find-skills') as HTMLButtonElement).click();
+  folder.value='https://github.com/test/new'; folder.dispatchEvent(new dom.window.Event('input'));
+  finish(Response.json({commit:'a'.repeat(40),skills:[{name:'old',description:'Old',path:'skill'}]})); await settle();
+  expect((document.getElementById('import-selection') as HTMLElement).hidden).toBe(true);
+  document.getElementById('import')!.dispatchEvent(new dom.window.Event('submit',{cancelable:true})); await settle();
+  expect(imports).toBe(0);
  } finally {dom.window.close();}
 });
 
@@ -81,9 +115,9 @@ it('starts with a compact skill list, labelled icon actions and collapsed forms'
   const importer=document.querySelector('#import-panel') as HTMLDetailsElement;
   expect(editor.open).toBe(false); expect(importer.open).toBe(false);
   expect(editor.querySelector('summary')?.textContent).toBe('New skill');
-  expect(importer.querySelector('summary')?.textContent).toBe('Import GitHub');
+  expect(importer.querySelector('summary')?.textContent).toBe('Import skill');
   expect(document.querySelector('#ref')).toBeNull();
-  expect(document.querySelector('label[for="folder"]')?.textContent).toBe('URL');
+  expect(document.querySelector('label[for="folder"]')?.textContent).toBe('Repository URL');
   (row.querySelector('[data-action=edit]') as HTMLButtonElement).click();
   expect(editor.open).toBe(true);
   expect((document.querySelector('#note') as HTMLTextAreaElement).value).toBe('Keep this note');

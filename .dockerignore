@@ -14,3 +14,6 @@ tests/
 docker-push.sh
 aiproxy.yaml
 .pi/
+
+# helper dependencies are installed from the lock file in the image
+skills-import/node_modules/

@@ -15,3 +15,6 @@ aiproxy.yaml
 
 # extension deps
 agent/pi/extensions/aiproxy/node_modules/
+
+# pinned skills importer dependencies
+skills-import/node_modules/

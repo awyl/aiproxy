@@ -1,4 +1,11 @@
 # syntax=docker/dockerfile:1
+# Pinned skills library. No package downloads during dashboard requests.
+FROM node:22-bookworm-slim AS skills-builder
+WORKDIR /opt/aiproxy-skills
+COPY skills-import/package.json skills-import/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --engine-strict --no-audit --no-fund
+COPY skills-import/helper.mjs ./
+
 # ── Build stage: Rust binary (glibc, matches ort-sys prebuilt) ────────────────
 FROM debian:trixie-slim AS rust-builder
 
@@ -24,11 +31,20 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        nodejs \
-        npm \
+        git \
+        libstdc++6 \
+        libatomic1 \
         python3 \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Use the supported Node 22 runtime for both the helper and hosted MCP tools.
+COPY --from=skills-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=skills-builder /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s node /usr/local/bin/nodejs
+COPY --from=skills-builder /opt/aiproxy-skills /usr/local/share/aiproxy/skills-import
 
 # uv (for uvx)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh

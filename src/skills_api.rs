@@ -24,6 +24,7 @@ pub(crate) fn router(
             post(issue_draft_token).delete(revoke_draft_token),
         )
         .route("/api/skills/{name}/actions", post(apply))
+        .route("/api/skills/discover", post(discover))
         .route("/api/skills/import", post(import))
         .route("/api/skills/{name}/check-update", post(check_update))
         .layer(Extension(github))
@@ -80,13 +81,15 @@ impl IntoResponse for ApiError {
     }
 }
 
-use crate::skills_github::{Github, ImportError, Imported, Target};
+use crate::skills_github::{Github, ImportError, Imported};
 use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportRequest {
     url: String,
-    tracked_ref: Option<String>,
+    commit: String,
+    path: String,
+    name: String,
     note: Option<String>,
 }
 #[derive(Deserialize)]
@@ -98,7 +101,8 @@ impl From<ImportError> for ApiError {
     fn from(error: ImportError) -> Self {
         let status = match error {
             ImportError::Skill(e) => return e.into(),
-            ImportError::Upstream => StatusCode::BAD_GATEWAY,
+            ImportError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            ImportError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ImportError::Busy => StatusCode::CONFLICT,
             ImportError::Invalid(_) => StatusCode::BAD_REQUEST,
         };
@@ -123,13 +127,25 @@ async fn stage(
     })?;
     Ok(Json(result?))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoverRequest {
+    url: String,
+}
+async fn discover(
+    Extension(github): Extension<Github>,
+    Json(req): Json<DiscoverRequest>,
+) -> Result<Json<crate::skills_github::Discovery>, ApiError> {
+    Ok(Json(github.discover(&req.url).await?))
+}
 async fn import(
     State(store): State<Arc<SkillsStore>>,
     Extension(github): Extension<Github>,
     Json(req): Json<ImportRequest>,
 ) -> Result<Json<AdminSnapshot>, ApiError> {
-    let target = Target::parse(&req.url, req.tracked_ref)?;
-    let imported = github.fetch_target(target).await?;
+    let imported = github
+        .import(&req.url, &req.commit, &req.path, &req.name)
+        .await?;
     stage(store, imported, None, req.note).await
 }
 async fn check_update(
@@ -154,9 +170,7 @@ async fn check_update(
         )
         .into());
     }
-    let imported = github
-        .fetch(source.clone(), source.tracked_ref.clone())
-        .await?;
+    let imported = github.fetch(source.clone(), &name).await?;
     if name != imported.name {
         return Err(ImportError::Invalid("upstream changed the skill name").into());
     }

@@ -8,8 +8,8 @@ h1{font-size:1.5rem;margin:0}p,small{line-height:1.5}
 #status{font-size:.875rem;white-space:pre-wrap;color:#64748b}
 #status.error{color:#b91c1c}
 label{display:block;font-size:.875rem;font-weight:500;margin:.85rem 0 .35rem}
-input,textarea,button{font:inherit;border:1px solid #cbd5e1;border-radius:5px}
-input,textarea{display:block;width:100%;padding:.6rem .7rem;background:white;color:inherit}
+input,textarea,select,button{font:inherit;border:1px solid #cbd5e1;border-radius:5px}
+input,textarea,select{display:block;width:100%;padding:.6rem .7rem;background:white;color:inherit}
 textarea{resize:vertical}button{padding:.5rem .75rem;background:#f8fafc;cursor:pointer;color:#334155}
 button:hover,summary:hover{background:#f1f5f9}
 button:focus-visible,summary:focus-visible{outline:2px solid #64748b;outline-offset:3px}
@@ -34,6 +34,8 @@ button:disabled{opacity:.5;cursor:default}
 .form-panel[open]>summary{border-bottom:1px solid #e2e8f0}
 .form-panel form{padding:.25rem 1rem 1rem}
 .form-actions{display:flex;gap:.5rem;margin-top:1rem}
+.setup-reminder{font-size:.875rem;color:#475569;padding:.8rem;border:1px solid #e2e8f0;border-radius:5px;background:#f8fafc}
+#import-selection .skill-description{white-space:normal}
 .agent-access{margin-top:1.5rem;color:#64748b;font-size:.875rem}
 .agent-access>summary{cursor:pointer}.agent-access button{font-size:.8rem;margin-right:.35rem}
 pre{white-space:pre-wrap;overflow-wrap:anywhere}code{overflow-wrap:anywhere}
@@ -51,10 +53,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}code{overflow-wrap:anywhere}
 <label for="content">SKILL.md</label><textarea id="content" rows="12" required placeholder="Skill instructions and frontmatter"></textarea>
 <label for="note">Note to agents</label><textarea id="note" rows="3" placeholder="Local setup or extra guidance (optional)"></textarea>
 <div class="form-actions"><button class="primary">Save draft</button><button type="button" id="new">Cancel</button></div></form></details>
-<details class="form-panel" id="import-panel"><summary>Import GitHub</summary>
-<form id="import"><label for="folder">URL</label><input id="folder" type="url" required placeholder="https://github.com/owner/repo/tree/main/skill">
+<details class="form-panel" id="import-panel"><summary>Import skill</summary>
+<form id="import"><label for="folder">Repository URL</label><input id="folder" type="url" required placeholder="https://github.com/owner/repo">
+<div class="form-actions"><button type="button" id="find-skills">Find skills</button></div>
+<p class="setup-reminder" id="hooks-reminder"><strong>Needs agent hooks? Install it locally instead.</strong> Shared skills do not register hooks, MCP servers or local tools. Install hook-dependent skills on each machine running your agent.</p>
+<div id="import-selection" hidden><label for="skill-choice">Skill</label><select id="skill-choice" required></select>
+<p class="skill-description" id="skill-description"></p>
 <label for="import-note">Note to agents</label><textarea id="import-note" rows="3" placeholder="Local setup or extra guidance (optional)"></textarea>
-<div class="form-actions"><button class="primary">Import as draft</button></div></form></details>
+<div class="form-actions"><button class="primary">Import as draft</button></div></div></form></details>
 <details class="agent-access"><summary>Agent draft access</summary><p>Generate a temporary token when an agent asks to save a draft. It cannot publish skills. A new token replaces the old one.</p><button id="generate-draft-token">Generate draft token</button><button id="revoke-draft-token">Revoke draft token</button><p id="draft-grant" hidden><code id="draft-secret"></code> · <span id="draft-expiry"></span></p></details>
 </section>
 <script>
@@ -75,6 +81,7 @@ function decode(file) {
 async function request(path, body, success, onSuccess, method = body ? 'POST' : 'GET') {
   if (busy) return;
   busy = true;
+  el('find-skills').disabled = true;
   el('status').classList.remove('error');
    el('status').textContent = 'Working…';
   try {
@@ -84,11 +91,11 @@ async function request(path, body, success, onSuccess, method = body ? 'POST' : 
       throw new Error('HTTP '+response.status+(details?.error ? ': '+(details.error.message ?? details.error) : ''));
     }
     const result = response.status === 204 ? {} : await response.json();
-    if (result.skills) render(result.skills);
-    onSuccess?.(result);
-    el('status').textContent = result.message ?? success;
+    if (result.skills && !Array.isArray(result.skills)) render(result.skills);
+    const message = onSuccess?.(result);
+    el('status').textContent = message ?? result.message ?? success;
   } catch (error) {el('status').classList.add('error'); el('status').textContent = error.message;}
-  finally {busy = false;}
+  finally {busy = false; el('find-skills').disabled = false;}
 }
 el('new').onclick = reset;
 el('generate-draft-token').onclick = () => request('/api/skills/draft-token', null, 'Draft token generated. Share it privately with the agent.', grant => {
@@ -105,8 +112,37 @@ el('editor').onsubmit = event => {
   event.preventDefault();
   apply(el('name').value, 'save_text_draft', {content:el('content').value,note:el('note').value || null,base_revision:editing?.base ?? null,expected_draft_revision:editing?.draft ?? null},reset);
 };
-el('import').onsubmit = event => {
-  event.preventDefault(); request('/api/skills/import',{url:el('folder').value,note:el('import-note').value || null},'Import staged for review.',()=>{el('import').reset(); el('import-panel').open=false;});
+let discovery=null, searchGeneration=0;
+function clearDiscovery() {
+ discovery=null; searchGeneration++;
+ el('skill-choice').replaceChildren(); el('skill-description').textContent='';
+ el('import-selection').hidden=true;
+}
+el('folder').addEventListener('input',clearDiscovery);
+el('find-skills').onclick=()=>{
+ const url=el('folder').value.trim(), generation=++searchGeneration;
+ discovery=null; el('import-selection').hidden=true;
+ request('/api/skills/discover',{url},'Choose a skill to import.',result=>{
+  if (generation!==searchGeneration || el('folder').value.trim()!==url) return 'Repository changed. Click Find skills again.';
+  discovery={url,commit:result.commit,skills:result.skills};
+  const picker=el('skill-choice'); picker.replaceChildren();
+  const placeholder=create('option','Choose a skill'); placeholder.value=''; picker.append(placeholder);
+  result.skills.forEach((skill,index)=>{const option=create('option',skill.name+' — '+skill.path); option.value=String(index); picker.append(option);});
+  el('skill-description').textContent=''; el('import-selection').hidden=false;
+ });
+};
+el('skill-choice').onchange=()=>{
+ el('skill-description').textContent=discovery?.skills[el('skill-choice').value]?.description ?? '';
+};
+el('import').onsubmit=event=>{
+ event.preventDefault();
+ const choice=el('skill-choice').value, selected=choice!=='' && discovery?.skills[choice];
+ if (!selected || discovery.url!==el('folder').value.trim()) {
+  el('status').textContent='Click Find skills and choose a skill first.'; return;
+ }
+ request('/api/skills/import',{url:discovery.url,commit:discovery.commit,path:selected.path,name:selected.name,note:el('import-note').value || null},'Import staged for review.',()=>{
+  el('import').reset(); clearDiscovery(); el('import-panel').open=false;
+ });
 };
 function review(panel, current, draft) {
   const files = current?.files ?? {};
