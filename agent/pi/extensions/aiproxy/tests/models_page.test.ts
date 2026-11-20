@@ -191,11 +191,11 @@ it("sends the token and new model policy, then renders the server's catalog", as
     expect(toggle?.checked).toBe(true);
     expect(doc.querySelector("#data")?.textContent).toContain("Free Endpoint");
     expect(doc.querySelector("#data")?.textContent).not.toContain("unverified");
-    doc.querySelector<HTMLInputElement>("#global-token")!.value = "admin";
+    expect(doc.querySelector('input[type="password"]')).toBeNull();
     toggle!.click();
     await settle(dom);
     expect(updates).toHaveLength(1);
-    expect(new Headers(updates[0].headers).get("Authorization")).toBe("Bearer admin");
+    expect(new Headers(updates[0].headers).get("Authorization")).toBeNull();
     expect(JSON.parse(String(updates[0].body))).toEqual({provider: "nvidia", free_models_only: false});
     expect(section(dom, "nvidia").querySelector<HTMLInputElement>(".free-only")?.checked).toBe(false);
     expect(section(dom, "openrouter=two").querySelector<HTMLInputElement>(".free-only")?.checked).toBe(true);

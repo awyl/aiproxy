@@ -127,7 +127,10 @@ async fn spawn_codex_backend(backend: Arc<Backend>) -> String {
 async fn wait_for_login(base: &str) {
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let resp = reqwest::get(format!("{base}/api/codex/status"))
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/api/codex/status"))
+            .bearer_auth("e2e-tok")
+            .send()
             .await
             .expect("status request");
         let body: Value = resp.json().await.expect("status json");
@@ -269,6 +272,7 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
     // browser login: the pasted redirect URL finishes it
     let start: Value = reqwest::Client::new()
         .post(format!("{base}/api/codex/start"))
+        .bearer_auth("e2e-tok")
         .json(&json!({}))
         .send()
         .await
@@ -306,13 +310,17 @@ async fn codex_browser_login_then_responses_relay_end_to_end() {
 
     let complete = reqwest::Client::new()
         .post(format!("{base}/api/codex/complete"))
+        .bearer_auth("e2e-tok")
         .json(&json!({"input": format!("{redirect_uri}?code=ac_e2e_browser&state={state}")}))
         .send()
         .await
         .expect("paste-back");
     assert_eq!(complete.status(), 200, "got {complete:?}");
 
-    let status: Value = reqwest::get(format!("{base}/api/codex/status"))
+    let status: Value = reqwest::Client::new()
+        .get(format!("{base}/api/codex/status"))
+        .bearer_auth("e2e-tok")
+        .send()
         .await
         .unwrap()
         .json()
@@ -400,6 +408,7 @@ async fn codex_device_login_then_responses_relay_end_to_end() {
     // device-code fallback: the proxy polls, so this finishes on its own
     let start: Value = reqwest::Client::new()
         .post(format!("{base}/api/codex/start?method=device"))
+        .bearer_auth("e2e-tok")
         .json(&json!({}))
         .send()
         .await

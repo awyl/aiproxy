@@ -335,11 +335,12 @@ impl SkillsStore {
         files: Files,
         source: Source,
         base: Option<u64>,
+        note: Option<String>,
     ) -> Result<AdminSnapshot, SkillsError> {
         self.change(name, |state| {
             let id = state.next_id;
             let skill = draft_target(state, name, base, None)?;
-            let note = skill.published.as_ref().and_then(|p| p.note.clone());
+            let note = note.or_else(|| skill.published.as_ref().and_then(|p| p.note.clone()));
             skill.draft = Some(snapshot(name, id, base, files, note, Some(source))?);
             Ok(())
         })

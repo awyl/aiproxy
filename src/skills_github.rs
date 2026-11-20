@@ -43,14 +43,12 @@ mod tests {
         let upstream = tokio::spawn(async move { axum::serve(listener, fixture).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SkillsStore::open(dir.path().join("skills.json")).unwrap());
-        let app = crate::skills_api::router(
-            store.clone(),
-            crate::skills_mcp::Credentials {
-                admin: "admin".into(),
-                read: "reader".into(),
-                author: None,
-            },
-            github,
+        let app = crate::dashboard_auth::DashboardAuth::new(Some("admin".into())).api(
+            crate::skills_api::router(
+                store.clone(),
+                crate::skills_mcp::DraftTokens::default(),
+                github,
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/api/skills", listener.local_addr().unwrap());
@@ -59,13 +57,22 @@ mod tests {
         let imported = http
             .post(format!("{base}/import"))
             .bearer_auth("admin")
-            .json(&json!({"url":"https://github.com/test/repo/tree/main/skill"}))
+            .json(&json!({"url":"https://github.com/test/repo/tree/main/skill", "note":"Check local tools before use"}))
             .send()
             .await
             .unwrap()
             .error_for_status()
             .unwrap();
         assert_eq!(imported.status(), 200);
+        assert_eq!(
+            store.admin_snapshot().skills["example"]
+                .draft
+                .as_ref()
+                .unwrap()
+                .note
+                .as_deref(),
+            Some("Check local tools before use")
+        );
         let draft = store.admin_snapshot().skills["example"]
             .draft
             .as_ref()

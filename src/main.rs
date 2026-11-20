@@ -58,9 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
     }) = cli.command
     {
-        let token = std::env::var("AIPROXY_SKILLS_TOKEN")
-            .map_err(|_| "AIPROXY_SKILLS_TOKEN is required")?;
-        aiproxy::skills_fetch::fetch(base_url, &token, &name, revision, &output).await?;
+        aiproxy::skills_fetch::fetch(base_url, &name, revision, &output).await?;
         println!("{}", output.display());
         return Ok(());
     }

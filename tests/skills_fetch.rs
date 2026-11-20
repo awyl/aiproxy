@@ -10,7 +10,7 @@ async fn fetch(body: String, path: &Path) -> Output {
         get(
             move |headers: axum::http::HeaderMap,
                   axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
-                assert_eq!(headers["authorization"], "Bearer fixture-reader");
+                assert!(!headers.contains_key("authorization"));
                 assert_eq!(query.as_deref(), Some("revision=7"));
                 body
             },
@@ -29,7 +29,7 @@ async fn fetch(body: String, path: &Path) -> Output {
             "--output",
         ])
         .arg(path)
-        .env("AIPROXY_SKILLS_TOKEN", "fixture-reader")
+        .env_remove("AIPROXY_SKILLS_TOKEN")
         .output()
         .await
         .unwrap();

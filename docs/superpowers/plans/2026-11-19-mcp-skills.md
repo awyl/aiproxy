@@ -40,11 +40,11 @@
 
 **Files:** src/config.rs, src/server.rs, src/lib.rs; create src/skills_mcp.rs and tests/skills_mcp.rs.
 
-**Interface:** Optional YAML skills: {read_token_env, author_token_env?}; the server builds a shared SkillsStore at aliases::runtime_state_path and mounts /mcp/skills. Factor the existing allowed-host computation out of src/mcp.rs so both call it; use rmcp StreamableHttpService with existing stateless transport settings.
+**Interface:** No skills-specific YAML; the server builds a shared SkillsStore at aliases::runtime_state_path and mounts /mcp/skills. Factor the existing allowed-host computation out of src/mcp.rs so both call it; use rmcp StreamableHttpService with existing stateless transport settings.
 
-- [ ] Add skills_mcp_wire and skills_mcp_auth integration tests that initialize with Streamable HTTP, inspect tools/list and call all four tools by exact names in the spec. Assert hidden fixture markers never appear in initialize, tools/list or catalog. Load returns the body and approved note; old revision reads after publish conflict; after disable or purge, reads fail. Assert anonymous, inference/subscription, global and bad tokens are rejected at the MCP boundary. Reader cannot submit, author can submit but cannot replace source/note/assets, and neither can publish. Add config tests for duplicate/missing tokens and reserved backend name.
+- [ ] Add skills_mcp_wire and skills_mcp_auth integration tests that initialize with Streamable HTTP, inspect tools/list and call all four tools by exact names in the spec. Assert hidden fixture markers never appear in initialize, tools/list or catalog. Load returns the body and approved note; old revision reads after publish conflict; after disable or purge, reads fail. Assert anonymous reads work and only a temporary draft bearer can submit drafts. The draft bearer cannot replace source/note/assets or publish. Add config tests for missing admin token and reserved backend name.
 - [ ] Run cargo test --test skills_mcp and record failure.
-- [ ] Implement the route. Perform bearer validation outside transport on every request, select read/author authority before tool dispatch, and return tool errors for denied writes, unavailable skills, and stale revisions. For individual binary reads, return base64 with explicit encoding; return UTF-8 companion text as text. Set no-store on all skill routes.
+- [ ] Implement the route. Check the dashboard-issued draft bearer on each draft tool call without blocking reads, and return tool errors for denied writes, unavailable skills, and stale revisions. For individual binary reads, return base64 with explicit encoding; return UTF-8 companion text as text. Set no-store on all skill routes.
 - [ ] Run cargo test skills and cargo test --test skills_mcp.
 
 ### Task 3: Dashboard and exact-revision review
@@ -73,11 +73,11 @@
 
 **Files:** src/main.rs, src/skills_api.rs, src/lib.rs; create src/skills_fetch.rs and tests/skills_fetch.rs; update README.md with dashboard, auth and stock MCP setup.
 
-**Interface:** GET /api/skills/{name}/bundle?revision=ID requires MCP read/author bearer and live availability. Returns revision and file map, including SKILL.md. aiproxy skills fetch NAME --revision ID --output NEW_DIRECTORY --base-url URL reads AIPROXY_SKILLS_TOKEN locally, materializes bytes, and prints the directory path. Accept HTTPS and loopback HTTP; do not follow redirects. Use existing CLI conventions if they already provide an equivalent base URL flag.
+**Interface:** GET /api/skills/{name}/bundle?revision=ID requires live availability but no bearer. Returns revision and file map, including SKILL.md. aiproxy skills fetch NAME --revision ID --output NEW_DIRECTORY --base-url URL materializes bytes without credentials, and prints the directory path. Accept HTTPS and loopback HTTP; do not follow redirects. Use existing CLI conventions if they already provide an equivalent base URL flag.
 
 - [ ] Add skills_fetch_layout and skills_fetch_bad_paths: fetch script plus asset and assert contents, exec bit on Unix, and no execution marker. Assert rejection for traversal, absolute paths, duplicates, file/dir prefix collisions, existing or linked output, revision mismatch, disabled and removed skills. Assert failure leaves preexisting paths untouched; do not write a file before validating the entire manifest.
 - [ ] Run cargo test --test skills_fetch and record failure.
-- [ ] Implement authenticated live bundle route and bounded client decoder. Share path validation with the store, create output root exclusively, create files exclusively under it, preserve regular exec bit on Unix, and clean up the new output on recoverable write failure. Never execute any files. Document runtime token separation, first-use MCP, and local fetch with a script fixture.
+- [ ] Implement the public live bundle route and bounded client decoder. Share path validation with the store, create output root exclusively, create files exclusively under it, preserve regular exec bit on Unix, and clean up the new output on recoverable write failure. Never execute any files. Document runtime token separation, first-use MCP, and local fetch with a script fixture.
 - [ ] Run cargo fmt --check, cargo test --locked, the extension test suite, and git diff --check. Test Pi and Claude Code if installed; show raw initialize/catalog/load/file results with canary markers and redact credentials. On a temporary proxy demonstrate install, approve, enable, import update review, disable, purge, and restart. Report absent clients as untested. No push.
 
 ## Upstream evidence used to design import

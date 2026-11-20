@@ -5,7 +5,7 @@ use axum::response::Html;
 use crate::api::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 // ── Model discovery reload ──────────────────────────────────────────
@@ -51,27 +51,8 @@ pub async fn models_api(State(state): State<AppState>) -> Json<Value> {
 
 pub(crate) async fn set_models_visibility(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(setting): Json<crate::model_visibility::VisibilitySetting>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let provided = headers
-        .get("authorization")
-        .and_then(|header| header.to_str().ok())
-        .and_then(|header| header.strip_prefix("Bearer "));
-    if !state
-        .token
-        .as_deref()
-        .zip(provided)
-        .is_some_and(|(expected, token)| crate::auth::constant_time_eq(expected, token))
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": {"message": "global proxy token required to change model visibility"}
-            })),
-        ));
-    }
-
     if !state.registry.visibility.supports(&setting.provider) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -112,7 +93,7 @@ pub async fn reload_models(State(state): State<AppState>) -> Json<serde_json::Va
 
 // ── Usage page handler ──────────────────────────────────────────────
 
-pub async fn usage_page(nav: Option<axum::Extension<SkillsNav>>) -> Html<String> {
+pub async fn usage_page() -> Html<String> {
     with_page_frame(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -181,7 +162,6 @@ load();
 </body>
 </html>"#,
         "/usage",
-        nav.is_some(),
     )
 }
 
@@ -192,8 +172,8 @@ load();
 /// (`model_refresh_secs: 0`), so a provider that was unreachable then (an
 /// unauthenticated Codex upstream, an upstream down at boot) keeps an empty
 /// catalog until the button is pressed.
-pub async fn models_page(nav: Option<axum::Extension<SkillsNav>>) -> Html<String> {
-    with_page_frame(include_str!("models_page.html"), "/models", nav.is_some())
+pub async fn models_page() -> Html<String> {
+    with_page_frame(include_str!("models_page.html"), "/models")
 }
 
 const PAGE_FRAME_STYLE: &str = r#"<style>
@@ -208,6 +188,7 @@ const PAGE_FRAME_STYLE: &str = r#"<style>
   .page-main { flex: 1; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.75rem; height: 3.5rem; padding: 0 1rem; border-bottom: 1px solid #e5e7eb; }
   .nav-toggle { width: 2.5rem; height: 2.5rem; padding: 0; border: 1px solid #d1d5db; border-radius: 6px; background: white; color: #111827; cursor: pointer; font-size: 1.2rem; }
+  .topbar form { margin-left: auto; }
   .page-content { max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem 2rem; }
   body.nav-collapsed .sidebar { display: none; }
   @media (max-width: 700px) {
@@ -234,10 +215,7 @@ const PAGE_FRAME_SCRIPT: &str = r#"<script>
   window.addEventListener('resize', () => setNavOpen(!isMobileNav()));
 </script>"#;
 
-#[derive(Clone, Copy)]
-pub struct SkillsNav;
-
-pub(crate) fn with_page_frame(html: &'static str, active_path: &str, skills: bool) -> Html<String> {
+pub(crate) fn with_page_frame(html: &'static str, active_path: &str) -> Html<String> {
     let nav_links = [
         ("/usage", "Usage"),
         ("/models", "Models"),
@@ -246,7 +224,6 @@ pub(crate) fn with_page_frame(html: &'static str, active_path: &str, skills: boo
         ("/skills", "Skills"),
     ]
     .iter()
-    .filter(|(path, _)| *path != "/skills" || skills)
     .map(|(path, label)| {
         let current = if *path == active_path {
             " aria-current=\"page\""
@@ -260,7 +237,8 @@ pub(crate) fn with_page_frame(html: &'static str, active_path: &str, skills: boo
     let html = html.replace(
         "<body>",
         &format!(
-            r#"<body><div class="app-frame"><aside class="sidebar" id="site-nav"><a class="brand" href="/usage">aiproxy</a><nav aria-label="Pages">{nav_links}</nav></aside><div class="page-main"><header class="topbar"><button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="site-nav" aria-expanded="true">☰</button><span>aiproxy</span></header><main class="page-content">"#
+            r#"<body><div class="app-frame"><aside class="sidebar" id="site-nav"><a class="brand" href="/usage">aiproxy</a><nav aria-label="Pages">{nav_links}</nav></aside><div class="page-main"><header class="topbar"><button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="site-nav" aria-expanded="true">☰</button><span>aiproxy {version}</span><form method="post" action="/dashboard/logout"><button type="submit">Sign out</button></form></header><main class="page-content">"#,
+            version = env!("CARGO_PKG_VERSION"),
         ),
     );
     Html(html.replace(
@@ -420,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_page_hides_providers_without_windows() {
-        let html = usage_page(None).await.0;
+        let html = usage_page().await.0;
         assert!(
             html.contains("data.filter(p => (p.windows || []).length > 0)"),
             "providers with no quota windows must not render"
@@ -430,13 +408,21 @@ mod tests {
     #[tokio::test]
     async fn all_pages_share_navigation_frame_and_links() {
         let pages = [
-            ("usage", usage_page(None).await.0),
-            ("models", models_page(None).await.0),
-            ("setup", crate::setup::setup_page(None).await.0),
+            ("usage", usage_page().await.0),
+            ("models", models_page().await.0),
+            ("setup", crate::setup::setup_page().await.0),
         ];
         for (name, html) in pages {
             assert!(html.contains("app-frame"), "{name} missing frame");
             assert!(html.contains("nav-toggle"), "{name} missing menu toggle");
+            assert!(
+                html.contains(concat!(
+                    "</button><span>aiproxy ",
+                    env!("CARGO_PKG_VERSION"),
+                    "</span>"
+                )),
+                "{name} missing the build version next to the menu toggle"
+            );
             let nav = html
                 .split(r#"<nav aria-label="Pages">"#)
                 .nth(1)
@@ -456,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn models_page_toggles_providers_and_keeps_the_reload_button() {
-        let html = models_page(None).await.0;
+        let html = models_page().await.0;
         assert!(html.contains("/api/models"), "the page reads the catalog");
         assert!(html.contains("/api/reload"), "and can re-run discovery");
         assert!(html.contains("Reload models"));

@@ -142,8 +142,7 @@ uses exact matches from the public [Build catalog](https://build.nvidia.com/mode
 while free-only is on. This is **not** a billing guarantee: offers can change
 between discoveries. Set `model_refresh_secs: 300` or use **Reload models**.
 
-On `/models`, expand the upstream and change **Free only** with the global proxy
-token. The change takes effect after saving and survives restart in
+On `/models`, expand the upstream and change **Free only**. The change takes effect after saving and survives restart in
 `aiproxy-model-visibility.json`
 (`AIPROXY_RUNTIME_DIR` → existing `/runtime` → config directory). Mount that
 directory durably. Saved overrides take precedence over YAML; YAML is not
@@ -155,6 +154,19 @@ The management API exposes `free_models_only` per upstream (null if unsupported)
 `PUT /api/models` accepts `{"provider":"openrouter=work","free_models_only":true}`,
 using the current upstream ID. The old global write body is no longer accepted.
 
+### Dashboard sign-in
+
+Open any dashboard page and use the existing global proxy token (`token` or
+`token_env`) as the password. One sign-in covers all pages; choose **Sign out**
+in the header to end the session. Sessions expire after 12 hours or a proxy
+restart. Use HTTPS for non-local access; if terminating TLS at a reverse proxy,
+preserve the public `Host` header. No dashboard-specific configuration is needed.
+Without a global token distinct from subscription tokens, the dashboard stays
+locked; inference and MCP keep their existing authentication rules.
+
+Dashboard API clients can use `Authorization: Bearer <global-token>` instead of a
+browser session.
+
 ### Model aliases
 
 Open **/aliases** to create stable names such as `default/fast`, `default/free`,
@@ -162,16 +174,11 @@ and `default/planner`. Choose real models from the catalog, then **Save aliases*
 In pi they appear as `aiproxy/default/fast`, etc. No example mappings are installed
 automatically; targets must actually exist in your discovered catalog.
 
-The editor uses your **global proxy token** when configured. Subscription tokens
-cannot manage global aliases. With subscription-only authentication, configure a
-global token first. Fully unauthenticated configurations remain unauthenticated;
-restrict network access or configure a token before exposing the proxy.
-
 - `GET /api/aliases` returns `{aliases: [{id, target, surface, available}], state_path}`.
 - `PUT /api/aliases` accepts a full replacement map:
   `{"aliases":{"default/fast":"opencode-go/<real-model>"}}`.
   Send `Content-Type: application/json` and `Authorization: Bearer <global-token>`
-  when configured. An empty map deletes all aliases.
+  for API calls outside the dashboard. An empty map deletes all aliases.
 - Names use `default/<name>`, with ASCII letters, digits, dot, underscore, or
   hyphen; no empty, `.`, or `..` names. Targets must be actual cataloged inference
   models with a known surface. Alias chains and embedding targets are rejected.
@@ -435,18 +442,19 @@ thinking levels, cost) is resolved from the pi.dev model catalog, with pi's loca
 
 ## Shared skills
 
-Enable the skills registry in `aiproxy.yaml` with a dashboard token and separate agent credentials:
+The **Skills** page is built in. No `skills` block is needed in `aiproxy.yaml`.
+To manage skills, use the existing global dashboard token (`token` or `token_env`):
 
 ```yaml
 token_env: AIPROXY_TOKEN
-skills:
-  read_token_env: AIPROXY_SKILLS_TOKEN
-  author_token_env: AIPROXY_SKILLS_AUTHOR_TOKEN # optional
 ```
 
-Set each variable to a different secret. Keep the global dashboard token out of
-agent environments: the read token can only browse enabled skills, and the author
-token can also propose text drafts. Neither agent token can publish or enable.
+Anyone who can reach the proxy can list, load, and download enabled, published
+skills. Only the global token can manage skills in the dashboard; keep it out of
+agent environments. If upgrading an older config, remove the entire `skills`
+block and any old skills bearer token from your MCP clients. Without a global
+token distinct from subscription tokens, skills management is unavailable.
+The MCP backend name `skills` is reserved for the built-in registry.
 
 Open `/skills` to paste a `SKILL.md` or import a public GitHub skill folder, for
 example `https://github.com/erkamyaman/rust-anything/tree/HEAD/skills/rust-anything`.
@@ -456,13 +464,34 @@ replaces an open draft. **Disable** blocks new reads and downloads. **Remove**
 permanently deletes the registry entry, including its files and history. Neither
 deletes local copies or uninstalls any tools.
 
-Connect a stock Streamable HTTP MCP client to `/mcp/skills` with the read token.
+For the Pi aiproxy extension, add `skills` to `mcpServers` in
+`~/.pi/agent/aiproxy.json`, for example `"donsetch,ctx7,brain,skills"`.
+The existing `/mcp` multiplexer exposes `skills__list_skills`,
+`skills__load_skill`, `skills__read_skill_file`, and `skills__save_skill_draft`.
+No extension update or separate MCP connection is needed. For temporary draft
+access through the multiplexer, use `skills:TOKEN` in the server selection;
+the token is checked on each draft write, not against the dashboard password.
+
+Alternatively, connect a stock Streamable HTTP MCP client to `/mcp/skills` without a token for
+read-only access. When an agent asks to save a draft, sign in to `/skills` and
+select **Generate draft token**. Share the
+temporary token privately and configure the client to send it as an
+`Authorization: Bearer …` header on its MCP requests, not as a tool argument.
+It grants draft writes only and expires after 15 minutes. Generating another,
+selecting **Revoke draft token**, or restarting aiproxy invalidates it. If access
+expires, the agent asks for a fresh token. Remove the expired credential from
+the client configuration; it is not needed for reads.
+
 For example, in Pi (no aiproxy extension required):
 
 ```sh
-pi mcp add aiproxy-skills --url http://127.0.0.1:8080/mcp/skills --bearer-token-env-var AIPROXY_SKILLS_TOKEN
+pi mcp add aiproxy-skills --url http://127.0.0.1:8080/mcp/skills
 pi mcp list
 ```
+
+For temporary draft access in Pi, add `--bearer-token-env-var AIPROXY_DRAFT_TOKEN`
+to the `pi mcp add` command and provide the issued token in the environment of
+the Pi process. This is a client-side variable; aiproxy does not read it.
 
 Use HTTPS for a remote proxy and add its hostname to `mcp.allowed_hosts`. The MCP
 tools list metadata only, load instructions and the note when requested, and read

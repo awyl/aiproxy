@@ -3,6 +3,7 @@ pub mod api;
 pub mod auth;
 pub mod codex_oauth;
 pub mod config;
+mod dashboard_auth;
 pub mod discovery;
 pub mod embeddings;
 pub mod mcp;

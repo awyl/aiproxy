@@ -1,12 +1,11 @@
 use crate::{
     skills::{Action, AdminSnapshot, SkillsError, SkillsStore},
-    skills_mcp::{Credentials, no_store},
+    skills_mcp::DraftTokens,
 };
 use axum::{
     Json, Router,
-    extract::{Extension, Path, Request, State},
-    http::{StatusCode, header},
-    middleware::{self, Next},
+    extract::{Extension, Path, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -15,44 +14,35 @@ use std::sync::Arc;
 
 pub(crate) fn router(
     store: Arc<SkillsStore>,
-    credentials: Credentials,
+    draft_tokens: DraftTokens,
     github: crate::skills_github::Github,
 ) -> Router {
     Router::new()
         .route("/api/skills", get(snapshot))
+        .route(
+            "/api/skills/draft-token",
+            post(issue_draft_token).delete(revoke_draft_token),
+        )
         .route("/api/skills/{name}/actions", post(apply))
         .route("/api/skills/import", post(import))
         .route("/api/skills/{name}/check-update", post(check_update))
         .layer(Extension(github))
-        .route_layer(middleware::from_fn_with_state(
-            credentials.admin,
-            admin_only,
-        ))
+        .layer(Extension(draft_tokens))
         .with_state(store)
-        .route(
-            "/skills",
-            get(|| async {
-                crate::pages::with_page_frame(include_str!("skills_page.html"), "/skills", true)
-            }),
-        )
-        .layer(middleware::from_fn(no_store))
 }
-async fn admin_only(State(admin): State<String>, req: Request, next: Next) -> Response {
-    if req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|v| crate::auth::constant_time_eq(v, &admin))
-    {
-        next.run(req).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"global token required"})),
+async fn issue_draft_token(Extension(tokens): Extension<DraftTokens>) -> Response {
+    match tokens.issue() {
+        Ok(grant) => Json(grant).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"could not generate draft token"})),
         )
-            .into_response()
+            .into_response(),
     }
+}
+async fn revoke_draft_token(Extension(tokens): Extension<DraftTokens>) -> StatusCode {
+    tokens.revoke();
+    StatusCode::NO_CONTENT
 }
 async fn snapshot(State(store): State<Arc<SkillsStore>>) -> Json<AdminSnapshot> {
     Json(store.admin_snapshot())
@@ -97,6 +87,7 @@ use serde::Deserialize;
 struct ImportRequest {
     url: String,
     tracked_ref: Option<String>,
+    note: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,9 +109,10 @@ async fn stage(
     store: Arc<SkillsStore>,
     imported: Imported,
     base: Option<u64>,
+    note: Option<String>,
 ) -> Result<Json<AdminSnapshot>, ApiError> {
     let result = tokio::task::spawn_blocking(move || {
-        store.stage_import(&imported.name, imported.files, imported.source, base)
+        store.stage_import(&imported.name, imported.files, imported.source, base, note)
     })
     .await
     .map_err(|_| {
@@ -138,7 +130,7 @@ async fn import(
 ) -> Result<Json<AdminSnapshot>, ApiError> {
     let target = Target::parse(&req.url, req.tracked_ref)?;
     let imported = github.fetch(target.source, target.resolve).await?;
-    stage(store, imported, None).await
+    stage(store, imported, None, req.note).await
 }
 async fn check_update(
     State(store): State<Arc<SkillsStore>>,
@@ -186,7 +178,7 @@ async fn check_update(
             Json(json!({"skills":now.skills,"message":"No skill changes."})).into_response(),
         );
     }
-    Ok(stage(store, imported, Some(req.revision))
+    Ok(stage(store, imported, Some(req.revision), None)
         .await?
         .into_response())
 }

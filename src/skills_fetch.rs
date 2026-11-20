@@ -10,7 +10,6 @@ use std::{
 /// Fetch one live revision and write it to a new directory. Nothing is executed.
 pub async fn fetch(
     mut url: Url,
-    token: &str,
     name: &str,
     revision: u64,
     output: &Path,
@@ -28,9 +27,8 @@ pub async fn fetch(
         || url.query().is_some()
         || url.fragment().is_some()
         || !valid_name(name)
-        || token.trim().is_empty()
     {
-        return Err("expected a skill name, token, and HTTPS or loopback HTTP base URL".into());
+        return Err("expected a skill name and HTTPS or loopback HTTP base URL".into());
     }
     url.path_segments_mut()
         .map_err(|_| "invalid base URL")?
@@ -42,12 +40,7 @@ pub async fn fetch(
         .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?;
-    let response = client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.without_url())?;
+    let response = client.get(url).send().await.map_err(|e| e.without_url())?;
     if !response.status().is_success() {
         return Err(format!(
             "skill bundle request returned HTTP {}",

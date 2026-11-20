@@ -108,10 +108,9 @@ async fn multiplexer_lists_and_calls_through_shared_backend() {
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        initialize["result"]["instructions"],
-        "## echo\nEcho backend instructions."
-    );
+    let instructions = initialize["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("## skills\nUse list_skills"));
+    assert!(instructions.ends_with("## echo\nEcho backend instructions."));
 
     // tools/list → prefixed tool names
     let list: serde_json::Value = client
@@ -131,6 +130,10 @@ async fn multiplexer_lists_and_calls_through_shared_backend() {
         .filter_map(|t| t["name"].as_str())
         .collect();
     assert!(names.contains(&"echo__echo"), "prefixed tools: {names:?}");
+    assert!(
+        names.contains(&"skills__list_skills"),
+        "built-in tools: {names:?}"
+    );
 
     // tools/call → routed to the echo backend
     let call: serde_json::Value = client
