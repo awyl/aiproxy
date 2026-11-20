@@ -19,6 +19,8 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("mcp setup failed: {0}")]
     Mcp(String),
+    #[error("skills state setup failed: {0}")]
+    Skills(std::io::Error),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
 }
@@ -63,6 +65,8 @@ pub async fn build_with_options(
 ) -> Result<(TcpListener, Router), ServerError> {
     let (host, port) = config.bind_host_port()?;
     let port = port_override.unwrap_or(port);
+    let path = crate::aliases::runtime_state_path(&config_path, "aiproxy-skills.json");
+    let skills = Arc::new(crate::skills::SkillsStore::open(path).map_err(ServerError::Skills)?);
 
     let codex_managers = Arc::new(crate::providers::create_codex_managers(
         &config,
@@ -260,43 +264,79 @@ pub async fn build_with_options(
     )
     .map_err(ServerError::Mcp)?;
 
+    let draft_tokens = crate::skills_mcp::DraftTokens::default();
     // MCP multiplexer: single /mcp endpoint aggregating all servers
     let multiplex_state = crate::mcp_multiplexer::McpMultiplexState {
         servers: config.mcp.servers.clone(),
         global_token: token.clone(),
         cache: mcp_cache,
+        skills: Some(crate::skills_mcp::Handler(
+            skills.clone(),
+            draft_tokens.clone(),
+        )),
     };
     let multiplex_router =
         crate::mcp_multiplexer::mcp_multiplex_route().with_state(multiplex_state);
 
+    let dashboard = crate::dashboard_auth::DashboardAuth::new(
+        token
+            .clone()
+            .filter(|t| !t.trim().is_empty() && !subscription_values.contains(t)),
+    );
+    let dashboard_pages = dashboard.pages(
+        Router::new()
+            .route("/usage", get(crate::pages::usage_page))
+            .route("/models", get(crate::pages::models_page))
+            .route("/aliases", get(crate::aliases::aliases_page))
+            .route("/setup", get(crate::setup::setup_page))
+            .route(
+                "/skills",
+                get(|| async {
+                    crate::pages::with_page_frame(include_str!("skills_page.html"), "/skills")
+                }),
+            ),
+    );
+    let dashboard_api = dashboard
+        .api(
+            Router::new()
+                .route(
+                    "/api/aliases",
+                    get(crate::aliases::aliases_api).put(crate::aliases::save_aliases),
+                )
+                .route(
+                    "/api/models",
+                    get(crate::pages::models_api).put(crate::pages::set_models_visibility),
+                )
+                .route("/api/reload", post(crate::pages::reload_models))
+                .route("/api/codex/start", post(crate::setup::codex_start))
+                .route("/api/codex/complete", post(crate::setup::codex_complete))
+                .route("/api/codex/status", get(crate::setup::codex_status))
+                .route("/api/codex/providers", get(crate::setup::codex_providers)),
+        )
+        .with_state(state.clone());
+    let hosts = crate::mcp::mcp_allowed_hosts(&host, &config.mcp.allowed_hosts);
+    let skill_admin_api = dashboard.api(crate::skills_api::router(
+        skills.clone(),
+        draft_tokens.clone(),
+        crate::skills_github::Github::new().map_err(std::io::Error::other)?,
+    ));
+
     let app = Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::to("/usage") }),
+        )
         .route("/healthz", get(|| async { "ok" }))
-        .route("/usage", get(crate::pages::usage_page))
-        .route("/models", get(crate::pages::models_page))
-        .route("/aliases", get(crate::aliases::aliases_page))
-        .route(
-            "/api/aliases",
-            get(crate::aliases::aliases_api).put(crate::aliases::save_aliases),
-        )
-        .route(
-            "/api/models",
-            get(crate::pages::models_api).put(crate::pages::set_models_visibility),
-        )
-        .route("/api/reload", post(crate::pages::reload_models))
-        .route("/setup", get(crate::setup::setup_page))
-        .route("/api/codex/start", post(crate::setup::codex_start))
-        .route("/api/codex/complete", post(crate::setup::codex_complete))
-        .route("/api/codex/status", get(crate::setup::codex_status))
-        .route("/api/codex/providers", get(crate::setup::codex_providers))
         .merge(openai_router_with_subs(token.clone(), &subscription_values))
-        .merge(anthropic_router_with_subs(
-            token.clone(),
-            &subscription_values,
-        ))
+        .merge(anthropic_router_with_subs(token, &subscription_values))
         .merge(mcp_router)
         .merge(multiplex_router)
-        .with_state(state);
-
+        .with_state(state)
+        .merge(dashboard_pages)
+        .merge(dashboard_api)
+        .merge(skill_admin_api)
+        .merge(dashboard.routes())
+        .merge(crate::skills_mcp::router(skills, draft_tokens, hosts));
     let listener = TcpListener::bind((host.as_str(), port)).await?;
     Ok((listener, app))
 }

@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -12,6 +12,31 @@ struct Cli {
     /// Override the port from the config file
     #[arg(short, long)]
     port: Option<u16>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Work with published skills.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Download a published revision without running its files.
+    Fetch {
+        name: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        base_url: reqwest::Url,
+    },
 }
 
 #[tokio::main]
@@ -23,6 +48,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     let cli = Cli::parse();
+    if let Some(Command::Skills {
+        command:
+            SkillsCommand::Fetch {
+                name,
+                revision,
+                output,
+                base_url,
+            },
+    }) = cli.command
+    {
+        aiproxy::skills_fetch::fetch(base_url, &name, revision, &output).await?;
+        println!("{}", output.display());
+        return Ok(());
+    }
     let config =
         aiproxy::config::Config::load(&cli.config).map_err(|e| format!("config error: {e}"))?;
     let (host, port) = config

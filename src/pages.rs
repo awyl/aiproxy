@@ -5,7 +5,7 @@ use axum::response::Html;
 use crate::api::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 // ── Model discovery reload ──────────────────────────────────────────
@@ -51,27 +51,8 @@ pub async fn models_api(State(state): State<AppState>) -> Json<Value> {
 
 pub(crate) async fn set_models_visibility(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(setting): Json<crate::model_visibility::VisibilitySetting>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let provided = headers
-        .get("authorization")
-        .and_then(|header| header.to_str().ok())
-        .and_then(|header| header.strip_prefix("Bearer "));
-    if !state
-        .token
-        .as_deref()
-        .zip(provided)
-        .is_some_and(|(expected, token)| crate::auth::constant_time_eq(expected, token))
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": {"message": "global proxy token required to change model visibility"}
-            })),
-        ));
-    }
-
     if !state.registry.visibility.supports(&setting.provider) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -207,6 +188,7 @@ const PAGE_FRAME_STYLE: &str = r#"<style>
   .page-main { flex: 1; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 0.75rem; height: 3.5rem; padding: 0 1rem; border-bottom: 1px solid #e5e7eb; }
   .nav-toggle { width: 2.5rem; height: 2.5rem; padding: 0; border: 1px solid #d1d5db; border-radius: 6px; background: white; color: #111827; cursor: pointer; font-size: 1.2rem; }
+  .topbar form { margin-left: auto; }
   .page-content { max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem 2rem; }
   body.nav-collapsed .sidebar { display: none; }
   @media (max-width: 700px) {
@@ -239,6 +221,7 @@ pub(crate) fn with_page_frame(html: &'static str, active_path: &str) -> Html<Str
         ("/models", "Models"),
         ("/aliases", "Aliases"),
         ("/setup", "Setup"),
+        ("/skills", "Skills"),
     ]
     .iter()
     .map(|(path, label)| {
@@ -254,7 +237,8 @@ pub(crate) fn with_page_frame(html: &'static str, active_path: &str) -> Html<Str
     let html = html.replace(
         "<body>",
         &format!(
-            r#"<body><div class="app-frame"><aside class="sidebar" id="site-nav"><a class="brand" href="/usage">aiproxy</a><nav aria-label="Pages">{nav_links}</nav></aside><div class="page-main"><header class="topbar"><button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="site-nav" aria-expanded="true">☰</button><span>aiproxy</span></header><main class="page-content">"#
+            r#"<body><div class="app-frame"><aside class="sidebar" id="site-nav"><a class="brand" href="/usage">aiproxy</a><nav aria-label="Pages">{nav_links}</nav></aside><div class="page-main"><header class="topbar"><button class="nav-toggle" id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="site-nav" aria-expanded="true">☰</button><span>aiproxy {version}</span><form method="post" action="/dashboard/logout"><button type="submit">Sign out</button></form></header><main class="page-content">"#,
+            version = env!("CARGO_PKG_VERSION"),
         ),
     );
     Html(html.replace(
@@ -431,6 +415,14 @@ mod tests {
         for (name, html) in pages {
             assert!(html.contains("app-frame"), "{name} missing frame");
             assert!(html.contains("nav-toggle"), "{name} missing menu toggle");
+            assert!(
+                html.contains(concat!(
+                    "</button><span>aiproxy ",
+                    env!("CARGO_PKG_VERSION"),
+                    "</span>"
+                )),
+                "{name} missing the build version next to the menu toggle"
+            );
             let nav = html
                 .split(r#"<nav aria-label="Pages">"#)
                 .nth(1)

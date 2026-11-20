@@ -19,6 +19,7 @@ pub struct McpMultiplexState {
     pub global_token: Option<String>,
     /// Same cache the per-server `/mcp/<name>` routes use: one backend per server.
     pub cache: BackendCache,
+    pub(crate) skills: Option<crate::skills_mcp::Handler>,
 }
 
 /// Extract auth token from Authorization header (Bearer <token>).
@@ -32,7 +33,9 @@ fn extract_auth_token(headers: &HeaderMap) -> Option<String> {
 
 /// Build the multiplexed /mcp route.
 pub fn mcp_multiplex_route() -> Router<McpMultiplexState> {
-    Router::new().route("/mcp", axum::routing::post(mcp_multiplex_handler))
+    Router::new()
+        .route("/mcp", axum::routing::post(mcp_multiplex_handler))
+        .layer(axum::middleware::from_fn(crate::skills_mcp::no_store))
 }
 
 /// POST /mcp — aggregate MCP endpoint with per-server auth via X-MCP-Servers header.
@@ -56,8 +59,16 @@ async fn mcp_multiplex_handler(
                 name: s.name.clone(),
                 token: None,
             })
+            .chain(state.skills.iter().map(|_| McpServerEntry {
+                name: "skills".into(),
+                token: None,
+            }))
             .collect(),
     };
+
+    // Skills reads are public; draft access is checked by the shared handler per call.
+    let skills_entry = entries.iter().find(|entry| entry.name == "skills");
+    let skills = skills_entry.and(state.skills.as_ref());
 
     // Resolve which servers the client has access to
     let mut matched: Vec<&McpServerConfig> = Vec::new();
@@ -86,6 +97,9 @@ async fn mcp_multiplex_handler(
                 }
             });
             let mut instructions = Vec::new();
+            if skills.is_some() {
+                instructions.push(format!("## skills\n{}", crate::skills_mcp::INSTRUCTIONS));
+            }
             for server in &matched {
                 let slot = match state.cache.ensure(server).await {
                     Ok(slot) => slot,
@@ -110,6 +124,15 @@ async fn mcp_multiplex_handler(
         }
         "tools/list" => {
             let mut all_tools: Vec<Value> = Vec::new();
+            if skills.is_some() {
+                for tool in crate::skills_mcp::Handler::tools() {
+                    all_tools.push(json!({
+                        "name": format!("skills__{}", tool.name),
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    }));
+                }
+            }
             for server in &matched {
                 // Shared cache: same backend session the /mcp/<name> route uses.
                 let slot = match state.cache.ensure(server).await {
@@ -160,6 +183,23 @@ async fn mcp_multiplex_handler(
                     );
                 }
             };
+
+            if prefix == "skills" {
+                let Some(handler) = skills else {
+                    return jsonrpc_error(
+                        id,
+                        -32602,
+                        "no access to server 'skills' (check X-MCP-Servers header)",
+                    );
+                };
+                let mut call = CallToolRequestParams::new(real_name.to_string());
+                if let Some(arguments) = params.get("arguments").and_then(Value::as_object) {
+                    call = call.with_arguments(arguments.clone());
+                }
+                let token = resolve_check_token(skills_entry.unwrap(), auth_token.as_deref());
+                let result = handler.call(call, token.as_deref()).await;
+                return jsonrpc_response(id, &serde_json::to_value(result).unwrap());
+            }
 
             // Find the server
             let server = match matched.iter().find(|s| s.name == prefix) {
@@ -229,6 +269,7 @@ mod tests {
             servers,
             global_token: token,
             cache: BackendCache::default(),
+            skills: None,
         }
     }
 

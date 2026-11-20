@@ -1,0 +1,8 @@
+{
+  "name": "aiproxy-skills-import",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.20.0"},
+  "scripts": {"test": "node --test helper.test.mjs"},
+  "dependencies": {"skills": "1.9.0"}
+}

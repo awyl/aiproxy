@@ -178,9 +178,12 @@ async fn upstream_failure_revokes_free_claim_but_retains_raw_catalog() {
         .unwrap();
     assert!(listed(&app).await.contains(&"openrouter=a/free".into()));
     down.store(true, Ordering::SeqCst);
-    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    assert_eq!(
+        request(&app, "POST", "/api/reload", "global", None).await.0,
+        200
+    );
     assert_eq!(listed(&app).await, ["openai/unaffected"]);
-    let (_, catalog) = request(&app, "GET", "/api/models", "", None).await;
+    let (_, catalog) = request(&app, "GET", "/api/models", "global", None).await;
     assert_eq!(catalog["providers"][0]["count"], 6);
 }
 
@@ -292,14 +295,17 @@ upstreams:
         .collect();
     assert_eq!(flagged, [&json!("opencode-go/promo")]);
 
-    let (_, catalog) = request(&app, "GET", "/api/models", "", None).await;
+    let (_, catalog) = request(&app, "GET", "/api/models", "global", None).await;
     let rows = catalog["providers"][0]["models"].as_array().unwrap();
     assert!(rows.iter().all(|m| m["listed"] == true));
     assert_eq!(rows[0]["id"], "promo");
     assert_eq!(rows[0]["free"], true);
 
     down.store(true, Ordering::SeqCst);
-    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    assert_eq!(
+        request(&app, "POST", "/api/reload", "global", None).await.0,
+        200
+    );
     let (_, stale) = request(&app, "GET", "/v1/models", "global", None).await;
     let rows = stale["data"].as_array().unwrap();
     assert_eq!(rows.len(), 6, "retain the catalog if discovery fails");
@@ -589,7 +595,10 @@ async fn failed_discovery_revokes_inference_permission_and_authentication_stays_
         );
     }
     down.store(true, Ordering::SeqCst);
-    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    assert_eq!(
+        request(&app, "POST", "/api/reload", "global", None).await.0,
+        200
+    );
     for model in ["openrouter=a/free", "default/free"] {
         assert_eq!(
             request(
@@ -618,7 +627,10 @@ async fn failed_discovery_revokes_inference_permission_and_authentication_stays_
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     down.store(false, Ordering::SeqCst);
-    assert_eq!(request(&app, "POST", "/api/reload", "", None).await.0, 200);
+    assert_eq!(
+        request(&app, "POST", "/api/reload", "global", None).await.0,
+        200
+    );
     assert_eq!(
         request(
             &app,
@@ -657,7 +669,7 @@ async fn independent_settings_migrate_legacy_and_keep_stable_upstream_identity()
     let (_, app) = server::build_with_port(cfg, path.clone(), None)
         .await
         .unwrap();
-    let (_, catalog) = request(&app, "GET", "/api/models", "", None).await;
+    let (_, catalog) = request(&app, "GET", "/api/models", "global", None).await;
     assert_eq!(
         catalog["providers"][0]["free_models_only"], false,
         "legacy saved override wins over YAML"
@@ -776,7 +788,7 @@ async fn per_upstream_yaml_overrides_legacy_default_and_rejects_unsupported_kind
     let (_, app) = server::build_with_port(cfg, path.clone(), None)
         .await
         .unwrap();
-    let (_, data) = request(&app, "GET", "/api/models", "", None).await;
+    let (_, data) = request(&app, "GET", "/api/models", "global", None).await;
     let providers = data["providers"].as_array().unwrap();
     assert_eq!(
         providers

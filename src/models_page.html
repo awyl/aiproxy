@@ -31,9 +31,6 @@ li .free { color: #15803d; font-size: 0.75rem; margin-left: 0.5rem; }
 <p class="sub">Every upstream and the models it offers. Click one to show or hide its
 models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
 <button id="go" onclick="reloadModels()">Reload models</button>
-<div id="visibility">
-  <label>Global proxy token <input id="global-token" type="password" autocomplete="off"></label>
-</div>
 <p class="sub">Free only applies to the selected upstream for all clients and survives restart. Requests to filtered models (including aliases) return HTTP 403.</p>
 <div id="visibility-error" class="error" role="status"></div>
 <div id="data">Loading...</div>
@@ -43,7 +40,6 @@ models. Clients (pi) read the same catalog from <code>/v1/models</code>.</p>
 // reload) does not collapse everything.
 const openIds = new Set();
 const catalog = document.getElementById('data');
-const token = document.getElementById('global-token');
 const visibilityError = document.getElementById('visibility-error');
 let pending = false;
 
@@ -139,7 +135,6 @@ catalog.addEventListener('change', async event => {
   visibilityError.textContent = '';
   try {
     const headers = { 'Content-Type': 'application/json' };
-    if (token.value) headers.Authorization = 'Bearer ' + token.value;
     const r = await fetch('/api/models', {
       method: 'PUT',
       headers,

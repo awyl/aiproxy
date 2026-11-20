@@ -9,7 +9,7 @@ const original = [{ id: "default/fast", target: "openai/m", surface: "chat", ava
 const catalog = { providers: [{ id: "openai", models: [{ id: "m", surface: "chat" }, { id: "new", surface: "chat" }] }] };
 async function settle() { await new Promise(r => setTimeout(r, 15)); }
 
-async function page(aliases = original, failSave = false, requireToken = false) {
+async function page(aliases = original, failSave = false) {
   let saved: Record<string, string> | undefined;
   let lastAuthorization: string | undefined;
   const dom = new JSDOM(PAGE, {
@@ -18,7 +18,6 @@ async function page(aliases = original, failSave = false, requireToken = false) 
       w.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         lastAuthorization = (init?.headers as Record<string,string> | undefined)?.Authorization;
         if (String(input) === "/api/models") return new Response(JSON.stringify(catalog));
-        if (requireToken && lastAuthorization !== "Bearer admin") return new Response(JSON.stringify({error:{message:"global token required"}}), { status: 401 });
         if (init?.method === "PUT") {
           saved = JSON.parse(String(init.body)).aliases;
           if (failSave) return new Response(JSON.stringify({error:{message:"disk full"}}), { status: 500 });
@@ -85,15 +84,12 @@ describe("alias editor", () => {
     p.dom.window.close();
   });
 
-  it("authenticates after entering a token and never persists it", async () => {
-    const p = await page(original, false, true);
-    expect(p.doc.getElementById("status")?.textContent).toContain("global token required");
-    expect((p.doc.getElementById("save") as HTMLButtonElement).disabled).toBe(true);
-    (p.doc.getElementById("token") as HTMLInputElement).value = "admin";
-    await p.click("load");
+  it("saves without a per-page token or authorization header", async () => {
+    const p = await page();
+    expect(p.doc.querySelector('input[type="password"]')).toBeNull();
     await p.click("save");
     expect(p.saved()).toEqual({"default/fast":"openai/m"});
-    expect(p.authorization()).toBe("Bearer admin");
+    expect(p.authorization()).toBeUndefined();
     expect(p.dom.window.localStorage.length).toBe(0);
     expect(p.dom.window.sessionStorage.length).toBe(0);
     p.dom.window.close();

@@ -165,33 +165,6 @@ fn api_error(status: axum::http::StatusCode, message: impl ToString) -> ApiError
     )
 }
 
-fn authorize(
-    state: &crate::api::AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ApiError> {
-    use axum::http::StatusCode;
-    if let Some(expected) = &state.token {
-        let provided = headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        if provided.is_some_and(|s| crate::auth::constant_time_eq(s, expected)) {
-            return Ok(());
-        }
-        return Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "global proxy token required to manage aliases",
-        ));
-    }
-    if !state.subscriptions.is_empty() {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "configure a global proxy token to manage aliases; subscription tokens are not administrators",
-        ));
-    }
-    Ok(())
-}
-
 fn aliases_response(
     registry: &crate::discovery::ModelRegistry,
 ) -> (axum::http::HeaderMap, axum::Json<serde_json::Value>) {
@@ -216,9 +189,7 @@ fn aliases_response(
 
 pub async fn aliases_api(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
-    headers: axum::http::HeaderMap,
 ) -> ApiResult {
-    authorize(&state, &headers)?;
     Ok(aliases_response(&state.registry))
 }
 
@@ -230,10 +201,8 @@ pub struct SaveAliases {
 
 pub async fn save_aliases(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
-    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<SaveAliases>,
 ) -> ApiResult {
-    authorize(&state, &headers)?;
     let registry = state.registry.clone();
     tokio::task::spawn_blocking(move || registry.replace_aliases(body.aliases))
         .await
@@ -279,8 +248,8 @@ mod http_tests {
         method: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        let app = Router::new()
-            .route("/api/aliases", get(aliases_api).put(save_aliases))
+        let app = crate::dashboard_auth::DashboardAuth::new(state.token.clone())
+            .api(Router::new().route("/api/aliases", get(aliases_api).put(save_aliases)))
             .with_state(state);
         let mut req = Request::builder()
             .method(method)
@@ -329,7 +298,7 @@ mod http_tests {
     }
 
     #[tokio::test]
-    async fn aliases_management_auth_disabled_and_subscription_only_modes() {
+    async fn aliases_management_locked_without_global_token() {
         let mut state = state().await;
         state.token = None;
         state.subscriptions.clear();
@@ -337,14 +306,14 @@ mod http_tests {
             management(state.clone(), None, "PUT", json!({"aliases":{}}))
                 .await
                 .0,
-            StatusCode::OK
+            StatusCode::UNAUTHORIZED
         );
         state.subscriptions.insert("openai".into(), None);
         assert_eq!(
             management(state, None, "PUT", json!({"aliases":{}}))
                 .await
                 .0,
-            StatusCode::FORBIDDEN
+            StatusCode::UNAUTHORIZED
         );
     }
 

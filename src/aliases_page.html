@@ -28,11 +28,8 @@ td select { width: 100%; min-width: 15rem; }
 <h1>Model aliases</h1>
 <p>Stable names such as <code>aiproxy/default/fast</code>, mapped to real provider models. Only the model ID changes; the agent must use the target's wire protocol.</p>
 <div class="controls">
-<label>Global proxy token (if configured)
-<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
 <button id="load" type="button">Load aliases</button>
 </div>
-<p><small>The token is kept only on this page, never saved in browser storage. Subscription tokens cannot manage aliases.</small></p>
 <div class="table-scroll">
 <table><thead><tr><th>Alias: default/</th><th>Target model / wire surface</th><th>Action</th></tr></thead><tbody id="rows"></tbody></table>
 </div>
@@ -47,7 +44,6 @@ td select { width: 100%; min-width: 15rem; }
 (() => {
   const rows = document.getElementById('rows');
   const status = document.getElementById('status');
-  const token = document.getElementById('token');
   const save = document.getElementById('save');
   const add = document.getElementById('add');
   const load = document.getElementById('load');
@@ -64,9 +60,7 @@ td select { width: 100%; min-width: 15rem; }
     rows.querySelectorAll('input,select,button').forEach(el => { el.disabled = value; });
   }
   async function request(url, init = {}) {
-    const headers = { ...(init.headers || {}) };
-    if (token.value) headers.Authorization = 'Bearer ' + token.value;
-    const response = await fetch(url, { ...init, headers, cache: 'no-store' });
+    const response = await fetch(url, { ...init, cache: 'no-store' });
     const raw = await response.text();
     let body;
     try { body = JSON.parse(raw); } catch { throw new Error('HTTP ' + response.status); }

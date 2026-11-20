@@ -1,6 +1,6 @@
 [package]
 name = "aiproxy"
-version = "0.4.7"
+version = "0.5.0"
 edition = "2024"
 default-run = "aiproxy"
 
@@ -17,6 +17,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 futures = "0.3"
 bytes = "1"
+base64 = "0.22"
 async-trait = "0.1"
 fastembed = { version = "6", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 regex = "1"
@@ -24,9 +25,12 @@ rmcp = { version = "=3.1.4", features = ["server", "client", "transport-streamab
 chrono = "0.4"
 sha2 = "0.10"
 getrandom = "0.3"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-tempfile = "3"

@@ -425,6 +425,9 @@ impl Config {
         let bad = |msg: String| Err(ConfigError::Invalid(msg));
         let mut seen = std::collections::HashSet::new();
         for s in &self.mcp.servers {
+            if s.name == "skills" {
+                return bad("MCP backend name 'skills' is reserved".into());
+            }
             if s.name.is_empty() {
                 return bad("mcp server name must not be empty".into());
             }
