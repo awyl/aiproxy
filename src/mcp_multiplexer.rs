@@ -67,8 +67,10 @@ async fn mcp_multiplex_handler(
     };
 
     // Skills reads are public; draft access is checked by the shared handler per call.
-    let skills_entry = entries.iter().find(|entry| entry.name == "skills");
-    let skills = skills_entry.and(state.skills.as_ref());
+    let skills = state
+        .skills
+        .as_ref()
+        .filter(|_| entries.iter().any(|entry| entry.name == "skills"));
 
     // Resolve which servers the client has access to
     let mut matched: Vec<&McpServerConfig> = Vec::new();
@@ -196,8 +198,7 @@ async fn mcp_multiplex_handler(
                 if let Some(arguments) = params.get("arguments").and_then(Value::as_object) {
                     call = call.with_arguments(arguments.clone());
                 }
-                let token = resolve_check_token(skills_entry.unwrap(), auth_token.as_deref());
-                let result = handler.call(call, token.as_deref()).await;
+                let result = handler.call(call).await;
                 return jsonrpc_response(id, &serde_json::to_value(result).unwrap());
             }
 

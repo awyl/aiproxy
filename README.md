@@ -487,20 +487,51 @@ deletes local copies or uninstalls any tools.
 For the Pi aiproxy extension, add `skills` to `mcpServers` in
 `~/.pi/agent/aiproxy.json`, for example `"donsetch,ctx7,brain,skills"`.
 The existing `/mcp` multiplexer exposes `skills__list_skills`,
-`skills__load_skill`, `skills__read_skill_file`, and `skills__save_skill_draft`.
-No extension update or separate MCP connection is needed. For temporary draft
-access through the multiplexer, use `skills:TOKEN` in the server selection;
-the token is checked on each draft write, not against the dashboard password.
+`skills__load_skill`, `skills__read_skill_file`, `skills__read_skill_draft`, and
+`skills__save_skill_draft`.
+No extension update or separate MCP connection is needed. Alternatively, connect
+a stock Streamable HTTP MCP client directly to `/mcp/skills`. Reads require no token.
 
-Alternatively, connect a stock Streamable HTTP MCP client to `/mcp/skills` without a token for
-read-only access. When an agent asks to save a draft, sign in to `/skills` and
-select **Generate draft token**. Share the
-temporary token privately and configure the client to send it as an
-`Authorization: Bearer …` header on its MCP requests, not as a tool argument.
-It grants draft writes only and expires after 15 minutes. Generating another,
-selecting **Revoke draft token**, or restarting aiproxy invalidates it. If access
-expires, the agent asks for a fresh token. Remove the expired credential from
-the client configuration; it is not needed for reads.
+For creating **or editing** a skill, sign in to `/skills`, select **Generate draft
+token**, and give that temporary token to the agent. It makes one ordinary MCP
+tool call; no client credentials, reconnects or custom HTTP requests are needed:
+
+```js
+skills__save_skill_draft({
+  draft_token: "<temporary draft token>",
+  name: "clean-up",
+  content: `---
+name: clean-up
+description: Example workflow
+---
+Instructions
+`
+})
+```
+
+On the direct `/mcp/skills` connection, the tool is named `save_skill_draft`.
+To edit a published skill, pass its current `base_revision` from `load_skill`.
+**Before editing an open draft, read its actual current content:**
+
+```js
+skills__read_skill_draft({ draft_token: "<temporary draft token>", name: "clean-up" })
+```
+
+Edit that returned `content`, then call `save_skill_draft` with the returned
+`base_revision` and `draft_revision` (as `expected_draft_revision`). Do not
+reconstruct draft content from conversation memory. Draft reads require the same
+temporary token as writes and never fall back to published content. On a direct
+connection, the tool name is `read_skill_draft`. Stale revisions are rejected rather than overwritten.
+Edits remain drafts until reviewed and published in the dashboard.
+
+The token grants draft writes only and expires after 15 minutes. Generating
+another, selecting **Revoke draft token**, or restarting aiproxy invalidates it.
+If it expires, the agent asks for a fresh token. Never use the dashboard password.
+Draft tokens may appear in client tool-call histories, but aiproxy does not save
+them with skills or echo them in tool responses. Bearer headers and per-server
+selection tokens no longer authorize skill draft writes; remove old skills
+credentials from client configuration. Authentication for external MCP servers
+is unchanged.
 
 For example, in Pi (no aiproxy extension required):
 
@@ -508,10 +539,6 @@ For example, in Pi (no aiproxy extension required):
 pi mcp add aiproxy-skills --url http://127.0.0.1:8080/mcp/skills
 pi mcp list
 ```
-
-For temporary draft access in Pi, add `--bearer-token-env-var AIPROXY_DRAFT_TOKEN`
-to the `pi mcp add` command and provide the issued token in the environment of
-the Pi process. This is a client-side variable; aiproxy does not read it.
 
 Use HTTPS for a remote proxy and add its hostname to `mcp.allowed_hosts`. The MCP
 tools list metadata only, load instructions and the note when requested, and read
