@@ -57,7 +57,7 @@ async fn skills_mcp_wire_and_auth() {
         .await
         .unwrap();
     assert!(r.contains("read_skill_file"), "{r}");
-    let args = json!({"name":"save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY"}});
+    let mut args = json!({"name":"save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY"}});
     for token in [None, Some("admin-secret"), Some("wrong")] {
         let r = send(token, "tools/call", args.clone())
             .send()
@@ -104,7 +104,8 @@ async fn skills_mcp_wire_and_auth() {
         .unwrap();
     let next = second["token"].as_str().unwrap();
     assert_ne!(author, next);
-    let stale = send(Some(author), "tools/call", args.clone())
+    args["arguments"]["draft_token"] = json!(author);
+    let stale = send(None, "tools/call", args.clone())
         .send()
         .await
         .unwrap()
@@ -115,7 +116,8 @@ async fn skills_mcp_wire_and_auth() {
         stale.contains("ask the user for a fresh draft token"),
         "{stale}"
     );
-    let r = send(Some(next), "tools/call", args.clone())
+    args["arguments"]["draft_token"] = json!(next);
+    let r = send(None, "tools/call", args.clone())
         .send()
         .await
         .unwrap()
@@ -123,7 +125,7 @@ async fn skills_mcp_wire_and_auth() {
         .await
         .unwrap();
     revoke().send().await.unwrap().error_for_status().unwrap();
-    let revoked = send(Some(next), "tools/call", args)
+    let revoked = send(None, "tools/call", args)
         .send()
         .await
         .unwrap()
@@ -275,6 +277,7 @@ async fn skills_multiplexer_discovery_loading_and_draft_auth() {
             "skills__list_skills",
             "skills__load_skill",
             "skills__read_skill_file",
+            "skills__read_skill_draft",
             "skills__save_skill_draft"
         ]
     );
@@ -317,7 +320,7 @@ async fn skills_multiplexer_discovery_loading_and_draft_auth() {
             .unwrap()
             .contains("no access")
     );
-    let draft = json!({"name":"skills__save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY"}});
+    let mut draft = json!({"name":"skills__save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY"}});
     for token in [None, Some("wrong"), Some("admin-secret")] {
         let denied: Value = rpc("skills", token, "tools/call", draft.clone())
             .send()
@@ -338,18 +341,14 @@ async fn skills_multiplexer_discovery_loading_and_draft_auth() {
         .await
         .unwrap();
     let token = grant["token"].as_str().unwrap();
-    let saved: Value = rpc(
-        &format!("skills:{token}"),
-        Some("admin-secret"),
-        "tools/call",
-        draft.clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
+    draft["arguments"]["draft_token"] = json!(token);
+    let saved: Value = rpc("skills", None, "tools/call", draft.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_ne!(saved["result"]["isError"], true, "{saved}");
     let saved_text = saved["result"]["content"][0]["text"].as_str().unwrap();
     let saved: Value = serde_json::from_str(saved_text).unwrap();
@@ -435,7 +434,7 @@ async fn skills_multiplexer_discovery_loading_and_draft_auth() {
         .unwrap()
         .error_for_status()
         .unwrap();
-    let revoked: Value = rpc("skills", Some(token), "tools/call", draft)
+    let revoked: Value = rpc("skills", None, "tools/call", draft)
         .send()
         .await
         .unwrap()
@@ -443,5 +442,403 @@ async fn skills_multiplexer_discovery_loading_and_draft_auth() {
         .await
         .unwrap();
     assert_eq!(revoked["result"]["isError"], true);
+    task.abort();
+}
+
+#[tokio::test]
+async fn draft_argument_creates_and_edits_through_both_mcp_routes() {
+    for (path, tool) in [
+        ("/mcp/skills", "save_skill_draft"),
+        ("/mcp", "skills__save_skill_draft"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, app) = server::build(
+            Config::from_yaml(CFG).unwrap(),
+            dir.path().join("config.yaml"),
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+        let grant: Value = http
+            .post(format!("{base}/api/skills/draft-token"))
+            .bearer_auth("admin-secret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let token = grant["token"].as_str().unwrap();
+        let call = |arguments: Value| {
+            http.post(format!("{base}{path}"))
+            .header("Accept","application/json, text/event-stream")
+            .header("X-MCP-Servers","skills")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":arguments}}))
+        };
+        let mut args = json!({"draft_token":token,"name":"example","content":"---\nname: example\ndescription: Example\n---\nFIRST","base_revision":null,"expected_draft_revision":null});
+        let saved: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(saved["result"]["isError"], true, "{path}: {saved}");
+        assert!(!saved.to_string().contains(token));
+        let saved: Value =
+            serde_json::from_str(saved["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let draft = saved["draft_revision"].as_u64().unwrap();
+        let read_tool = if path == "/mcp" {
+            "skills__read_skill_draft"
+        } else {
+            "read_skill_draft"
+        };
+        let read = |credential: Option<&str>, name: &str| {
+            let mut arguments = json!({"name":name});
+            if let Some(token) = credential {
+                arguments["draft_token"] = json!(token);
+            }
+            http.post(format!("{base}{path}"))
+                .header("Accept","application/json, text/event-stream").header("X-MCP-Servers","skills")
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":read_tool,"arguments":arguments}}))
+        };
+        for credential in [None, Some("wrong"), Some("admin-secret")] {
+            let denied: Value = read(credential, "example")
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+            assert!(!denied.to_string().contains("FIRST"), "{denied}");
+        }
+        let loaded: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(loaded["result"]["isError"], true, "{loaded}");
+        assert!(!loaded.to_string().contains(token));
+        let loaded: Value =
+            serde_json::from_str(loaded["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(loaded["content"], args["content"]);
+        assert_eq!(loaded["name"], "example");
+        assert_eq!(loaded["draft_revision"], draft);
+        assert_eq!(loaded["base_revision"], Value::Null);
+        let missing: Value = read(Some(token), "missing")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(missing["result"]["isError"], true, "{missing}");
+        args["expected_draft_revision"] = loaded["draft_revision"].clone();
+        // An intervening save makes the previously read draft revision stale.
+        let concurrent: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(concurrent["result"]["isError"], true, "{concurrent}");
+        let stale: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        let latest: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let latest: Value =
+            serde_json::from_str(latest["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let draft = latest["draft_revision"].as_u64().unwrap();
+        args["expected_draft_revision"] = Value::Null;
+        args["content"] = json!("---\nname: example\ndescription: Example\n---\nEDITED");
+        // Missing the expected draft revision must not overwrite the open draft.
+        let conflict: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(conflict["result"]["isError"], true, "{conflict}");
+        args["expected_draft_revision"] = json!(draft);
+        let edited: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(edited["result"]["isError"], true, "{edited}");
+        let edited: Value =
+            serde_json::from_str(edited["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let edited_draft = edited["draft_revision"].as_u64().unwrap();
+        assert_ne!(edited_draft, draft);
+        let loaded: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let loaded: Value =
+            serde_json::from_str(loaded["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(loaded["content"], args["content"]);
+        assert_eq!(loaded["draft_revision"], edited_draft);
+        let admin = || {
+            http.get(format!("{base}/api/skills"))
+                .bearer_auth("admin-secret")
+        };
+        let state: Value = admin().send().await.unwrap().json().await.unwrap();
+        assert_eq!(state["skills"]["example"]["draft"]["id"], edited_draft);
+        assert_eq!(
+            state["skills"]["example"]["draft"]["files"]["SKILL.md"]["data"],
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                "---\nname: example\ndescription: Example\n---\nEDITED"
+            )
+        );
+        assert!(state["skills"]["example"]["published"].is_null());
+        assert_eq!(state["skills"]["example"]["enabled"], false);
+        assert!(!state.to_string().contains(token));
+        let published: Value = http
+            .post(format!("{base}/api/skills/example/actions"))
+            .bearer_auth("admin-secret")
+            .json(&json!({"action":"publish","draft_revision":edited_draft,"base_revision":null}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let revision = published["skills"]["example"]["published"]["id"]
+            .as_u64()
+            .unwrap();
+        http.post(format!("{base}/api/skills/example/actions"))
+            .bearer_auth("admin-secret")
+            .json(&json!({"action":"set_enabled","revision":revision,"enabled":true}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let no_draft: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(no_draft["result"]["isError"], true, "{no_draft}");
+        assert!(!no_draft.to_string().contains("EDITED"));
+        args["expected_draft_revision"] = Value::Null;
+        args["base_revision"] = json!(revision + 1);
+        let stale: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        args["base_revision"] = json!(revision);
+        args["content"] = json!("---\nname: example\ndescription: Example\n---\nNEXT");
+        let next: Value = call(args.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(next["result"]["isError"], true, "{next}");
+        let loaded: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let loaded: Value =
+            serde_json::from_str(loaded["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(loaded["base_revision"], revision);
+        assert_eq!(loaded["content"], args["content"]);
+        let state: Value = admin().send().await.unwrap().json().await.unwrap();
+        assert_eq!(state["skills"]["example"]["published"]["id"], revision);
+        assert_eq!(
+            state["skills"]["example"]["draft"]["files"]["SKILL.md"]["data"],
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                "---\nname: example\ndescription: Example\n---\nNEXT"
+            )
+        );
+        assert!(state["skills"]["example"]["draft"]["id"].as_u64().is_some());
+        http.post(format!("{base}/api/skills/example/actions"))
+            .bearer_auth("admin-secret")
+            .json(&json!({"action":"set_enabled","revision":revision,"enabled":false}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let disabled: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(disabled["result"]["isError"], true, "{disabled}");
+        http.post(format!("{base}/api/skills/example/actions"))
+            .bearer_auth("admin-secret")
+            .json(&json!({"action":"set_enabled","revision":revision,"enabled":true}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let state_path = dir.path().join("aiproxy-skills.json");
+        assert!(!std::fs::read_to_string(state_path).unwrap().contains(token));
+        // A valid argument is authoritative even if a client still has old credentials.
+        let next: Value =
+            serde_json::from_str(next["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        args["expected_draft_revision"] = next["draft_revision"].clone();
+        args["draft_token"] = json!("wrong");
+        let denied: Value = call(args.clone())
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(denied.to_string().contains("draft_token"), "{denied}");
+        for invalid in ["", "admin-secret", "wrong"] {
+            args["draft_token"] = json!(invalid);
+            let denied: Value = call(args.clone())
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+        }
+        args["draft_token"] = json!(token);
+        let rotated: Value = http
+            .post(format!("{base}/api/skills/draft-token"))
+            .bearer_auth("admin-secret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let denied: Value = read(Some(token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        let new_token = rotated["token"].as_str().unwrap();
+        let fresh: Value = read(Some(new_token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_ne!(fresh["result"]["isError"], true, "{fresh}");
+        http.delete(format!("{base}/api/skills/draft-token"))
+            .bearer_auth("admin-secret")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let denied: Value = read(Some(new_token), "example")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(!denied.to_string().contains("NEXT"));
+        let revoked: Value = call(args).send().await.unwrap().json().await.unwrap();
+        assert_eq!(revoked["result"]["isError"], true, "{revoked}");
+        assert!(!revoked.to_string().contains(token));
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn legacy_transport_credentials_do_not_authorize_skill_drafts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (listener, app) = server::build(
+        Config::from_yaml(CFG).unwrap(),
+        dir.path().join("config.yaml"),
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let grant: Value = http
+        .post(format!("{base}/api/skills/draft-token"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = grant["token"].as_str().unwrap();
+    for (path, tool, selection) in [
+        ("/mcp/skills", "save_skill_draft", "skills".to_string()),
+        ("/mcp", "skills__save_skill_draft", "skills".to_string()),
+        (
+            "/mcp",
+            "skills__save_skill_draft",
+            format!("skills:{token}"),
+        ),
+    ] {
+        let denied:Value=http.post(format!("{base}{path}")).header("Accept","application/json, text/event-stream")
+            .header("X-MCP-Servers",selection).bearer_auth(token)
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY"}}}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(denied["result"]["isError"], true, "{path}: {denied}");
+        assert!(denied.to_string().contains("draft_token"), "{denied}");
+        assert!(!denied.to_string().contains(token));
+    }
+    let state: Value = http
+        .get(format!("{base}/api/skills"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state["skills"], json!({}));
     task.abort();
 }

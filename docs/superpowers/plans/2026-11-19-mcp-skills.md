@@ -1,5 +1,7 @@
 # MCP Skills Implementation Plan
 
+> Historical plan: draft transport authorization is superseded by `2026-11-20-skills-draft-argument.md`; create and edit use the `draft_token` tool argument, not a bearer header.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking. Project rules override the skill's intermediate commits and any automatic delegation.
 
 **Goal:** Review, publish, lazily load, update, and permanently remove full skill folders.

@@ -1,5 +1,7 @@
 # Temporary Skill Draft Tokens Implementation Plan
 
+> Historical plan: its bearer-only draft transport and exclusion from tool arguments are superseded by `2026-11-20-skills-draft-argument.md`. Issuance, lifetime, rotation and revocation remain unchanged.
+
 > **For agentic workers:** Use superpowers:executing-plans. Follow the checklist inline on feat/skills-registry.
 
 **Goal:** Replace the environment-based author token with a dashboard-issued draft-only credential.

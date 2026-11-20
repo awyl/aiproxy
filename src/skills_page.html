@@ -61,7 +61,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}code{overflow-wrap:anywhere}
 <p class="skill-description" id="skill-description"></p>
 <label for="import-note">Note to agents</label><textarea id="import-note" rows="3" placeholder="Local setup or extra guidance (optional)"></textarea>
 <div class="form-actions"><button class="primary">Import as draft</button></div></div></form></details>
-<details class="agent-access"><summary>Agent draft access</summary><p>Generate a temporary token when an agent asks to save a draft. It cannot publish skills. A new token replaces the old one.</p><button id="generate-draft-token">Generate draft token</button><button id="revoke-draft-token">Revoke draft token</button><p id="draft-grant" hidden><code id="draft-secret"></code> · <span id="draft-expiry"></span></p></details>
+<details class="agent-access"><summary>Agent draft access</summary><p>Generate a temporary token when an agent asks to create or edit a skill draft. Give it to the agent to pass as draft_token in save_skill_draft. It cannot publish skills. A new token replaces the old one.</p><button id="generate-draft-token">Generate draft token</button><button id="revoke-draft-token">Revoke draft token</button><p id="draft-grant" hidden><code id="draft-secret"></code> · <span id="draft-expiry"></span></p></details>
 </section>
 <script>
 const el = id => document.getElementById(id);

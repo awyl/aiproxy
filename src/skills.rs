@@ -98,6 +98,13 @@ pub struct LoadedSkill {
     pub note: Option<String>,
     pub companion_paths: Vec<String>,
 }
+#[derive(Debug, Serialize)]
+pub(crate) struct LoadedDraft {
+    pub name: String,
+    pub draft_revision: u64,
+    pub base_revision: Option<u64>,
+    pub content: String,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Bundle {
     pub revision: u64,
@@ -215,6 +222,21 @@ impl SkillsStore {
                 .filter(|s| *s != "SKILL.md")
                 .cloned()
                 .collect(),
+        })
+    }
+    pub(crate) fn read_draft(&self, name: &str) -> Result<LoadedDraft, SkillsError> {
+        let state = self.state.lock().unwrap();
+        let draft = state
+            .skills
+            .get(name)
+            .filter(|skill| skill.published.is_none() || skill.enabled)
+            .and_then(|skill| skill.draft.as_ref())
+            .ok_or(SkillsError::Unavailable)?;
+        Ok(LoadedDraft {
+            name: name.into(),
+            draft_revision: draft.id,
+            base_revision: draft.base_revision,
+            content: markdown(&draft.files)?,
         })
     }
     pub fn read_file(
