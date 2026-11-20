@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 # Pinned skills library. No package downloads during dashboard requests.
-FROM node:22-bookworm-slim AS skills-builder
+FROM docker.io/library/node:22-bookworm-slim AS skills-builder
 WORKDIR /opt/aiproxy-skills
 COPY skills-import/package.json skills-import/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --engine-strict --no-audit --no-fund
 COPY skills-import/helper.mjs ./
 
 # ── Build stage: Rust binary (glibc, matches ort-sys prebuilt) ────────────────
-FROM debian:trixie-slim AS rust-builder
+FROM docker.io/library/debian:trixie-slim AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl pkg-config ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/root/.cargo/git \
     cargo build --release && cp /app/target/release/aiproxy /usr/local/bin/aiproxy
 
 # ── Runtime stage (Debian, glibc for onnxruntime) ─────────────────────────────
-FROM debian:trixie-slim
+FROM docker.io/library/debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
