@@ -1,6 +1,6 @@
 //! Public GitHub repository imports through the pinned official skills library.
 use crate::skills::{Files, SkillsError, Source, parse_metadata, valid_name, validate_files};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
@@ -40,7 +40,6 @@ pub(crate) struct Discovery {
     pub commit: String,
     pub skills: Vec<Choice>,
 }
-#[derive(Deserialize)]
 pub(crate) struct Imported {
     pub name: String,
     pub files: Files,
@@ -109,9 +108,7 @@ impl Github {
 
     pub async fn discover(&self, url: &str) -> Result<Discovery, ImportError> {
         let source = repository(url)?;
-        let value = self.run(json!({"action":"discover","url":format!("https://github.com/{}/{}",source.owner,source.repo)})).await?;
-        let result: Discovery = serde_json::from_value(value)
-            .map_err(|_| ImportError::Upstream("Invalid discovery response.".into()))?;
+        let result: Discovery = self.run(json!({"action":"discover","url":format!("https://github.com/{}/{}",source.owner,source.repo)})).await?;
         let mut seen = BTreeSet::new();
         if !sha(&result.commit)
             || result.skills.is_empty()
@@ -175,7 +172,7 @@ impl Github {
         {
             return Err(ImportError::Invalid("invalid saved skill source"));
         }
-        let value = self
+        let copied: Copied = self
             .run(json!({
                 "action":if update {"update"} else {"import"},
                 "url":format!("https://github.com/{}/{}",source.owner,source.repo),
@@ -183,8 +180,6 @@ impl Github {
                 "path":source.folder, "name":name,
             }))
             .await?;
-        let copied: Copied = serde_json::from_value(value)
-            .map_err(|_| ImportError::Upstream("Invalid copied skill response.".into()))?;
         if copied.name != name
             || !sha(&copied.commit)
             || (!update && copied.commit != source.commit)
@@ -216,7 +211,7 @@ impl Github {
         })
     }
 
-    async fn run(&self, input: Value) -> Result<Value, ImportError> {
+    async fn run<T: DeserializeOwned>(&self, input: Value) -> Result<T, ImportError> {
         let _permit = self.gate.try_acquire().map_err(|_| ImportError::Busy)?;
         let dir = tempfile::tempdir().map_err(|_| ImportError::Unavailable)?;
         let path = std::env::join_paths(
@@ -284,11 +279,11 @@ impl Github {
                 ));
             }
             let status = child.wait().await.map_err(|_| ImportError::Unavailable)?;
-            let value: Value =
-                serde_json::from_slice(&output).map_err(|_| ImportError::Unavailable)?;
             if !status.success() {
+                let error: Value =
+                    serde_json::from_slice(&output).map_err(|_| ImportError::Unavailable)?;
                 return Err(ImportError::Upstream(
-                    value
+                    error
                         .get("error")
                         .and_then(Value::as_str)
                         .unwrap_or("Repository import failed.")
@@ -297,7 +292,8 @@ impl Github {
                         .collect(),
                 ));
             }
-            Ok(value)
+            serde_json::from_slice(&output)
+                .map_err(|_| ImportError::Upstream("Invalid importer response.".into()))
         };
         tokio::time::timeout(Duration::from_secs(120), operation)
             .await

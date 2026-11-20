@@ -67,3 +67,23 @@ test('live repository discovery copies the selected full-path skill at the disco
   assert(imported.files['SKILL.md']);
   assert(imported.files['whole-app.md']);
 });
+
+test('file count limit includes files in nested directories', async () => {
+  const dir=await mkdtemp(join(tmpdir(),'aiproxy-helper-count-'));
+  let source;
+  try {
+    const fixture=join(dir,'fixture');
+    await mkdir(join(fixture,'assets'),{recursive:true});
+    await writeFile(join(fixture,'SKILL.md'),'---\nname: example\ndescription: Example\n---\nInstructions');
+    for(let i=0;i<127;i++) await writeFile(join(fixture,'assets','file-'+i),'x');
+    source=await resolveSource(fixture);
+    const copied=await materialize(source,'example',dir);
+    assert.equal(Object.keys(copied.files).length,128);
+    await writeFile(join(fixture,'assets','one-too-many'),'x');
+    await assert.rejects(materialize(source,'example',dir),/count|limit/i);
+    assert(!(await readdir(dir)).some(name=>name.startsWith('copy-')));
+  } finally {
+    await source?.dispose();
+    await rm(dir,{recursive:true,force:true});
+  }
+});

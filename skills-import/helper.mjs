@@ -32,7 +32,7 @@ export function choices(skills) {
   ]).filter(skill => folder(skill.path) && skillName(skill.name));
 }
 
-async function collect(root, prefix = '', state = {files:Object.create(null), total:0}) {
+async function collect(root, prefix = '', state = {files:Object.create(null), total:0, count:0}) {
   for (const entry of await readdir(join(root,prefix), {withFileTypes:true})) {
     const path = prefix ? prefix+'/'+entry.name : entry.name;
     if (entry.isDirectory()) {
@@ -42,10 +42,11 @@ async function collect(root, prefix = '', state = {files:Object.create(null), to
     if (!entry.isFile()) throw new Error('Skills must contain only regular files; symlinks are not supported.');
     const stat = await lstat(join(root,path));
     if (!stat.isFile() || stat.size > 512*1024) throw new Error('Skill file is too large or not regular.');
-    if (Object.keys(state.files).length >= 128 || state.total + stat.size > 2*1024*1024) throw new Error('Skill exceeds file count or size limit.');
+    if (state.count >= 128 || state.total + stat.size > 2*1024*1024) throw new Error('Skill exceeds file count or size limit.');
     const bytes = await readFile(join(root,path));
     if (bytes.length !== stat.size) throw new Error('Skill file changed while reading.');
     state.total += bytes.length;
+    state.count++;
     state.files[path] = {data:bytes.toString('base64'), executable:!!(stat.mode & 0o111), blob:null};
   }
   return state.files;
