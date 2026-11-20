@@ -57,8 +57,7 @@ async fn skills_mcp_wire_and_auth() {
         .await
         .unwrap();
     assert!(r.contains("read_skill_file"), "{r}");
-    let args = json!({"name":"save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY".replace("\n","
-")}});
+    let args = json!({"name":"save_skill_draft","arguments":{"name":"example","content":"---\nname: example\ndescription: Example\n---\nBODY-CANARY"}});
     for token in [None, Some("admin-secret"), Some("wrong")] {
         let r = send(token, "tools/call", args.clone())
             .send()

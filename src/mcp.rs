@@ -316,6 +316,18 @@ pub fn check_server_auth(check_token: Option<&str>, effective_token: &Option<Str
     }
 }
 
+pub(crate) fn mcp_allowed_hosts(bind_host: &str, allowed_hosts: &[String]) -> Vec<String> {
+    let mut allowed = if allowed_hosts.is_empty() {
+        vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
+    } else {
+        allowed_hosts.to_vec()
+    };
+    if !allowed.iter().any(|h| h == bind_host) {
+        allowed.push(bind_host.into());
+    }
+    allowed
+}
+
 #[cfg(test)]
 mod multiplexer_tests {
     use super::*;
@@ -422,16 +434,4 @@ mod multiplexer_tests {
         assert!(Arc::ptr_eq(&a1, &a2), "same server must share one slot");
         assert!(!Arc::ptr_eq(&a1, &b), "different servers must not share");
     }
-}
-
-pub(crate) fn mcp_allowed_hosts(bind_host: &str, allowed_hosts: &[String]) -> Vec<String> {
-    let mut allowed = if allowed_hosts.is_empty() {
-        vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
-    } else {
-        allowed_hosts.to_vec()
-    };
-    if !allowed.iter().any(|h| h == bind_host) {
-        allowed.push(bind_host.into());
-    }
-    allowed
 }

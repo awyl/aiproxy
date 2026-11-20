@@ -241,14 +241,13 @@ async fn login(
         if let Some(id) = session_id(&headers) {
             sessions.remove(id);
         }
-        if sessions.len() >= MAX_SESSIONS {
-            if let Some(oldest) = sessions
+        if sessions.len() >= MAX_SESSIONS
+            && let Some(oldest) = sessions
                 .iter()
                 .min_by_key(|(_, expiry)| *expiry)
                 .map(|(id, _)| id.clone())
-            {
-                sessions.remove(&oldest);
-            }
+        {
+            sessions.remove(&oldest);
         }
         sessions.insert(id.clone(), now + SESSION_TTL);
     }
