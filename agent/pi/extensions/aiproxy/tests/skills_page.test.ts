@@ -12,6 +12,7 @@ it('shows changed and removed files as text, keeps stale reviews, and confirms r
  const settle=()=>new Promise(r=>setTimeout(r,0));
  await settle();
  expect(document.querySelector('input[type=password]')).toBeNull();
+ click('[data-action=review]'); await settle();
  expect(document.body.textContent).toContain('Removed gone.md');
  expect(document.body.textContent).toContain('<img src=x>'); expect(document.querySelector('img')).toBeNull();
  click('[data-action=publish]'); await settle(); expect(document.querySelector('#status')?.textContent).toContain('409');
@@ -103,5 +104,29 @@ it('keeps draft review collapsed until requested and requires review before publ
   (document.querySelector('[data-action=review]') as HTMLButtonElement).click();
   expect(review.open).toBe(true);
   expect(writes).toBe(0);
+ } finally {dom.window.close();}
+});
+
+
+it('builds each draft comparison only on first open', async () => {
+ const page=readFileSync(new URL('../../../../../src/skills_page.html',import.meta.url),'utf8');
+ const snapshot={skills:{example:{enabled:true,published:{id:1,files:{'SKILL.md':{data:btoa('PUBLISHED-CANARY'),executable:false}}},draft:{id:2,base_revision:1,files:{'SKILL.md':{data:btoa('DRAFT-CANARY'),executable:false}}}}}};
+ const dom=new JSDOM(page,{url:'https://proxy.test/skills',runScripts:'dangerously',beforeParse(w){w.TextDecoder=TextDecoder;w.fetch=(async()=>Response.json(snapshot)) as typeof w.fetch;}});
+ try {
+  const settle=()=>new Promise(r=>setTimeout(r,0));
+  await settle();
+  const {document}=dom.window;
+  const panel=document.querySelector('.skill-review') as HTMLDetailsElement;
+  expect(panel.open).toBe(false);
+  expect(panel.querySelector('pre')).toBeNull();
+  expect(panel.textContent).not.toContain('DRAFT-CANARY');
+  (document.querySelector('[data-action=review]') as HTMLButtonElement).click();
+  await settle();
+  expect(panel.textContent).toContain('PUBLISHED-CANARY');
+  expect(panel.textContent).toContain('DRAFT-CANARY');
+  const count=panel.querySelectorAll('pre').length;
+  panel.open=false; await settle();
+  panel.open=true; await settle();
+  expect(panel.querySelectorAll('pre')).toHaveLength(count);
  } finally {dom.window.close();}
 });

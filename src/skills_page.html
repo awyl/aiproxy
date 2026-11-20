@@ -46,7 +46,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}code{overflow-wrap:anywhere}
 <section id="workspace" hidden>
 <div id="skills"></div>
 <details class="form-panel" id="editor-panel"><summary>New skill</summary>
-<form id="editor"><h2 id="editing" hidden>New skill</h2>
+<form id="editor">
 <label for="name">Name</label><input id="name" required placeholder="my-skill">
 <label for="content">SKILL.md</label><textarea id="content" rows="12" required placeholder="Skill instructions and frontmatter"></textarea>
 <label for="note">Note to agents</label><textarea id="note" rows="3" placeholder="Local setup or extra guidance (optional)"></textarea>
@@ -66,7 +66,7 @@ function clearGrant() {
   el('draft-secret').textContent = '';
   el('draft-grant').hidden = true;
 }
-function reset() {editing = null; el('editor').reset(); el('name').readOnly = false; el('editing').textContent = 'New skill'; el('editor-panel').querySelector('summary').textContent = 'New skill'; el('editor-panel').open = false;}
+function reset() {editing = null; el('editor').reset(); el('name').readOnly = false; el('editor-panel').querySelector('summary').textContent = 'New skill'; el('editor-panel').open = false;}
 function decode(file) {
   if (!file) return null;
   try {return new TextDecoder('utf-8', {fatal:true}).decode(Uint8Array.from(atob(file.data), c=>c.charCodeAt(0)));}
@@ -160,14 +160,18 @@ function render(skills) {
   const button=(action,label,icon,handler)=>actions.append(iconButton(action,label,icon,handler));
   button('edit','Edit skill and note','edit',()=>{
    editing={base:d?.base_revision ?? revision,draft:draft_revision};
-   el('name').value=name; el('name').readOnly=true; el('editing').textContent='Edit '+name;
+   el('name').value=name; el('name').readOnly=true;
    el('editor-panel').querySelector('summary').textContent='Edit '+name;
    el('content').value=decode((d ?? p).files['SKILL.md']) ?? ''; el('note').value=(d ?? p).note ?? '';
    el('editor-panel').open=true; el('content').focus();
   });
   if (d) {
    const panel=create('details',''); panel.className='skill-review'; panel.append(create('summary','Review draft · revision '+draft_revision));
-   review(panel,p,d); card.append(panel);
+   let reviewed=false;
+   panel.addEventListener('toggle',()=>{
+    if (panel.open && !reviewed) {reviewed=true; review(panel,p,d);}
+   });
+   card.append(panel);
    button('review','Review draft','review',()=>{panel.open=!panel.open;});
    const reviewActions=create('div',''); reviewActions.className='form-actions';
    reviewActions.append(

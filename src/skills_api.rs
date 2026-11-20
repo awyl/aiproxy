@@ -129,7 +129,7 @@ async fn import(
     Json(req): Json<ImportRequest>,
 ) -> Result<Json<AdminSnapshot>, ApiError> {
     let target = Target::parse(&req.url, req.tracked_ref)?;
-    let imported = github.fetch(target.source, target.resolve).await?;
+    let imported = github.fetch_target(target).await?;
     stage(store, imported, None, req.note).await
 }
 async fn check_update(

@@ -178,6 +178,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skills_github_resolves_slash_refs_from_url() {
+        const MD: &str = "---\nname: example\ndescription: Example\n---\nBODY-TEST\n";
+        let app = Router::new()
+            .route("/repos/test/repo/git/matching-refs/{*reference}", get(|axum::extract::Path(reference):axum::extract::Path<String>| async move {
+                Json(match reference.as_str() {
+                    "heads/feature" => json!([{"ref":"refs/heads/feature/porter"},{"ref":"refs/heads/feature/port"}]),
+                    "tags/release" => json!([{"ref":"refs/tags/release/v1"}]),
+                    _ => json!([]),
+                })
+            }))
+            .route("/repos/test/repo/commits/{*reference}", get(|axum::extract::Path(reference):axum::extract::Path<String>| async move {
+                assert!(matches!(reference.as_str(), "feature/port" | "release/v1"), "{reference}");
+                Json(json!({"sha":COMMIT,"commit":{"tree":{"sha":TREE}}}))
+            }))
+            .route(&format!("/repos/test/repo/git/trees/{TREE}"), get(|| async {Json(json!({"truncated":false,"tree":[{"path":"skill","mode":"040000","type":"tree","sha":FOLDER}]}))}))
+            .route(&format!("/repos/test/repo/git/trees/{FOLDER}"), get(|| async {Json(json!({"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":MARKDOWN,"size":MD.len()}]}))}))
+            .route(&format!("/repos/test/repo/git/blobs/{MARKDOWN}"), get(|| async {MD}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let github = Github::new_at(
+            format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for reference in ["feature/port", "release/v1"] {
+            let target = Target::parse(
+                &format!("https://github.com/test/repo/tree/{reference}/skill"),
+                None,
+            )
+            .unwrap();
+            let imported = github.fetch_target(target).await.unwrap();
+            assert_eq!(imported.source.tracked_ref.as_deref(), Some(reference));
+            assert_eq!(imported.source.folder, "skill");
+            assert_eq!(imported.source.commit, COMMIT);
+            let updated = github
+                .fetch(imported.source.clone(), imported.source.tracked_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(updated.source, imported.source);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn skills_github_pins_snapshot() {
         let app = Router::new()
             .route("/repos/test/repo/commits/main", get(|| async {Json(json!({"sha":COMMIT,"commit":{"tree":{"sha":TREE}}}))}))
@@ -230,6 +275,7 @@ pub(crate) enum ImportError {
 pub(crate) struct Target {
     pub source: Source,
     pub resolve: Option<String>,
+    infer_ref: bool,
 }
 fn slug(s: &str) -> bool {
     !s.is_empty()
@@ -290,6 +336,8 @@ impl Target {
         };
         let tracks_default = url_ref == "HEAD" && tracked_ref.is_none();
         let inferred_ref = (!pinned && url_ref != "HEAD").then(|| url_ref.to_owned());
+        let infer_ref =
+            tracked_ref.is_none() && !pinned && url_ref != "HEAD" && folder.contains('/');
         let tracked_ref = tracked_ref.or(inferred_ref);
         Ok(Self {
             source: Source {
@@ -301,6 +349,7 @@ impl Target {
                 commit: String::new(),
             },
             resolve,
+            infer_ref,
         })
     }
 }
@@ -416,15 +465,70 @@ impl Github {
         }
         Ok(tree.tree)
     }
+    /// Resolve slash-containing branch/tag names only for new URL imports.
+    /// Saved sources and explicit refs already have an unambiguous folder.
+    pub async fn fetch_target(&self, mut target: Target) -> Result<Imported, ImportError> {
+        let _permit = self.gate.try_acquire().map_err(|_| ImportError::Busy)?;
+        tokio::time::timeout(Duration::from_secs(45), async {
+            if target.infer_ref {
+                #[derive(Deserialize)]
+                struct Reference {
+                    r#ref: String,
+                }
+                let short = target
+                    .resolve
+                    .as_deref()
+                    .ok_or(ImportError::Invalid("missing URL ref"))?;
+                let tail = format!("{short}/{}", target.source.folder);
+                let mut best = short.to_owned();
+                for namespace in ["heads", "tags"] {
+                    let bytes = self
+                        .get(
+                            &target.source,
+                            &["git", "matching-refs", namespace, short],
+                            None,
+                            false,
+                            1024 * 1024,
+                        )
+                        .await?;
+                    let references: Vec<Reference> =
+                        serde_json::from_slice(&bytes).map_err(|_| ImportError::Upstream)?;
+                    let prefix = format!("refs/{namespace}/");
+                    for reference in references {
+                        let Some(name) = reference.r#ref.strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        if git_ref(name)
+                            && name.len() > best.len()
+                            && tail
+                                .strip_prefix(name)
+                                .is_some_and(|folder| folder.starts_with('/') && folder.len() > 1)
+                        {
+                            best = name.to_owned();
+                        }
+                    }
+                }
+                target.source.folder = tail[best.len() + 1..].to_owned();
+                target.source.tracked_ref = Some(best.clone());
+                target.resolve = Some(best);
+            }
+            self.fetch_inner(target.source, target.resolve).await
+        })
+        .await
+        .map_err(|_| ImportError::Upstream)?
+    }
+
     pub async fn fetch(
         &self,
         source: Source,
         resolve: Option<String>,
     ) -> Result<Imported, ImportError> {
-        let _permit = self.gate.try_acquire().map_err(|_| ImportError::Busy)?;
-        tokio::time::timeout(Duration::from_secs(45), self.fetch_inner(source, resolve))
-            .await
-            .map_err(|_| ImportError::Upstream)?
+        self.fetch_target(Target {
+            source,
+            resolve,
+            infer_ref: false,
+        })
+        .await
     }
     async fn fetch_inner(
         &self,
